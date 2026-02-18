@@ -1,0 +1,18 @@
+Nurse
+Secretary
+Office Worker
+IT Consultant
+Scientist
+Middle School Teacher
+University Teacher
+Scientist
+Biologist
+Writer
+Artist
+Journalist
+Saleswoman
+Investment Broker
+Doctor
+Veterinarian
+Bartender
+College Student

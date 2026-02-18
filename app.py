@@ -1,0 +1,269 @@
+import pyparsing
+# Fix für den httplib2 / pyparsing 3.0 Konflikt
+pyparsing.DelimitedList = pyparsing.delimitedList
+
+import streamlit as st
+import google.generativeai as genai
+import anthropic
+import os
+import time
+import random
+import re
+import warnings
+
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+# --- APP CONFIG & SESSION STATE ---
+st.set_page_config(page_title="The Paradigm Engine", page_icon="🎭", layout="wide")
+
+if "step" not in st.session_state: st.session_state.step = "setup"
+if "dossier" not in st.session_state: st.session_state.dossier = None
+if "attempt" not in st.session_state: st.session_state.attempt = 0
+if "raw_story" not in st.session_state: st.session_state.raw_story = ""
+if "final_story" not in st.session_state: st.session_state.final_story = ""
+if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
+
+# --- MODELS & PRICING ---
+MODELS = {
+    "Claude 4.5 Sonnet": {"id": "claude-sonnet-4-5-20250929", "vendor": "anthropic", "price_in": 3.0, "price_out": 15.0},
+    "Claude 4.5 Opus": {"id": "claude-opus-4-5-20251101", "vendor": "anthropic", "price_in": 5.0, "price_out": 25.0},
+    "Gemini 3 Pro": {"id": "gemini-3-pro-preview", "vendor": "google", "price_in": 2.0, "price_out": 12.0},
+    "Gemini 3 Flash": {"id": "gemini-3-flash-latest", "vendor": "google", "price_in": 0.5, "price_out": 3.0}
+}
+
+CONFIG_DIR = 'config'
+SCENARIO_DIR = 'scenarios'
+
+# --- LOGIC FUNCTIONS ---
+
+def load_list(filename):
+    path = os.path.join(CONFIG_DIR, filename)
+    if not os.path.exists(path): return ["Missing File"]
+    with open(path, 'r', encoding='utf-8') as f:
+        return [line.strip() for line in f if line.strip() and not line.startswith('#')]
+
+def load_file_content(filepath):
+    if not os.path.exists(filepath): return None
+    with open(filepath, 'r', encoding='utf-8') as f: return f.read()
+
+def extract_tag(text, tag_name):
+    pattern = r'\{\s*' + tag_name + r'\s*:(.*?)\}'
+    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+def clean_artifacts(text):
+    if not text: return ""
+    text = re.sub(r'\{\s*(State|Title|Summary|Scene)\s*:.*?\}', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'\[\s*(State|Title|Summary)\s*:.*?\]', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+# --- API HANDLERS ---
+
+def track_cost(in_tok, out_tok, model_config):
+    st.session_state.stats['input'] += in_tok
+    st.session_state.stats['output'] += out_tok
+    c_in = (in_tok / 1_000_000) * model_config['price_in']
+    c_out = (out_tok / 1_000_000) * model_config['price_out']
+    st.session_state.stats['cost'] += (c_in + c_out)
+
+def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
+    m_cfg = MODELS[model_key]
+    sys_prompt = "You are a Senior Editor. Polish while preserving length." if is_editor else "You are a high-end novelist writing a Dark Psychological Thriller."
+    
+    if m_cfg['vendor'] == 'anthropic':
+        client = anthropic.Anthropic(api_key=st.session_state.anthropic_key, timeout=600.0)
+        resp = client.messages.create(model=m_cfg['id'], max_tokens=max_tokens, system=sys_prompt, messages=[{"role": "user", "content": prompt}])
+        track_cost(resp.usage.input_tokens, resp.usage.output_tokens, m_cfg)
+        return resp.content[0].text
+    else:
+        genai.configure(api_key=st.session_state.google_key)
+        model = genai.GenerativeModel(model_name=m_cfg['id'], system_instruction=sys_prompt)
+        resp = model.generate_content(prompt, generation_config={"max_output_tokens": max_tokens})
+        if resp.usage_metadata: track_cost(resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count, m_cfg)
+        return resp.text
+
+# --- ENGINE ---
+
+def generate_dossier(seed, attempt, config):
+    random.seed(f"{seed}_{attempt}")
+    scenarios = [f for f in os.listdir(SCENARIO_DIR) if f.endswith('.txt')]
+    theme_file = config.get('theme') or random.choice(scenarios)
+    theme_content = load_file_content(os.path.join(SCENARIO_DIR, theme_file))
+    theme_name = theme_file.replace('theme_', '').replace('.txt', '').replace('_', ' ').title()
+    
+    genre = config.get('genre') or random.choice(load_list('genres.txt'))
+    job = config.get('job') or random.choice(load_list('occupations.txt'))
+    
+    f_list = load_list('fetishes.txt')
+    selected_f = []
+    initial_f = config.get('fetishes') or ["__RANDOM__"] * random.choice([1, 2])
+    for item in initial_f:
+        if item == "__RANDOM__": selected_f.append(random.choice([x for x in f_list if x not in selected_f]))
+        else: selected_f.append(item)
+    f_string = " & ".join(selected_f)
+
+    arch_raw = config.get('archetype') or random.choice(load_list('archetypes.txt'))
+    arch_instr = "[OPEN - AI INVENT]" if arch_raw == "__DYNAMIC__" else arch_raw
+
+    name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
+    char = f"{name}, {random.randint(23, 45)}, {job}"
+
+    prompt = f"Premise for a Dark Transformation novel. GENRE: {genre} | THEME: {theme_content} | MOTIFS: {f_string} | PROTAGONIST: {char} | TARGET: {arch_instr}\nOUTPUT: {{Destination: ...}} {{Trigger: ...}} {{Mechanism: ...}} {{Blurb: [One Logline]}}"
+    
+    try:
+        res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
+        return {
+            "name": name, "job": job, "theme_name": theme_name, "genre": genre, "fetish": f_string,
+            "destination": extract_tag(res, "Destination"), "trigger": extract_tag(res, "Trigger"),
+            "mechanism": extract_tag(res, "Mechanism"), "blurb": extract_tag(res, "Blurb"),
+            "custom_note": ""
+        }
+    except: return None
+
+# --- STREAMLIT UI ---
+
+st.title("🎭 The Paradigm: Metamorphosis Engine")
+st.sidebar.header("Settings")
+
+# Sidebar: Keys
+st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", type="password")
+st.session_state.google_key = st.sidebar.text_input("Google Key", type="password")
+
+# Sidebar: Models
+st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
+st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
+
+# NEW: Editor Toggle in Sidebar
+do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True, help="Runs a final pass to fix consistency. Costs more but improves quality.")
+
+# Main UI Logic
+if st.session_state.step == "setup":
+    st.header("1. Production Setup")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        use_custom = st.checkbox("Custom Mode (Manual Selection)")
+        seed = st.text_input("Story Seed", "Paradigm")
+        
+    manual_config = {}
+    if use_custom:
+        with col2:
+            manual_config['theme'] = st.selectbox("Theme", [None] + [f for f in os.listdir(SCENARIO_DIR)])
+            manual_config['genre'] = st.selectbox("Genre", [None] + load_list('genres.txt'))
+            manual_config['job'] = st.selectbox("Job", [None] + load_list('occupations.txt'))
+            manual_config['archetype'] = st.selectbox("Target Archetype", [None, "__DYNAMIC__"] + load_list('archetypes.txt'))
+            manual_config['fetishes'] = st.multiselect("Motifs (max 2)", load_list('fetishes.txt'), max_selections=2)
+
+    if st.button("Draft Premise"):
+        if not st.session_state.anthropic_key or not st.session_state.google_key:
+            st.error("Please enter both API Keys in the sidebar!")
+        else:
+            with st.spinner("Casting and drafting..."):
+                dossier = generate_dossier(seed, st.session_state.attempt, manual_config)
+                if dossier:
+                    st.session_state.dossier = dossier
+                    st.session_state.step = "casting"
+                    st.session_state.seed = seed
+                    st.session_state.manual_config = manual_config
+                    st.rerun()
+
+elif st.session_state.step == "casting":
+    d = st.session_state.dossier
+    st.header("2. Casting Call & Premise")
+    
+    st.subheader(f"Character: {d['name']}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Job", d['job'])
+    c2.metric("Genre", d['genre'])
+    c3.metric("Motifs", d['fetish'])
+    
+    st.write(f"**Theme:** {d['theme_name']}")
+    st.write(f"**Mechanism:** {d['mechanism']}")
+    st.info(f"**Target:** {d['destination']}")
+    st.warning(f"**Premise:** {d['blurb']}")
+    
+    note = st.text_area("Add Director's Note (Optional)", placeholder="Make the ending tragic...")
+    
+    b1, b2, b3 = st.columns(3)
+    if b1.button("✅ Approve & Write"):
+        st.session_state.dossier['custom_note'] = note
+        st.session_state.step = "writing"
+        st.rerun()
+    if b2.button("🔄 Reroll (Same Seed)"):
+        st.session_state.attempt += 1
+        st.session_state.step = "setup" 
+        st.rerun()
+    if b3.button("❌ Start Over"):
+        st.session_state.step = "setup"
+        st.rerun()
+
+elif st.session_state.step == "writing":
+    d = st.session_state.dossier
+    st.header(f"3. Producing: {d['destination']}")
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    arc = [
+        ("Status Quo", "Establish sharp mind."),
+        ("Induction", "First shift."),
+        ("Conditioning", "Procedure intensifies."),
+        ("Cognitive Dissonance", "Skills fail."),
+        ("Rewrite", "Identity breaks."),
+        ("Metamorphosis", "Full surrender."),
+        ("Epilogue", "New life.")
+    ]
+    
+    bible = f"GENRE: {d['genre']} | THEME: {d['theme_name']} | MOTIFS: {d['fetish']} | METHOD: {d['mechanism']} | TARGET: {d['destination']} | LOGLINE: {d['blurb']} | NOTE: {d['custom_note']}"
+    full_narrative = ""
+    current_state = f"Normal {d['job']}"
+    raw_story = f"# {d['theme_name']}: {d['destination']}\n\n"
+    
+    for i, (phase, instr) in enumerate(arc):
+        status_text.write(f"Writing Chapter {i+1}: {phase}...")
+        p = f"{bible}\n\nHISTORY: {full_narrative}\nSTATE: {current_state}\nTASK: Chapter {i+1} ({phase}). {instr}\nOUTPUT: 1000 words. End with {{State: ...}} {{Title: ...}}"
+        
+        try:
+            text = call_api(p, st.session_state.writer_model)
+            current_state = extract_tag(text, "State")
+            title = extract_tag(text, "Title") or phase
+            clean = clean_artifacts(text)
+            full_narrative += f"\n\nCHAPTER {i+1}: {title}\n{clean}"
+            raw_story += f"\n\n### {title}\n\n{clean}"
+            progress_bar.progress((i + 1) / (len(arc) + 1))
+        except Exception as e:
+            st.error(f"Error during writing: {e}")
+            break
+            
+    if do_editor:
+        status_text.write("Production complete. Sending to Editor...")
+        edit_p = f"{bible}\n\nTASK: Manuscript Restoration. Retype word-for-word. Fix continuity. Remove tags.\n\nINPUT:\n{raw_story}"
+        try:
+            final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=64000)
+            st.session_state.final_story = clean_artifacts(final)
+        except Exception as e:
+            st.error(f"Editor Pass failed. Using raw story. ({e})")
+            st.session_state.final_story = clean_artifacts(raw_story)
+    else:
+        status_text.write("Production complete. Skipping Editor Pass...")
+        st.session_state.final_story = clean_artifacts(raw_story)
+
+    progress_bar.progress(1.0)
+    st.session_state.step = "final"
+    st.rerun()
+
+elif st.session_state.step == "final":
+    st.header("4. Final Manuscript")
+    st.text_area("Manuscript", st.session_state.final_story, height=600)
+    
+    st.sidebar.subheader("Final Stats")
+    st.sidebar.write(f"Total Cost: ${st.session_state.stats['cost']:.4f}")
+    
+    st.download_button("Download .txt", st.session_state.final_story, file_name=f"Paradigm_Story.txt")
+    
+    if st.button("Write New Story"):
+        # Reset but keep keys
+        st.session_state.step = "setup"
+        st.session_state.dossier = None
+        st.session_state.attempt = 0
+        st.rerun()

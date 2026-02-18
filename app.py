@@ -25,8 +25,8 @@ if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "outpu
 
 # --- MODELS & PRICING ---
 MODELS = {
-    "Claude 4.5 Sonnet": {"id": "claude-sonnet-4-5-20250929", "vendor": "anthropic", "price_in": 3.0, "price_out": 15.0},
-    "Claude 4.5 Opus": {"id": "claude-opus-4-5-20251101", "vendor": "anthropic", "price_in": 5.0, "price_out": 25.0},
+    "Claude 4.5 Sonnet": {"id": "claude-sonnet-4-6", "vendor": "anthropic", "price_in": 3.0, "price_out": 15.0},
+    "Claude 4.5 Opus": {"id": "claude-opus-4-6", "vendor": "anthropic", "price_in": 5.0, "price_out": 25.0},
     "Gemini 3 Pro": {"id": "gemini-3-pro-preview", "vendor": "google", "price_in": 2.0, "price_out": 12.0},
     "Gemini 3 Flash": {"id": "gemini-3-flash-latest", "vendor": "google", "price_in": 0.5, "price_out": 3.0}
 }

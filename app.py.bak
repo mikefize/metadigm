@@ -34,7 +34,7 @@ MODELS = {
 CONFIG_DIR = 'config'
 SCENARIO_DIR = 'scenarios'
 
-# --- LOGIC FUNCTIONS (STOLEN FROM V56) ---
+# --- LOGIC FUNCTIONS ---
 
 def load_list(filename):
     path = os.path.join(CONFIG_DIR, filename)
@@ -87,7 +87,6 @@ def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
 
 def generate_dossier(seed, attempt, config):
     random.seed(f"{seed}_{attempt}")
-    
     scenarios = [f for f in os.listdir(SCENARIO_DIR) if f.endswith('.txt')]
     theme_file = config.get('theme') or random.choice(scenarios)
     theme_content = load_file_content(os.path.join(SCENARIO_DIR, theme_file))
@@ -134,6 +133,9 @@ st.session_state.google_key = st.sidebar.text_input("Google Key", type="password
 # Sidebar: Models
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
+
+# NEW: Editor Toggle in Sidebar
+do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True, help="Runs a final pass to fix consistency. Costs more but improves quality.")
 
 # Main UI Logic
 if st.session_state.step == "setup":
@@ -190,7 +192,7 @@ elif st.session_state.step == "casting":
         st.rerun()
     if b2.button("🔄 Reroll (Same Seed)"):
         st.session_state.attempt += 1
-        st.session_state.step = "setup" # Quick way to re-trigger
+        st.session_state.step = "setup" 
         st.rerun()
     if b3.button("❌ Start Over"):
         st.session_state.step = "setup"
@@ -202,7 +204,6 @@ elif st.session_state.step == "writing":
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Narrative Logic
     arc = [
         ("Status Quo", "Establish sharp mind."),
         ("Induction", "First shift."),
@@ -234,20 +235,22 @@ elif st.session_state.step == "writing":
             st.error(f"Error during writing: {e}")
             break
             
-    status_text.write("Production complete. Sending to Editor...")
-    
-    # Editor Pass
-    edit_p = f"{bible}\n\nTASK: Manuscript Restoration. Retype word-for-word. Fix continuity. Remove tags.\n\nINPUT:\n{raw_story}"
-    try:
-        final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=64000)
-        st.session_state.final_story = clean_artifacts(final)
-        progress_bar.progress(1.0)
-        st.session_state.step = "final"
-        st.rerun()
-    except Exception as e:
-        st.session_state.final_story = raw_story # Fallback
-        st.session_state.step = "final"
-        st.rerun()
+    if do_editor:
+        status_text.write("Production complete. Sending to Editor...")
+        edit_p = f"{bible}\n\nTASK: Manuscript Restoration. Retype word-for-word. Fix continuity. Remove tags.\n\nINPUT:\n{raw_story}"
+        try:
+            final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=64000)
+            st.session_state.final_story = clean_artifacts(final)
+        except Exception as e:
+            st.error(f"Editor Pass failed. Using raw story. ({e})")
+            st.session_state.final_story = clean_artifacts(raw_story)
+    else:
+        status_text.write("Production complete. Skipping Editor Pass...")
+        st.session_state.final_story = clean_artifacts(raw_story)
+
+    progress_bar.progress(1.0)
+    st.session_state.step = "final"
+    st.rerun()
 
 elif st.session_state.step == "final":
     st.header("4. Final Manuscript")
@@ -259,5 +262,8 @@ elif st.session_state.step == "final":
     st.download_button("Download .txt", st.session_state.final_story, file_name=f"Paradigm_Story.txt")
     
     if st.button("Write New Story"):
+        # Reset but keep keys
         st.session_state.step = "setup"
+        st.session_state.dossier = None
+        st.session_state.attempt = 0
         st.rerun()

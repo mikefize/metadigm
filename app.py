@@ -1,5 +1,7 @@
 import pyparsing
+# Fix for httplib2 / pyparsing 3.0 conflict
 pyparsing.DelimitedList = pyparsing.delimitedList
+
 import streamlit as st
 import google.generativeai as genai
 import anthropic
@@ -17,8 +19,8 @@ st.set_page_config(page_title="The Paradigm Engine", page_icon="🎭", layout="w
 if "step" not in st.session_state: st.session_state.step = "setup"
 if "dossier" not in st.session_state: st.session_state.dossier = None
 if "attempt" not in st.session_state: st.session_state.attempt = 0
-if "raw_story" not in st.session_state: st.session_state.raw_story = ""
-if "final_story" not in st.session_state: st.session_state.final_story = ""
+if "manual_config" not in st.session_state: st.session_state.manual_config = {}
+if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
 if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
 
 # --- MODELS & PRICING ---
@@ -33,7 +35,6 @@ CONFIG_DIR = 'config'
 SCENARIO_DIR = 'scenarios'
 
 # --- LOGIC FUNCTIONS ---
-
 def load_list(filename):
     path = os.path.join(CONFIG_DIR, filename)
     if not os.path.exists(path): return ["Missing File"]
@@ -45,35 +46,22 @@ def load_file_content(filepath):
     with open(filepath, 'r', encoding='utf-8') as f: return f.read()
 
 def extract_tag(text, tag_name):
-    """
-    Versucht, den Tag in verschiedenen Formaten zu finden.
-    1. {Tag: Inhalt}
-    2. **Tag**: Inhalt
-    3. Tag: Inhalt
-    """
+    # Robust extraction handling bolding and spacing
     if not text: return ""
-    
-    # Versuch 1: Strenge Klammern (Multi-Line support)
     match = re.search(r'\{\s*' + tag_name + r'\s*:(.*?)\}', text, re.DOTALL | re.IGNORECASE)
     if match: return match.group(1).strip()
-    
-    # Versuch 2: Markdown Bold oder Plain Text am Zeilenanfang
-    # Sucht nach "Tag:" oder "**Tag**:" gefolgt von Text bis zum nächsten Zeilenumbruch
     match = re.search(r'(?:^|\n|\*)\s*' + tag_name + r'(?:\*\*|)\s*:\s*(.*)', text, re.IGNORECASE)
     if match: return match.group(1).strip()
-    
     return ""
 
 def clean_artifacts(text):
     if not text: return ""
-    # Entfernt alles in geschweiften Klammern, was wie Metadaten aussieht
     text = re.sub(r'\{\s*(State|Title|Summary|Scene)\s*:.*?\}', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'\[\s*(State|Title|Summary)\s*:.*?\]', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
 # --- API HANDLERS ---
-
 def track_cost(in_tok, out_tok, model_config):
     st.session_state.stats['input'] += in_tok
     st.session_state.stats['output'] += out_tok
@@ -94,10 +82,9 @@ def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
         else:
             genai.configure(api_key=st.session_state.google_key)
             model = genai.GenerativeModel(model_name=m_cfg['id'], system_instruction=sys_prompt)
-            # Gemini Safety Settings Bypass
             safe = [
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}, # Aggressive setting
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ]
@@ -108,7 +95,6 @@ def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
         return f"API ERROR: {str(e)}"
 
 # --- ENGINE ---
-
 def generate_dossier(seed, attempt, config):
     random.seed(f"{seed}_{attempt}")
     
@@ -124,7 +110,9 @@ def generate_dossier(seed, attempt, config):
     selected_f = []
     initial_f = config.get('fetishes') or ["__RANDOM__"] * random.choice([1, 2])
     for item in initial_f:
-        if item == "__RANDOM__": selected_f.append(random.choice([x for x in f_list if x not in selected_f]))
+        if item == "__RANDOM__": 
+            avail = [x for x in f_list if x not in selected_f]
+            if avail: selected_f.append(random.choice(avail))
         else: selected_f.append(item)
     f_string = " & ".join(selected_f)
 
@@ -134,24 +122,24 @@ def generate_dossier(seed, attempt, config):
     name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
     char = f"{name}, {random.randint(23, 45)}, {job}"
 
+    # EXPANDED PROMPT FOR BETTER BLURB
     prompt = f"""
     TASK: Premise for a psychological transformation novel.
     GENRE: {genre} | THEME: {theme_content} | MOTIFS: {f_string} | PROTAGONIST: {char} | TARGET: {arch_instr}
     
     INSTRUCTIONS:
-    1. Define the Destination Archetype clearly.
+    1. Define the Destination Archetype.
     2. Define the Plot Hook/Premise.
     
     OUTPUT FORMAT (STRICT):
     {{Destination: [Archetype Name]}}
     {{Trigger: [Why she enters]}}
     {{Mechanism: [Method]}}
-    {{Blurb: [Plot summary]}}
+    {{Blurb: [Write a compelling 3-sentence plot summary describing the conflict and the trap.]}}
     """
     
     res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
     
-    # Fallback Extraction
     dest = extract_tag(res, "Destination")
     trig = extract_tag(res, "Trigger")
     mech = extract_tag(res, "Mechanism")
@@ -160,7 +148,7 @@ def generate_dossier(seed, attempt, config):
     return {
         "name": name, "job": job, "theme_name": theme_name, "genre": genre, "fetish": f_string,
         "destination": dest, "trigger": trig, "mechanism": mech, "blurb": blurb,
-        "raw_response": res, # SAVE FULL RESPONSE FOR FALLBACK DISPLAY
+        "raw_response": res,
         "custom_note": ""
     }
 
@@ -169,16 +157,13 @@ def generate_dossier(seed, attempt, config):
 st.title("🎭 The Paradigm: Metamorphosis Engine")
 st.sidebar.header("Settings")
 
-# Sidebar: Keys
 st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", type="password")
 st.session_state.google_key = st.sidebar.text_input("Google Key", type="password")
 
-# Sidebar: Models
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
 
-# Main UI Logic
 if st.session_state.step == "setup":
     st.header("1. Production Setup")
     col1, col2 = st.columns(2)
@@ -200,13 +185,14 @@ if st.session_state.step == "setup":
         if not st.session_state.anthropic_key or not st.session_state.google_key:
             st.error("Please enter both API Keys in the sidebar!")
         else:
+            st.session_state.manual_config = manual_config
+            st.session_state.seed = seed
+            
             with st.spinner("Casting and drafting..."):
                 dossier = generate_dossier(seed, st.session_state.attempt, manual_config)
                 if dossier:
                     st.session_state.dossier = dossier
                     st.session_state.step = "casting"
-                    st.session_state.seed = seed
-                    st.session_state.manual_config = manual_config
                     st.rerun()
 
 elif st.session_state.step == "casting":
@@ -221,8 +207,6 @@ elif st.session_state.step == "casting":
     
     st.write(f"**Theme:** {d['theme_name']}")
     
-    # --- SMART DISPLAY LOGIC ---
-    # If extraction worked, show pretty fields. If not, show raw output.
     if d['blurb'] and d['destination']:
         st.write(f"**Mechanism:** {d['mechanism']}")
         st.info(f"**Target:** {d['destination']}")
@@ -239,10 +223,16 @@ elif st.session_state.step == "casting":
         st.session_state.dossier['custom_note'] = note
         st.session_state.step = "writing"
         st.rerun()
+        
     if b2.button("🔄 Reroll (Same Seed)"):
+        # Logic: Increment attempt, regenerate dossier, stay on 'casting' page
         st.session_state.attempt += 1
-        st.session_state.step = "setup"
-        st.rerun()
+        with st.spinner("Rerolling Premise..."):
+            new_dossier = generate_dossier(st.session_state.seed, st.session_state.attempt, st.session_state.manual_config)
+            if new_dossier:
+                st.session_state.dossier = new_dossier
+                st.rerun()
+                
     if b3.button("❌ Start Over"):
         st.session_state.step = "setup"
         st.rerun()
@@ -263,10 +253,8 @@ elif st.session_state.step == "writing":
         ("Epilogue", "New life.")
     ]
     
-    # Use fallback if blurb is missing
     premise_text = d['blurb'] if d['blurb'] else d['raw_response']
-    
-    bible = f"GENRE: {d['genre']} | THEME: {d['theme_name']} | MOTIFS: {d['fetish']} | TARGET: {d['destination']} | NOTE: {d['custom_note']} | PREMISE: {premise_text}"
+    bible = f"GENRE: {d['genre']} | THEME: {d['theme_name']} | MOTIFS: {d['fetish']} | METHOD: {d['mechanism']} | TARGET: {d['destination']} | LOGLINE: {d['blurb']} | NOTE: {d['custom_note']}"
     full_narrative = ""
     current_state = f"Normal {d['job']}"
     raw_story = f"# {d['theme_name']}: {d.get('destination', 'Transformation')}\n\n"

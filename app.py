@@ -15,23 +15,15 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-# --- SAFE SESSION STATE INITIALIZATION ---
-if "step" not in st.session_state: 
-    st.session_state.step = "setup"
-if "dossier" not in st.session_state: 
-    st.session_state.dossier = None
-if "attempt" not in st.session_state: 
-    st.session_state.attempt = 0
-if "raw_story" not in st.session_state: 
-    st.session_state.raw_story = ""
-if "final_story" not in st.session_state: 
-    st.session_state.final_story = ""
-if "seed" not in st.session_state: 
-    st.session_state.seed = "Paradigm"
-if "manual_config" not in st.session_state: 
-    st.session_state.manual_config = {}
-if "stats" not in st.session_state: 
-    st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
+# --- SESSION STATE INITIALIZATION ---
+if "step" not in st.session_state: st.session_state.step = "setup"
+if "dossier" not in st.session_state: st.session_state.dossier = None
+if "attempt" not in st.session_state: st.session_state.attempt = 0
+if "raw_story" not in st.session_state: st.session_state.raw_story = ""
+if "final_story" not in st.session_state: st.session_state.final_story = ""
+if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
+if "manual_config" not in st.session_state: st.session_state.manual_config = {}
+if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
@@ -95,11 +87,19 @@ def extract_tag(text, tag_name):
     return ""
 
 def clean_artifacts(text):
+    """Safely removes metadata tags without swallowing entire paragraphs."""
     if not text: return ""
-    text = re.sub(r'\{\s*(State|Title|Summary|Scene)\s*:.*?\}', '', text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r'\[\s*(State|Title|Summary)\s*:.*?\]', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # Safe regex: Matches only inside brackets without crossing over to other brackets
+    text = re.sub(r'\{\s*(?:State|Title|Summary|Scene)\s*:[^{}]*\}', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[\s*(?:State|Title|Summary|Scene)\s*:[^\[\]]*\]', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
+
+def get_secret(key_name):
+    try:
+        return st.secrets[key_name]
+    except:
+        return ""
 
 # --- API ---
 def track_cost(in_tok, out_tok, model_config):
@@ -114,7 +114,7 @@ def track_cost(in_tok, out_tok, model_config):
 def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
     m_cfg = MODELS[model_key]
     
-    sys_prompt = "You are a Senior Editor. Polish while preserving length." if is_editor else """
+    sys_prompt = "You are a Senior Editor. Polish the text, fix continuity, but DO NOT SUMMARIZE AND DO NOT CUT CONTENT." if is_editor else """
     You are a high-end novelist writing a Dark Psychological Thriller / Erotica.
     
     **MANDATORY STYLE GUIDE:**
@@ -176,7 +176,6 @@ def generate_dossier(seed, attempt, config):
     mc_method = config.get('mc_method') or random.choice(load_list('mc_methods.txt'))
     pov = config.get('pov') or "First Person (I)"
 
-    # Antagonist Logic
     antag_raw = config.get('antagonist')
     if antag_raw is None:
         antag_raw = random.choice(load_list('antagonists.txt'))
@@ -191,7 +190,6 @@ def generate_dossier(seed, attempt, config):
         antag_instr = f"**ANTAGONIST:** {antag_raw}"
         antag_display_name = antag_raw
 
-    # Body Parts Logic
     b_list = load_list('body_parts.txt')
     initial_b = config.get('body_parts') or ["__RANDOM__"] * random.choice([2, 3])
     selected_b = []
@@ -202,7 +200,6 @@ def generate_dossier(seed, attempt, config):
         else: selected_b.append(item)
     body_string = ", ".join(selected_b)
 
-    # Fetish Logic
     f_list = load_list('fetishes.txt')
     initial_f = config.get('fetishes') or ["__RANDOM__"]
     selected_f = []
@@ -213,11 +210,8 @@ def generate_dossier(seed, attempt, config):
         else: selected_f.append(item)
     f_string = ", ".join(selected_f)
 
-    # Archetype Logic
     arch_raw = config.get('archetype')
-    if arch_raw is None:
-        arch_raw = random.choice(load_list('archetypes.txt'))
-        
+    if arch_raw is None: arch_raw = random.choice(load_list('archetypes.txt'))
     arch_instr = "[OPEN - AI INVENT]" if arch_raw == "__DYNAMIC__" else arch_raw
 
     name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
@@ -232,7 +226,7 @@ def generate_dossier(seed, attempt, config):
     - Theme: {theme_content}
     - {antag_instr}
     - Mind Control Method: {mc_method}
-    - PHYSICAL ALTERATION TARGETS: {body_string} (These body parts MUST be the primary focus of the physical changes).
+    - PHYSICAL ALTERATION TARGETS: {body_string}
     - Kink: {f_string}
     - Protagonist: {char}
     - Target Archetype: {arch_instr}
@@ -252,7 +246,6 @@ def generate_dossier(seed, attempt, config):
     
     res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
     
-    # Pick a random Story Arc based on seed
     arc_keys = list(STORY_ARCS.keys())
     selected_arc_name = random.choice(arc_keys)
     
@@ -273,8 +266,8 @@ def generate_dossier(seed, attempt, config):
 st.title("🎬 The Metamorphosis Engine")
 
 # Auto-Load Secrets
-default_anthropic = st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else ""
-default_google = st.secrets.get("GOOGLE_API_KEY", "") if hasattr(st, "secrets") else ""
+default_anthropic = get_secret("ANTHROPIC_API_KEY")
+default_google = get_secret("GOOGLE_API_KEY")
 
 st.sidebar.header("Settings")
 st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", value=default_anthropic, type="password")
@@ -302,25 +295,17 @@ if st.session_state.step == "setup":
             manual_config['theme'] = st.selectbox("Theme", [None] + [f for f in os.listdir(SCENARIO_DIR)])
             manual_config['genre'] = st.selectbox("Genre", [None] + load_list('genres.txt'))
             manual_config['job'] = st.selectbox("Job", [None] + load_list('occupations.txt'))
-            manual_config['antagonist'] = st.selectbox(
-                "Antagonist", 
-                [None, "__DYNAMIC__", "__NONE__"] + load_list('antagonists.txt'),
-                format_func=format_antagonist_option
-            )
+            manual_config['antagonist'] = st.selectbox("Antagonist", [None, "__DYNAMIC__", "__NONE__"] + load_list('antagonists.txt'), format_func=format_antagonist_option)
             manual_config['mc_method'] = st.selectbox("MC Method", [None] + load_list('mc_methods.txt'))
             
         with col3:
-            manual_config['archetype'] = st.selectbox(
-                "Target Archetype", 
-                [None, "__DYNAMIC__"] + load_list('archetypes.txt'),
-                format_func=format_archetype_option
-            )
+            manual_config['archetype'] = st.selectbox("Target Archetype", [None, "__DYNAMIC__"] + load_list('archetypes.txt'), format_func=format_archetype_option)
             manual_config['fetishes'] = st.multiselect("Core Fetishes (Max 2)", load_list('fetishes.txt'), max_selections=2)
             manual_config['body_parts'] = st.multiselect("Physical Focus (Max 3)", load_list('body_parts.txt'), max_selections=3)
 
     if st.button("Draft Premise"):
         if not st.session_state.anthropic_key and not st.session_state.google_key:
-            st.error("API Keys missing!")
+            st.error("API Keys missing! Please check the sidebar or your secrets.toml file.")
         else:
             st.session_state.manual_config = manual_config
             st.session_state.seed = seed
@@ -413,7 +398,7 @@ elif st.session_state.step == "writing":
         """
         
         try:
-            text = call_api(p, st.session_state.writer_model, max_tokens=8192)
+            text = call_api(p, st.session_state.writer_model, max_tokens=12000)
             if "API ERROR" in text:
                 st.error(text)
                 break
@@ -429,12 +414,23 @@ elif st.session_state.step == "writing":
             break
             
     if do_editor:
-        status_text.write("Editing...")
+        status_text.write("Editing (Polishing and Checking Logic)...")
         edit_p = f"{bible}\n\nTASK: Polish manuscript. Fix logic. No summaries.\n\nINPUT:\n{raw_story}"
         try:
-            final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=64000)
-            st.session_state.final_story = clean_artifacts(final)
-        except:
+            final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=65000)
+            
+            # --- LÄNGEN-SICHERHEITSCHECK FÜR DEN EDITOR ---
+            if "API ERROR" in final or not final:
+                st.warning("Editor failed to respond. Using raw unedited story.")
+                st.session_state.final_story = clean_artifacts(raw_story)
+            elif len(final) < (len(raw_story) * 0.75):
+                # Wenn der Editor mehr als 25% des Textes löscht, hat er wahrscheinlich zusammengefasst!
+                st.warning("Editor cut too much text (API Output Limit reached). Reverting to RAW unedited story to prevent data loss.")
+                st.session_state.final_story = clean_artifacts(raw_story)
+            else:
+                st.session_state.final_story = clean_artifacts(final)
+        except Exception as e:
+            st.error(f"Editor Pass failed: {e}. Using raw story.")
             st.session_state.final_story = clean_artifacts(raw_story)
     else:
         st.session_state.final_story = clean_artifacts(raw_story)
@@ -449,16 +445,17 @@ elif st.session_state.step == "final":
     
     st.sidebar.success(f"Final Cost: ${st.session_state.stats['cost']:.4f}")
     
+    # Sicherstellen, dass der String als Datei ladbar ist
     safe_seed = "".join([c for c in st.session_state.seed if c.isalnum()]).rstrip()
     
-    # Check if folder exists before offering download
-    if not os.path.exists(OUTPUT_FOLDER): os.makedirs(OUTPUT_FOLDER)
-    filename = os.path.join(OUTPUT_FOLDER, f"Story_{safe_seed}_{int(time.time())}.txt")
-    with open(filename, "w", encoding="utf-8") as f: f.write(st.session_state.final_story)
+    # Download Button reicht den String direkt als Download weiter (kein lokales Speichern nötig)
+    st.download_button(
+        label="Download Story (.txt)",
+        data=st.session_state.final_story,
+        file_name=f"Story_{safe_seed}.txt",
+        mime="text/plain"
+    )
     
-    with open(filename, "rb") as file:
-        st.download_button("Download", file, file_name=f"Story_{safe_seed}.txt")
-    
-    if st.button("New Story"):
+    if st.button("Write New Story"):
         st.session_state.step = "setup"
         st.rerun()

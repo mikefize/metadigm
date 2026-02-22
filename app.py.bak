@@ -15,12 +15,15 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-keys = ['step', 'dossier', 'attempt', 'raw_story', 'final_story', 'stats', 'seed', 'manual_config']
-for k in keys:
-    if k not in st.session_state:
-        st.session_state[k] = None if k in ['dossier', 'manual_config', 'seed'] else 0
-if 'stats' not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
-if 'step' not in st.session_state: st.session_state.step = "setup"
+# --- SESSION STATE INITIALIZATION (FIXED) ---
+if "step" not in st.session_state: st.session_state.step = "setup"
+if "dossier" not in st.session_state: st.session_state.dossier = None
+if "attempt" not in st.session_state: st.session_state.attempt = 0
+if "raw_story" not in st.session_state: st.session_state.raw_story = ""
+if "final_story" not in st.session_state: st.session_state.final_story = ""
+if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
+if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
+if "manual_config" not in st.session_state: st.session_state.manual_config = {}
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
@@ -75,9 +78,10 @@ def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
     sys_prompt = "You are a Senior Editor. Polish while preserving length." if is_editor else """
     You are a high-end novelist writing a Dark Psychological Thriller.
     RULES:
-    1. **POV:** Adhere strictly to the requested Point of View.
-    2. **SHOW, DON'T TELL:** Focus on sensory details and internal monologue.
-    3. **NO FOG:** Describe mental changes as specific psychological/biological processes (euphoria, dissociation, compliance).
+    1. **ACTIVE ANTAGONIST:** The transformation must not just "happen." It must be enforced by the Antagonist/Mechanism.
+    2. **POV:** Adhere strictly to the requested Point of View.
+    3. **SHOW, DON'T TELL:** Focus on sensory details and internal monologue.
+    4. **NO FOG:** Describe mental changes as specific psychological/biological processes.
     """
     
     try:
@@ -244,8 +248,6 @@ if st.session_state.step == "setup":
             manual_config['theme'] = st.selectbox("Theme", [None] + [f for f in os.listdir(SCENARIO_DIR)])
             manual_config['genre'] = st.selectbox("Genre", [None] + load_list('genres.txt'))
             manual_config['job'] = st.selectbox("Job", [None] + load_list('occupations.txt'))
-            
-            # Updated Antagonist Dropdown with Clean Formatting
             manual_config['antagonist'] = st.selectbox(
                 "Antagonist", 
                 [None, "__DYNAMIC__", "__NONE__"] + load_list('antagonists.txt'),
@@ -254,7 +256,6 @@ if st.session_state.step == "setup":
             manual_config['mc_method'] = st.selectbox("MC Method", [None] + load_list('mc_methods.txt'))
             
         with col3:
-            # Updated Archetype Dropdown with Clean Formatting
             manual_config['archetype'] = st.selectbox(
                 "Target Archetype", 
                 [None, "__DYNAMIC__"] + load_list('archetypes.txt'),
@@ -264,11 +265,14 @@ if st.session_state.step == "setup":
             manual_config['body_parts'] = st.multiselect("Physical Focus (Max 3)", load_list('body_parts.txt'), max_selections=3)
 
     if st.button("Draft Premise"):
-        if not st.session_state.anthropic_key or not st.session_state.google_key:
+        if not st.session_state.anthropic_key and not st.session_state.google_key:
             st.error("API Keys missing!")
         else:
             st.session_state.manual_config = manual_config
             st.session_state.seed = seed
+            # Reset Stats explicitly on new draft
+            st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
+            
             with st.spinner("Drafting..."):
                 d = generate_dossier(seed, st.session_state.attempt, manual_config)
                 if d:
@@ -319,7 +323,6 @@ elif st.session_state.step == "writing":
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    # Generic, Antagonist-Agnostic Arc
     arc = [
         ("The Hook", "Normal life + Inciting Incident. The trap is sprung/entered."),
         ("The First Alteration", "First physical change + First MC session. She resists the process."),

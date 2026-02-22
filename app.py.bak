@@ -15,15 +15,12 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-# --- SESSION STATE INITIALIZATION (FIXED) ---
-if "step" not in st.session_state: st.session_state.step = "setup"
-if "dossier" not in st.session_state: st.session_state.dossier = None
-if "attempt" not in st.session_state: st.session_state.attempt = 0
-if "raw_story" not in st.session_state: st.session_state.raw_story = ""
-if "final_story" not in st.session_state: st.session_state.final_story = ""
-if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
-if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
-if "manual_config" not in st.session_state: st.session_state.manual_config = {}
+keys = ['step', 'dossier', 'attempt', 'raw_story', 'final_story', 'stats', 'seed', 'manual_config']
+for k in keys:
+    if k not in st.session_state:
+        st.session_state[k] = None if k in ['dossier', 'manual_config', 'seed'] else 0
+if 'stats' not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
+if 'step' not in st.session_state: st.session_state.step = "setup"
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
@@ -36,7 +33,7 @@ MODELS = {
 CONFIG_DIR = 'config'
 SCENARIO_DIR = 'scenarios'
 
-# --- LOGIC FUNCTIONS ---
+# --- UTILS ---
 def load_list(filename):
     path = os.path.join(CONFIG_DIR, filename)
     if not os.path.exists(path): return ["Generic Option"]
@@ -62,7 +59,7 @@ def clean_artifacts(text):
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
-# --- API HANDLERS ---
+# --- API ---
 def track_cost(in_tok, out_tok, model_config):
     st.session_state.stats['input'] += in_tok
     st.session_state.stats['output'] += out_tok
@@ -78,19 +75,16 @@ def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
     sys_prompt = "You are a Senior Editor. Polish while preserving length." if is_editor else """
     You are a high-end novelist writing a Dark Psychological Thriller.
     RULES:
-    1. **ACTIVE ANTAGONIST:** The transformation must not just "happen." It must be enforced by the Antagonist/Mechanism.
-    2. **POV:** Adhere strictly to the requested Point of View (1st/2nd/3rd).
-    3. **SHOW, DON'T TELL:** Focus on sensory details and internal monologue.
-    4. **NO FOG:** Describe mental changes as specific psychological/biological processes.
+    1. **POV:** Adhere strictly to the requested Point of View.
+    2. **SHOW, DON'T TELL:** Focus on sensory details and internal monologue.
+    3. **NO FOG:** Describe mental changes as specific psychological/biological processes (euphoria, dissociation, compliance).
     """
     
     try:
         if m_cfg['vendor'] == 'anthropic':
             client = anthropic.Anthropic(api_key=st.session_state.anthropic_key, timeout=600.0)
             resp = client.messages.create(
-                model=m_cfg['id'], 
-                max_tokens=max_tokens, 
-                system=sys_prompt, 
+                model=m_cfg['id'], max_tokens=max_tokens, system=sys_prompt, 
                 messages=[{"role": "user", "content": prompt}]
             )
             track_cost(resp.usage.input_tokens, resp.usage.output_tokens, m_cfg)
@@ -111,7 +105,19 @@ def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
     except Exception as e:
         return f"API ERROR: {str(e)}"
 
-# --- GENERATION LOGIC ---
+# --- FORMATTING UTILS FOR UI ---
+def format_antagonist_option(x):
+    if x is None: return "Random from List"
+    if x == "__DYNAMIC__": return "Dynamic (AI Invented)"
+    if x == "__NONE__": return "NO ANTAGONIST (System/Environment driven)"
+    return x
+
+def format_archetype_option(x):
+    if x is None: return "Random from List"
+    if x == "__DYNAMIC__": return "Dynamic (AI Invented)"
+    return x
+
+# --- GENERATION ---
 def generate_dossier(seed, attempt, config):
     random.seed(f"{seed}_{attempt}")
     
@@ -122,10 +128,22 @@ def generate_dossier(seed, attempt, config):
     
     genre = config.get('genre') or random.choice(load_list('genres.txt'))
     job = config.get('job') or random.choice(load_list('occupations.txt'))
-    antagonist = config.get('antagonist') or random.choice(load_list('antagonists.txt'))
     mc_method = config.get('mc_method') or random.choice(load_list('mc_methods.txt'))
     pov = config.get('pov') or "First Person (I)"
 
+    # Antagonist Logic
+    antag_raw = config.get('antagonist')
+    if antag_raw is None:
+        antag_raw = random.choice(load_list('antagonists.txt'))
+        
+    if antag_raw == "__DYNAMIC__":
+        antag_instr = "**ANTAGONIST:** [OPEN - AI INVENT] (Invent a unique Villain/Force that perfectly fits this specific Job and Theme)."
+    elif antag_raw == "__NONE__":
+        antag_instr = "**ANTAGONIST:** [NONE]. There is no villain. The transformation happens due to an automated process, a cursed object, her own hubris, or the environment."
+    else:
+        antag_instr = f"**ANTAGONIST:** {antag_raw}"
+
+    # Body Parts Logic
     b_list = load_list('body_parts.txt')
     initial_b = config.get('body_parts') or ["__RANDOM__"] * random.choice([2, 3])
     selected_b = []
@@ -136,6 +154,7 @@ def generate_dossier(seed, attempt, config):
         else: selected_b.append(item)
     body_string = ", ".join(selected_b)
 
+    # Fetish Logic
     f_list = load_list('fetishes.txt')
     initial_f = config.get('fetishes') or ["__RANDOM__"]
     selected_f = []
@@ -146,7 +165,11 @@ def generate_dossier(seed, attempt, config):
         else: selected_f.append(item)
     f_string = ", ".join(selected_f)
 
-    arch_raw = config.get('archetype') or random.choice(load_list('archetypes.txt'))
+    # Archetype Logic
+    arch_raw = config.get('archetype')
+    if arch_raw is None:
+        arch_raw = random.choice(load_list('archetypes.txt'))
+        
     arch_instr = "[OPEN - AI INVENT]" if arch_raw == "__DYNAMIC__" else arch_raw
 
     name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
@@ -159,21 +182,23 @@ def generate_dossier(seed, attempt, config):
     - Genre: {genre}
     - POV: {pov}
     - Theme: {theme_content}
-    - Antagonist/Force: {antagonist}
+    - {antag_instr}
     - Mind Control Method: {mc_method}
-    - Physical Focus: {body_string}
-    - Kink/Fetish: {f_string}
+    - PHYSICAL ALTERATION TARGETS: {body_string} (These body parts MUST be the primary focus of the physical changes).
+    - Kink: {f_string}
     - Protagonist: {char}
-    - Target: {arch_instr}
+    - Target Archetype: {arch_instr}
     
     **INSTRUCTIONS:**
-    1. **CONFLICT:** Define how the {antagonist} actively traps or coerces the protagonist.
-    2. **DESTINATION:** Invent the specific Archetype name.
+    1. **ANTAGONIST:** If Dynamic, invent a name. If NONE, state "None (Environment/System)".
+    2. **CONFLICT:** How is the {mc_method} applied to trap the {job}?
+    3. **DESTINATION:** Invent the specific Archetype name if not provided.
     
     **OUTPUT FORMAT (STRICT):**
+    {{Antagonist: [Name/Title or "None"]}}
     {{Destination: [Archetype Name]}}
-    {{Trigger: [Why she enters]}}
-    {{Conflict: [How the Antagonist forces the change]}}
+    {{Trigger: [Why she enters the situation]}}
+    {{Conflict: [The trap mechanism / How she loses control]}}
     {{Blurb: [3-sentence summary]}}
     """
     
@@ -181,8 +206,8 @@ def generate_dossier(seed, attempt, config):
     
     return {
         "name": name, "job": job, "theme_name": theme_name, "genre": genre, 
-        "fetish": f_string, "body_parts": body_string, "antagonist": antagonist,
-        "mc_method": mc_method, "pov": pov,
+        "fetish": f_string, "body_parts": body_string, "mc_method": mc_method, "pov": pov,
+        "antagonist": extract_tag(res, "Antagonist"),
         "destination": extract_tag(res, "Destination"), 
         "trigger": extract_tag(res, "Trigger"), 
         "conflict": extract_tag(res, "Conflict"), 
@@ -201,9 +226,8 @@ st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
 st.session_state.cost_metric = st.sidebar.empty()
-st.session_state.cost_metric.metric("Budget", "$0.0000")
+st.session_state.cost_metric.metric("Budget", f"${st.session_state.stats['cost']:.4f}")
 
-# --- SETUP PHASE ---
 if st.session_state.step == "setup":
     st.header("1. Production Setup")
     col1, col2, col3 = st.columns(3)
@@ -220,11 +244,22 @@ if st.session_state.step == "setup":
             manual_config['theme'] = st.selectbox("Theme", [None] + [f for f in os.listdir(SCENARIO_DIR)])
             manual_config['genre'] = st.selectbox("Genre", [None] + load_list('genres.txt'))
             manual_config['job'] = st.selectbox("Job", [None] + load_list('occupations.txt'))
-            manual_config['antagonist'] = st.selectbox("Antagonist", [None] + load_list('antagonists.txt'))
+            
+            # Updated Antagonist Dropdown with Clean Formatting
+            manual_config['antagonist'] = st.selectbox(
+                "Antagonist", 
+                [None, "__DYNAMIC__", "__NONE__"] + load_list('antagonists.txt'),
+                format_func=format_antagonist_option
+            )
             manual_config['mc_method'] = st.selectbox("MC Method", [None] + load_list('mc_methods.txt'))
             
         with col3:
-            manual_config['archetype'] = st.selectbox("Target Archetype", [None, "__DYNAMIC__"] + load_list('archetypes.txt'))
+            # Updated Archetype Dropdown with Clean Formatting
+            manual_config['archetype'] = st.selectbox(
+                "Target Archetype", 
+                [None, "__DYNAMIC__"] + load_list('archetypes.txt'),
+                format_func=format_archetype_option
+            )
             manual_config['fetishes'] = st.multiselect("Core Fetishes (Max 2)", load_list('fetishes.txt'), max_selections=2)
             manual_config['body_parts'] = st.multiselect("Physical Focus (Max 3)", load_list('body_parts.txt'), max_selections=3)
 
@@ -241,7 +276,6 @@ if st.session_state.step == "setup":
                     st.session_state.step = "casting"
                     st.rerun()
 
-# --- CASTING PHASE ---
 elif st.session_state.step == "casting":
     d = st.session_state.dossier
     st.header("2. Casting Call")
@@ -253,7 +287,7 @@ elif st.session_state.step == "casting":
     c4.metric("POV", d['pov'])
     
     st.subheader(f"{d['name']} -> {d.get('destination', 'Unknown')}")
-    st.write(f"**Physical Changes:** {d['body_parts']}")
+    st.write(f"**Targeted Physical Changes:** {d['body_parts']}")
     
     if d['blurb']:
         st.info(f"**Conflict:** {d['conflict']}")
@@ -279,20 +313,20 @@ elif st.session_state.step == "casting":
         st.session_state.step = "setup"
         st.rerun()
 
-# --- WRITING PHASE ---
 elif st.session_state.step == "writing":
     d = st.session_state.dossier
     st.header(f"3. Filming: {d.get('destination', 'Story')}")
     progress_bar = st.progress(0)
     status_text = st.empty()
     
+    # Generic, Antagonist-Agnostic Arc
     arc = [
-        ("The Hook", "Normal life + Inciting Incident. Antagonist makes first move."),
-        ("The First Alteration", "First physical change + First MC session. She resists."),
-        ("The Escalation", "Physical changes worsen. Antagonist tightens control."),
+        ("The Hook", "Normal life + Inciting Incident. The trap is sprung/entered."),
+        ("The First Alteration", "First physical change + First MC session. She resists the process."),
+        ("The Escalation", "Physical changes worsen. The coercive force tightens control."),
         ("The Mental Crack", "The 'Fog' or Logic Virus sets in. Resistance falters."),
-        ("The Breaking Point", "Major event where she is forced to act against her will."),
-        ("Metamorphosis", "Total surrender of identity. Antagonist wins."),
+        ("The Breaking Point", "Major event where she acts against her own original will."),
+        ("Metamorphosis", "Total surrender of identity. The new persona solidifies."),
         ("Epilogue", "Life in the new role.")
     ]
     
@@ -300,7 +334,8 @@ elif st.session_state.step == "writing":
     bible = f"""
     GENRE: {d['genre']} | THEME: {d['theme_name']} | POV: {d['pov']}
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
-    PHYSICAL FOCUS: {d['body_parts']} | FETISHES: {d['fetish']}
+    ALTERATION TARGETS: {d['body_parts']} (Ensure these body parts undergo extreme transformation).
+    FETISHES: {d['fetish']}
     TARGET: {d['destination']} | NOTE: {d['custom_note']}
     PREMISE: {premise} | CONFLICT: {d['conflict']}
     """
@@ -336,7 +371,6 @@ elif st.session_state.step == "writing":
             st.error(f"Error: {e}")
             break
             
-    # Editor Logic
     if do_editor:
         status_text.write("Editing...")
         edit_p = f"{bible}\n\nTASK: Polish manuscript. Fix logic. No summaries.\n\nINPUT:\n{raw_story}"
@@ -352,7 +386,6 @@ elif st.session_state.step == "writing":
     st.session_state.step = "final"
     st.rerun()
 
-# --- FINAL PHASE ---
 elif st.session_state.step == "final":
     st.header("4. Final Cut")
     st.text_area("Story", st.session_state.final_story, height=600)

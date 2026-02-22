@@ -15,15 +15,15 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-# --- SESSION STATE INITIALIZATION (FIXED) ---
+# --- SESSION STATE INITIALIZATION (100% FIXED) ---
 if "step" not in st.session_state: st.session_state.step = "setup"
 if "dossier" not in st.session_state: st.session_state.dossier = None
 if "attempt" not in st.session_state: st.session_state.attempt = 0
 if "raw_story" not in st.session_state: st.session_state.raw_story = ""
 if "final_story" not in st.session_state: st.session_state.final_story = ""
-if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
 if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
 if "manual_config" not in st.session_state: st.session_state.manual_config = {}
+if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
@@ -229,6 +229,8 @@ st.session_state.google_key = st.sidebar.text_input("Google Key", type="password
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
+
+# THE LIVE BUDGET TRACKER
 st.session_state.cost_metric = st.sidebar.empty()
 st.session_state.cost_metric.metric("Budget", f"${st.session_state.stats['cost']:.4f}")
 
@@ -248,6 +250,7 @@ if st.session_state.step == "setup":
             manual_config['theme'] = st.selectbox("Theme", [None] + [f for f in os.listdir(SCENARIO_DIR)])
             manual_config['genre'] = st.selectbox("Genre", [None] + load_list('genres.txt'))
             manual_config['job'] = st.selectbox("Job", [None] + load_list('occupations.txt'))
+            
             manual_config['antagonist'] = st.selectbox(
                 "Antagonist", 
                 [None, "__DYNAMIC__", "__NONE__"] + load_list('antagonists.txt'),
@@ -272,6 +275,7 @@ if st.session_state.step == "setup":
             st.session_state.seed = seed
             # Reset Stats explicitly on new draft
             st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
+            st.session_state.cost_metric.metric("Budget", "$0.0000")
             
             with st.spinner("Drafting..."):
                 d = generate_dossier(seed, st.session_state.attempt, manual_config)
@@ -286,7 +290,7 @@ elif st.session_state.step == "casting":
     
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Protagonist", d['job'])
-    c2.metric("Antagonist", d['antagonist'])
+    c2.metric("Antagonist", d['antagonist']) 
     c3.metric("MC Method", d['mc_method'])
     c4.metric("POV", d['pov'])
     

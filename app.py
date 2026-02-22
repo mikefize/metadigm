@@ -1,5 +1,4 @@
 import pyparsing
-# Fix for httplib2 / pyparsing 3.0 conflict
 pyparsing.DelimitedList = pyparsing.delimitedList
 
 import streamlit as st
@@ -13,31 +12,31 @@ import warnings
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
 
-# --- APP CONFIG & SESSION STATE ---
-st.set_page_config(page_title="The Paradigm Engine", page_icon="🎭", layout="wide")
+# --- APP CONFIG ---
+st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-if "step" not in st.session_state: st.session_state.step = "setup"
-if "dossier" not in st.session_state: st.session_state.dossier = None
-if "attempt" not in st.session_state: st.session_state.attempt = 0
-if "manual_config" not in st.session_state: st.session_state.manual_config = {}
-if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
-if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
+keys = ['step', 'dossier', 'attempt', 'raw_story', 'final_story', 'stats', 'seed', 'manual_config']
+for k in keys:
+    if k not in st.session_state:
+        st.session_state[k] = None if k in ['dossier', 'manual_config', 'seed'] else 0
+if 'stats' not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
+if 'step' not in st.session_state: st.session_state.step = "setup"
 
-# --- MODELS & PRICING ---
+# --- MODEL DEFINITIONS ---
 MODELS = {
-    "Claude 4.5 Sonnet": {"id": "claude-sonnet-4-5-20250929", "vendor": "anthropic", "price_in": 3.0, "price_out": 15.0},
-    "Claude 4.5 Opus": {"id": "claude-opus-4-5-20251101", "vendor": "anthropic", "price_in": 5.0, "price_out": 25.0},
-    "Gemini 3 Pro": {"id": "gemini-3-pro-preview", "vendor": "google", "price_in": 2.0, "price_out": 12.0},
-    "Gemini 3 Flash": {"id": "gemini-3-flash-latest", "vendor": "google", "price_in": 0.5, "price_out": 3.0}
+    "1": {"name": "Claude 4.5 Sonnet", "id": "claude-sonnet-4-6", "vendor": "anthropic", "price_in": 3.00, "price_out": 15.00},
+    "2": {"name": "Claude 4.5 Opus", "id": "claude-opus-4-6", "vendor": "anthropic", "price_in": 5.00, "price_out": 25.00},
+    "3": {"name": "Gemini 3 Pro", "id": "gemini-3-pro-preview", "vendor": "google", "price_in": 2.00, "price_out": 12.00},
+    "4": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.5, "price_out": 3.00}
 }
 
 CONFIG_DIR = 'config'
 SCENARIO_DIR = 'scenarios'
 
-# --- LOGIC FUNCTIONS ---
+# --- UTILS ---
 def load_list(filename):
     path = os.path.join(CONFIG_DIR, filename)
-    if not os.path.exists(path): return ["Missing File"]
+    if not os.path.exists(path): return ["Generic Option"]
     with open(path, 'r', encoding='utf-8') as f:
         return [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
@@ -46,7 +45,6 @@ def load_file_content(filepath):
     with open(filepath, 'r', encoding='utf-8') as f: return f.read()
 
 def extract_tag(text, tag_name):
-    # Robust extraction handling bolding and spacing
     if not text: return ""
     match = re.search(r'\{\s*' + tag_name + r'\s*:(.*?)\}', text, re.DOTALL | re.IGNORECASE)
     if match: return match.group(1).strip()
@@ -61,22 +59,35 @@ def clean_artifacts(text):
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
-# --- API HANDLERS ---
+# --- API ---
 def track_cost(in_tok, out_tok, model_config):
     st.session_state.stats['input'] += in_tok
     st.session_state.stats['output'] += out_tok
     c_in = (in_tok / 1_000_000) * model_config['price_in']
     c_out = (out_tok / 1_000_000) * model_config['price_out']
     st.session_state.stats['cost'] += (c_in + c_out)
+    if 'cost_metric' in st.session_state:
+        st.session_state.cost_metric.metric("Budget", f"${st.session_state.stats['cost']:.4f}")
 
 def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
     m_cfg = MODELS[model_key]
-    sys_prompt = "You are a Senior Editor. Polish while preserving length." if is_editor else "You are a high-end novelist writing a Dark Psychological Thriller."
+    
+    sys_prompt = "You are a Senior Editor. Polish while preserving length." if is_editor else """
+    You are a high-end novelist writing a Dark Psychological Thriller.
+    RULES:
+    1. **ACTIVE ANTAGONIST:** The transformation must be enforced by the Antagonist.
+    2. **POV:** Adhere strictly to the requested Point of View.
+    3. **SHOW, DON'T TELL:** Focus on sensory details and internal monologue.
+    4. **NO FOG:** Describe mental changes as specific psychological processes.
+    """
     
     try:
         if m_cfg['vendor'] == 'anthropic':
             client = anthropic.Anthropic(api_key=st.session_state.anthropic_key, timeout=600.0)
-            resp = client.messages.create(model=m_cfg['id'], max_tokens=max_tokens, system=sys_prompt, messages=[{"role": "user", "content": prompt}])
+            resp = client.messages.create(
+                model=m_cfg['id'], max_tokens=max_tokens, system=sys_prompt, 
+                messages=[{"role": "user", "content": prompt}]
+            )
             track_cost(resp.usage.input_tokens, resp.usage.output_tokens, m_cfg)
             return resp.content[0].text
         else:
@@ -89,12 +100,13 @@ def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ]
             resp = model.generate_content(prompt, generation_config={"max_output_tokens": max_tokens}, safety_settings=safe)
-            if resp.usage_metadata: track_cost(resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count, m_cfg)
+            if resp.usage_metadata: 
+                track_cost(resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count, m_cfg)
             return resp.text
     except Exception as e:
         return f"API ERROR: {str(e)}"
 
-# --- ENGINE ---
+# --- GENERATION ---
 def generate_dossier(seed, attempt, config):
     random.seed(f"{seed}_{attempt}")
     
@@ -105,163 +117,212 @@ def generate_dossier(seed, attempt, config):
     
     genre = config.get('genre') or random.choice(load_list('genres.txt'))
     job = config.get('job') or random.choice(load_list('occupations.txt'))
-    
+    mc_method = config.get('mc_method') or random.choice(load_list('mc_methods.txt'))
+    pov = config.get('pov') or "First Person (I)"
+
+    # Antagonist Logic (Dynamic vs List)
+    antag_raw = config.get('antagonist') or random.choice(load_list('antagonists.txt'))
+    if antag_raw == "__DYNAMIC__":
+        antag_instr = "**ANTAGONIST:** [OPEN - AI INVENT] (Invent a unique Villain/Force that perfectly fits this specific Job and Theme)."
+    else:
+        antag_instr = f"**ANTAGONIST:** {antag_raw}"
+
+    # Body Parts Logic
+    b_list = load_list('body_parts.txt')
+    initial_b = config.get('body_parts') or ["__RANDOM__"] * random.choice([2, 3])
+    selected_b = []
+    for item in initial_b:
+        if item == "__RANDOM__":
+            avail = [x for x in b_list if x not in selected_b]
+            if avail: selected_b.append(random.choice(avail))
+        else: selected_b.append(item)
+    body_string = ", ".join(selected_b)
+
+    # Fetish Logic
     f_list = load_list('fetishes.txt')
+    initial_f = config.get('fetishes') or ["__RANDOM__"]
     selected_f = []
-    initial_f = config.get('fetishes') or ["__RANDOM__"] * random.choice([1, 2])
     for item in initial_f:
         if item == "__RANDOM__": 
             avail = [x for x in f_list if x not in selected_f]
             if avail: selected_f.append(random.choice(avail))
         else: selected_f.append(item)
-    f_string = " & ".join(selected_f)
+    f_string = ", ".join(selected_f)
 
+    # Archetype Logic
     arch_raw = config.get('archetype') or random.choice(load_list('archetypes.txt'))
     arch_instr = "[OPEN - AI INVENT]" if arch_raw == "__DYNAMIC__" else arch_raw
 
     name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
     char = f"{name}, {random.randint(23, 45)}, {job}"
 
-    # EXPANDED PROMPT FOR BETTER BLURB
     prompt = f"""
-    TASK: Premise for a psychological transformation novel.
-    GENRE: {genre} | THEME: {theme_content} | MOTIFS: {f_string} | PROTAGONIST: {char} | TARGET: {arch_instr}
+    TASK: Premise for a Dark Transformation novel.
     
-    INSTRUCTIONS:
-    1. Define the Destination Archetype.
-    2. Define the Plot Hook/Premise.
+    **INGREDIENTS:**
+    - Genre: {genre}
+    - POV: {pov}
+    - Theme: {theme_content}
+    - {antag_instr}
+    - Mind Control: {mc_method}
+    - Body Focus: {body_string}
+    - Kink: {f_string}
+    - Protagonist: {char}
+    - Target: {arch_instr}
     
-    OUTPUT FORMAT (STRICT):
+    **INSTRUCTIONS:**
+    1. **ANTAGONIST:** If Dynamic, invent a specific name/title for them.
+    2. **CONFLICT:** How does the Antagonist use the {mc_method} against the {job}?
+    3. **DESTINATION:** Invent the specific Archetype name.
+    
+    **OUTPUT FORMAT (STRICT):**
+    {{Antagonist: [Name/Title]}}
     {{Destination: [Archetype Name]}}
     {{Trigger: [Why she enters]}}
-    {{Mechanism: [Method]}}
-    {{Blurb: [Write a compelling 3-sentence plot summary describing the conflict and the trap.]}}
+    {{Conflict: [The trap mechanism]}}
+    {{Blurb: [3-sentence summary]}}
     """
     
     res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
     
-    dest = extract_tag(res, "Destination")
-    trig = extract_tag(res, "Trigger")
-    mech = extract_tag(res, "Mechanism")
-    blurb = extract_tag(res, "Blurb")
-
     return {
-        "name": name, "job": job, "theme_name": theme_name, "genre": genre, "fetish": f_string,
-        "destination": dest, "trigger": trig, "mechanism": mech, "blurb": blurb,
+        "name": name, "job": job, "theme_name": theme_name, "genre": genre, 
+        "fetish": f_string, "body_parts": body_string, "mc_method": mc_method, "pov": pov,
+        "antagonist": extract_tag(res, "Antagonist"), # AI generated name
+        "destination": extract_tag(res, "Destination"), 
+        "trigger": extract_tag(res, "Trigger"), 
+        "conflict": extract_tag(res, "Conflict"), 
+        "blurb": extract_tag(res, "Blurb"),
         "raw_response": res,
         "custom_note": ""
     }
 
-# --- STREAMLIT UI ---
+# --- UI START ---
+st.title("🎬 The Metamorphosis Engine")
 
-st.title("🎭 The Paradigm: Metamorphosis Engine")
 st.sidebar.header("Settings")
-
 st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", type="password")
 st.session_state.google_key = st.sidebar.text_input("Google Key", type="password")
-
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
+st.session_state.cost_metric = st.sidebar.empty()
+st.session_state.cost_metric.metric("Budget", "$0.0000")
 
 if st.session_state.step == "setup":
     st.header("1. Production Setup")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        use_custom = st.checkbox("Custom Mode (Manual Selection)")
-        seed = st.text_input("Story Seed", "Paradigm")
+        use_custom = st.checkbox("Custom Mode")
+        seed = st.text_input("Story Seed", "Entropy")
+        pov = st.selectbox("Point of View", ["First Person (I)", "Third Person (She)", "Second Person (You)", "Antagonist Perspective"])
         
-    manual_config = {}
+    manual_config = {'pov': pov}
+    
     if use_custom:
         with col2:
             manual_config['theme'] = st.selectbox("Theme", [None] + [f for f in os.listdir(SCENARIO_DIR)])
             manual_config['genre'] = st.selectbox("Genre", [None] + load_list('genres.txt'))
             manual_config['job'] = st.selectbox("Job", [None] + load_list('occupations.txt'))
+            # Updated Antagonist Selectbox with Dynamic option
+            manual_config['antagonist'] = st.selectbox("Antagonist", [None, "__DYNAMIC__"] + load_list('antagonists.txt'))
+            manual_config['mc_method'] = st.selectbox("MC Method", [None] + load_list('mc_methods.txt'))
+            
+        with col3:
             manual_config['archetype'] = st.selectbox("Target Archetype", [None, "__DYNAMIC__"] + load_list('archetypes.txt'))
-            manual_config['fetishes'] = st.multiselect("Motifs (max 2)", load_list('fetishes.txt'), max_selections=2)
+            manual_config['fetishes'] = st.multiselect("Core Fetishes (Max 2)", load_list('fetishes.txt'), max_selections=2)
+            manual_config['body_parts'] = st.multiselect("Physical Focus (Max 3)", load_list('body_parts.txt'), max_selections=3)
 
     if st.button("Draft Premise"):
         if not st.session_state.anthropic_key or not st.session_state.google_key:
-            st.error("Please enter both API Keys in the sidebar!")
+            st.error("API Keys missing!")
         else:
             st.session_state.manual_config = manual_config
             st.session_state.seed = seed
-            
-            with st.spinner("Casting and drafting..."):
-                dossier = generate_dossier(seed, st.session_state.attempt, manual_config)
-                if dossier:
-                    st.session_state.dossier = dossier
+            with st.spinner("Drafting..."):
+                d = generate_dossier(seed, st.session_state.attempt, manual_config)
+                if d:
+                    st.session_state.dossier = d
                     st.session_state.step = "casting"
                     st.rerun()
 
 elif st.session_state.step == "casting":
     d = st.session_state.dossier
-    st.header("2. Casting Call & Premise")
+    st.header("2. Casting Call")
     
-    st.subheader(f"Character: {d['name']}")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Job", d['job'])
-    c2.metric("Genre", d['genre'])
-    c3.metric("Motifs", d['fetish'])
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Protagonist", d['job'])
+    c2.metric("Antagonist", d['antagonist']) # Shows generated Name if Dynamic
+    c3.metric("MC Method", d['mc_method'])
+    c4.metric("POV", d['pov'])
     
-    st.write(f"**Theme:** {d['theme_name']}")
+    st.subheader(f"{d['name']} -> {d.get('destination', 'Unknown')}")
+    st.write(f"**Physical Changes:** {d['body_parts']}")
     
-    if d['blurb'] and d['destination']:
-        st.write(f"**Mechanism:** {d['mechanism']}")
-        st.info(f"**Target:** {d['destination']}")
+    if d['blurb']:
+        st.info(f"**Conflict:** {d['conflict']}")
         st.warning(f"**Premise:** {d['blurb']}")
     else:
-        st.error("⚠️ Formatting Error: Could not extract specific tags.")
-        st.write("Here is what the AI brainstormed (Read this to decide):")
-        st.code(d['raw_response'], language="text")
+        st.error("Parsing Error. Raw Output:")
+        st.code(d['raw_response'])
 
-    note = st.text_area("Add Director's Note (Optional)", placeholder="Make the ending tragic...")
+    note = st.text_area("Director's Note", placeholder="e.g. Make the ending ambiguous...")
     
     b1, b2, b3 = st.columns(3)
-    if b1.button("✅ Approve & Write"):
+    if b1.button("✅ Action!"):
         st.session_state.dossier['custom_note'] = note
         st.session_state.step = "writing"
         st.rerun()
-        
-    if b2.button("🔄 Reroll (Same Seed)"):
-        # Logic: Increment attempt, regenerate dossier, stay on 'casting' page
+    if b2.button("🔄 Reroll"):
         st.session_state.attempt += 1
-        with st.spinner("Rerolling Premise..."):
-            new_dossier = generate_dossier(st.session_state.seed, st.session_state.attempt, st.session_state.manual_config)
-            if new_dossier:
-                st.session_state.dossier = new_dossier
-                st.rerun()
-                
-    if b3.button("❌ Start Over"):
+        with st.spinner("Rerolling..."):
+            new_d = generate_dossier(st.session_state.seed, st.session_state.attempt, st.session_state.manual_config)
+            if new_d: st.session_state.dossier = new_d
+            st.rerun()
+    if b3.button("❌ Back"):
         st.session_state.step = "setup"
         st.rerun()
 
 elif st.session_state.step == "writing":
     d = st.session_state.dossier
-    st.header(f"3. Producing: {d.get('destination', 'Story')}")
+    st.header(f"3. Filming: {d.get('destination', 'Story')}")
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     arc = [
-        ("Status Quo", "Establish sharp mind."),
-        ("Induction", "First shift."),
-        ("Conditioning", "Procedure intensifies."),
-        ("Cognitive Dissonance", "Skills fail."),
-        ("Rewrite", "Identity breaks."),
-        ("Metamorphosis", "Full surrender."),
-        ("Epilogue", "New life.")
+        ("The Hook", "Normal life + Inciting Incident. Antagonist makes first move."),
+        ("The First Alteration", "First physical change + First MC session. She resists."),
+        ("The Escalation", "Physical changes worsen. Antagonist tightens control."),
+        ("The Mental Crack", "The 'Fog' or Logic Virus sets in. Resistance falters."),
+        ("The Breaking Point", "Major event where she is forced to act against her will."),
+        ("Metamorphosis", "Total surrender of identity. Antagonist wins."),
+        ("Epilogue", "Life in the new role.")
     ]
     
-    premise_text = d['blurb'] if d['blurb'] else d['raw_response']
-    bible = f"GENRE: {d['genre']} | THEME: {d['theme_name']} | MOTIFS: {d['fetish']} | METHOD: {d['mechanism']} | TARGET: {d['destination']} | LOGLINE: {d['blurb']} | NOTE: {d['custom_note']}"
+    premise = d['blurb'] if d['blurb'] else d['raw_response']
+    bible = f"""
+    GENRE: {d['genre']} | THEME: {d['theme_name']} | POV: {d['pov']}
+    ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
+    PHYSICAL FOCUS: {d['body_parts']} | FETISHES: {d['fetish']}
+    TARGET: {d['destination']} | NOTE: {d['custom_note']}
+    PREMISE: {premise} | CONFLICT: {d['conflict']}
+    """
+    
     full_narrative = ""
     current_state = f"Normal {d['job']}"
     raw_story = f"# {d['theme_name']}: {d.get('destination', 'Transformation')}\n\n"
     
     for i, (phase, instr) in enumerate(arc):
         status_text.write(f"Writing Chapter {i+1}: {phase}...")
-        p = f"{bible}\n\nHISTORY: {full_narrative}\nSTATE: {current_state}\nTASK: Chapter {i+1} ({phase}). {instr}\nOUTPUT: 1000 words. End with {{State: ...}} {{Title: ...}}"
+        p = f"""
+        {bible}
+        HISTORY: {full_narrative}
+        STATE: {current_state}
+        TASK: Write Chapter {i+1} ({phase}). {instr}
+        Use {d['pov']} perspective.
+        OUTPUT: 1000 words. End with {{State: ...}} {{Title: ...}}
+        """
         
         try:
             text = call_api(p, st.session_state.writer_model)
@@ -276,24 +337,18 @@ elif st.session_state.step == "writing":
             raw_story += f"\n\n### {title}\n\n{clean}"
             progress_bar.progress((i + 1) / (len(arc) + 1))
         except Exception as e:
-            st.error(f"Error during writing: {e}")
+            st.error(f"Error: {e}")
             break
             
     if do_editor:
-        status_text.write("Production complete. Sending to Editor...")
-        edit_p = f"{bible}\n\nTASK: Manuscript Restoration. Retype word-for-word. Fix continuity. Remove tags.\n\nINPUT:\n{raw_story}"
+        status_text.write("Editing...")
+        edit_p = f"{bible}\n\nTASK: Polish manuscript. Fix logic. No summaries.\n\nINPUT:\n{raw_story}"
         try:
             final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=64000)
-            if "API ERROR" in final:
-                st.warning("Editor failed. Using raw story.")
-                st.session_state.final_story = clean_artifacts(raw_story)
-            else:
-                st.session_state.final_story = clean_artifacts(final)
-        except Exception as e:
-            st.error(f"Editor Pass failed. Using raw story. ({e})")
+            st.session_state.final_story = clean_artifacts(final)
+        except:
             st.session_state.final_story = clean_artifacts(raw_story)
     else:
-        status_text.write("Production complete. Skipping Editor Pass...")
         st.session_state.final_story = clean_artifacts(raw_story)
 
     progress_bar.progress(1.0)
@@ -301,17 +356,14 @@ elif st.session_state.step == "writing":
     st.rerun()
 
 elif st.session_state.step == "final":
-    st.header("4. Final Manuscript")
-    st.text_area("Manuscript", st.session_state.final_story, height=600)
+    st.header("4. Final Cut")
+    st.text_area("Story", st.session_state.final_story, height=600)
     
-    st.sidebar.subheader("Final Stats")
-    st.sidebar.write(f"Total Cost: ${st.session_state.stats['cost']:.4f}")
+    st.sidebar.success(f"Final Cost: ${st.session_state.stats['cost']:.4f}")
     
     safe_seed = "".join([c for c in st.session_state.seed if c.isalnum()]).rstrip()
-    st.download_button("Download .txt", st.session_state.final_story, file_name=f"Story_{safe_seed}.txt")
+    st.download_button("Download", st.session_state.final_story, file_name=f"Story_{safe_seed}.txt")
     
-    if st.button("Write New Story"):
+    if st.button("New Story"):
         st.session_state.step = "setup"
-        st.session_state.dossier = None
-        st.session_state.attempt = 0
         st.rerun()

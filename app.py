@@ -15,15 +15,24 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-# --- SESSION STATE INITIALIZATION (100% FIXED) ---
-if "step" not in st.session_state: st.session_state.step = "setup"
-if "dossier" not in st.session_state: st.session_state.dossier = None
-if "attempt" not in st.session_state: st.session_state.attempt = 0
-if "raw_story" not in st.session_state: st.session_state.raw_story = ""
-if "final_story" not in st.session_state: st.session_state.final_story = ""
-if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
-if "manual_config" not in st.session_state: st.session_state.manual_config = {}
-if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
+# --- SESSION STATE INITIALIZATION (ABSOLUTELY FIXED) ---
+# No more loops. Explicit, safe initialization.
+if "step" not in st.session_state: 
+    st.session_state.step = "setup"
+if "dossier" not in st.session_state: 
+    st.session_state.dossier = None
+if "attempt" not in st.session_state: 
+    st.session_state.attempt = 0
+if "raw_story" not in st.session_state: 
+    st.session_state.raw_story = ""
+if "final_story" not in st.session_state: 
+    st.session_state.final_story = ""
+if "seed" not in st.session_state: 
+    st.session_state.seed = "Paradigm"
+if "manual_config" not in st.session_state: 
+    st.session_state.manual_config = {}
+if "stats" not in st.session_state: 
+    st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
@@ -230,7 +239,7 @@ st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
 
-# THE LIVE BUDGET TRACKER
+# LIVE BUDGET TRACKER
 st.session_state.cost_metric = st.sidebar.empty()
 st.session_state.cost_metric.metric("Budget", f"${st.session_state.stats['cost']:.4f}")
 
@@ -290,7 +299,7 @@ elif st.session_state.step == "casting":
     
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Protagonist", d['job'])
-    c2.metric("Antagonist", d['antagonist']) 
+    c2.metric("Antagonist", d['antagonist'])
     c3.metric("MC Method", d['mc_method'])
     c4.metric("POV", d['pov'])
     

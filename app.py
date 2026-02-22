@@ -15,7 +15,6 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-# Session State Initialization
 keys = ['step', 'dossier', 'attempt', 'raw_story', 'final_story', 'stats', 'seed', 'manual_config']
 for k in keys:
     if k not in st.session_state:
@@ -25,16 +24,16 @@ if 'step' not in st.session_state: st.session_state.step = "setup"
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
-    "1": {"name": "Claude 4.5 Sonnet", "id": "claude-sonnet-4-6", "vendor": "anthropic", "price_in": 3.00, "price_out": 15.00},
-    "2": {"name": "Claude 4.5 Opus", "id": "claude-opus-4-6", "vendor": "anthropic", "price_in": 5.00, "price_out": 25.00},
-    "3": {"name": "Gemini 3 Pro", "id": "gemini-3-pro-preview", "vendor": "google", "price_in": 2.00, "price_out": 12.00},
-    "4": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.5, "price_out": 3.00}
+    "Claude 4.6 Sonnet": {"name": "Claude 4.5 Sonnet", "id": "claude-sonnet-4-6", "vendor": "anthropic", "price_in": 3.00, "price_out": 15.00},
+    "Claude 4.6 Opus": {"name": "Claude 4.5 Opus", "id": "claude-opus-4-6", "vendor": "anthropic", "price_in": 5.00, "price_out": 25.00},
+    "Gemini 3 Pro": {"name": "Gemini 3 Pro", "id": "gemini-3-pro-preview", "vendor": "google", "price_in": 2.00, "price_out": 12.00},
+    "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.5, "price_out": 3.00}
 }
 
 CONFIG_DIR = 'config'
 SCENARIO_DIR = 'scenarios'
 
-# --- LOGIC FUNCTIONS ---
+# --- UTILS ---
 def load_list(filename):
     path = os.path.join(CONFIG_DIR, filename)
     if not os.path.exists(path): return ["Generic Option"]
@@ -46,7 +45,6 @@ def load_file_content(filepath):
     with open(filepath, 'r', encoding='utf-8') as f: return f.read()
 
 def extract_tag(text, tag_name):
-    # Robust extraction
     if not text: return ""
     match = re.search(r'\{\s*' + tag_name + r'\s*:(.*?)\}', text, re.DOTALL | re.IGNORECASE)
     if match: return match.group(1).strip()
@@ -61,7 +59,7 @@ def clean_artifacts(text):
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
-# --- API HANDLERS ---
+# --- API ---
 def track_cost(in_tok, out_tok, model_config):
     st.session_state.stats['input'] += in_tok
     st.session_state.stats['output'] += out_tok
@@ -74,23 +72,20 @@ def track_cost(in_tok, out_tok, model_config):
 def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
     m_cfg = MODELS[model_key]
     
-    # SYSTEM PROMPT INJECTION
     sys_prompt = "You are a Senior Editor. Polish while preserving length." if is_editor else """
     You are a high-end novelist writing a Dark Psychological Thriller.
     RULES:
-    1. **ACTIVE ANTAGONIST:** The transformation must not just "happen." It must be enforced by the Antagonist/Mechanism.
-    2. **POV:** Adhere strictly to the requested Point of View (1st/2nd/3rd).
+    1. **ACTIVE ANTAGONIST:** The transformation must be enforced by the Antagonist.
+    2. **POV:** Adhere strictly to the requested Point of View.
     3. **SHOW, DON'T TELL:** Focus on sensory details and internal monologue.
-    4. **NO FOG:** Describe mental changes as specific psychological/biological processes.
+    4. **NO FOG:** Describe mental changes as specific psychological processes.
     """
     
     try:
         if m_cfg['vendor'] == 'anthropic':
             client = anthropic.Anthropic(api_key=st.session_state.anthropic_key, timeout=600.0)
             resp = client.messages.create(
-                model=m_cfg['id'], 
-                max_tokens=max_tokens, 
-                system=sys_prompt, 
+                model=m_cfg['id'], max_tokens=max_tokens, system=sys_prompt, 
                 messages=[{"role": "user", "content": prompt}]
             )
             track_cost(resp.usage.input_tokens, resp.usage.output_tokens, m_cfg)
@@ -111,11 +106,10 @@ def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
     except Exception as e:
         return f"API ERROR: {str(e)}"
 
-# --- GENERATION LOGIC ---
+# --- GENERATION ---
 def generate_dossier(seed, attempt, config):
     random.seed(f"{seed}_{attempt}")
     
-    # 1. Load Ingredients
     scenarios = [f for f in os.listdir(SCENARIO_DIR) if f.endswith('.txt')]
     theme_file = config.get('theme') or random.choice(scenarios)
     theme_content = load_file_content(os.path.join(SCENARIO_DIR, theme_file))
@@ -123,11 +117,17 @@ def generate_dossier(seed, attempt, config):
     
     genre = config.get('genre') or random.choice(load_list('genres.txt'))
     job = config.get('job') or random.choice(load_list('occupations.txt'))
-    antagonist = config.get('antagonist') or random.choice(load_list('antagonists.txt'))
     mc_method = config.get('mc_method') or random.choice(load_list('mc_methods.txt'))
     pov = config.get('pov') or "First Person (I)"
 
-    # 2. Body Parts Logic
+    # Antagonist Logic (Dynamic vs List)
+    antag_raw = config.get('antagonist') or random.choice(load_list('antagonists.txt'))
+    if antag_raw == "__DYNAMIC__":
+        antag_instr = "**ANTAGONIST:** [OPEN - AI INVENT] (Invent a unique Villain/Force that perfectly fits this specific Job and Theme)."
+    else:
+        antag_instr = f"**ANTAGONIST:** {antag_raw}"
+
+    # Body Parts Logic
     b_list = load_list('body_parts.txt')
     initial_b = config.get('body_parts') or ["__RANDOM__"] * random.choice([2, 3])
     selected_b = []
@@ -138,7 +138,7 @@ def generate_dossier(seed, attempt, config):
         else: selected_b.append(item)
     body_string = ", ".join(selected_b)
 
-    # 3. Fetish Logic
+    # Fetish Logic
     f_list = load_list('fetishes.txt')
     initial_f = config.get('fetishes') or ["__RANDOM__"]
     selected_f = []
@@ -149,14 +149,13 @@ def generate_dossier(seed, attempt, config):
         else: selected_f.append(item)
     f_string = ", ".join(selected_f)
 
-    # 4. Archetype Logic
+    # Archetype Logic
     arch_raw = config.get('archetype') or random.choice(load_list('archetypes.txt'))
     arch_instr = "[OPEN - AI INVENT]" if arch_raw == "__DYNAMIC__" else arch_raw
 
     name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
     char = f"{name}, {random.randint(23, 45)}, {job}"
 
-    # 5. The Premise Prompt (Now including Antagonist & POV)
     prompt = f"""
     TASK: Premise for a Dark Transformation novel.
     
@@ -164,21 +163,23 @@ def generate_dossier(seed, attempt, config):
     - Genre: {genre}
     - POV: {pov}
     - Theme: {theme_content}
-    - Antagonist/Force: {antagonist}
-    - Mind Control Method: {mc_method}
-    - Physical Focus: {body_string}
-    - Kink/Fetish: {f_string}
+    - {antag_instr}
+    - Mind Control: {mc_method}
+    - Body Focus: {body_string}
+    - Kink: {f_string}
     - Protagonist: {char}
     - Target: {arch_instr}
     
     **INSTRUCTIONS:**
-    1. **CONFLICT:** Define how the {antagonist} actively traps or coerces the protagonist.
-    2. **DESTINATION:** Invent the specific Archetype name.
+    1. **ANTAGONIST:** If Dynamic, invent a specific name/title for them.
+    2. **CONFLICT:** How does the Antagonist use the {mc_method} against the {job}?
+    3. **DESTINATION:** Invent the specific Archetype name.
     
     **OUTPUT FORMAT (STRICT):**
+    {{Antagonist: [Name/Title]}}
     {{Destination: [Archetype Name]}}
     {{Trigger: [Why she enters]}}
-    {{Conflict: [How the Antagonist forces the change]}}
+    {{Conflict: [The trap mechanism]}}
     {{Blurb: [3-sentence summary]}}
     """
     
@@ -186,8 +187,8 @@ def generate_dossier(seed, attempt, config):
     
     return {
         "name": name, "job": job, "theme_name": theme_name, "genre": genre, 
-        "fetish": f_string, "body_parts": body_string, "antagonist": antagonist,
-        "mc_method": mc_method, "pov": pov,
+        "fetish": f_string, "body_parts": body_string, "mc_method": mc_method, "pov": pov,
+        "antagonist": extract_tag(res, "Antagonist"), # AI generated name
         "destination": extract_tag(res, "Destination"), 
         "trigger": extract_tag(res, "Trigger"), 
         "conflict": extract_tag(res, "Conflict"), 
@@ -199,7 +200,6 @@ def generate_dossier(seed, attempt, config):
 # --- UI START ---
 st.title("🎬 The Metamorphosis Engine")
 
-# Sidebar
 st.sidebar.header("Settings")
 st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", type="password")
 st.session_state.google_key = st.sidebar.text_input("Google Key", type="password")
@@ -209,7 +209,6 @@ do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
 st.session_state.cost_metric = st.sidebar.empty()
 st.session_state.cost_metric.metric("Budget", "$0.0000")
 
-# --- SETUP PHASE ---
 if st.session_state.step == "setup":
     st.header("1. Production Setup")
     col1, col2, col3 = st.columns(3)
@@ -226,7 +225,8 @@ if st.session_state.step == "setup":
             manual_config['theme'] = st.selectbox("Theme", [None] + [f for f in os.listdir(SCENARIO_DIR)])
             manual_config['genre'] = st.selectbox("Genre", [None] + load_list('genres.txt'))
             manual_config['job'] = st.selectbox("Job", [None] + load_list('occupations.txt'))
-            manual_config['antagonist'] = st.selectbox("Antagonist", [None] + load_list('antagonists.txt'))
+            # Updated Antagonist Selectbox with Dynamic option
+            manual_config['antagonist'] = st.selectbox("Antagonist", [None, "__DYNAMIC__"] + load_list('antagonists.txt'))
             manual_config['mc_method'] = st.selectbox("MC Method", [None] + load_list('mc_methods.txt'))
             
         with col3:
@@ -247,14 +247,13 @@ if st.session_state.step == "setup":
                     st.session_state.step = "casting"
                     st.rerun()
 
-# --- CASTING PHASE ---
 elif st.session_state.step == "casting":
     d = st.session_state.dossier
     st.header("2. Casting Call")
     
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Protagonist", d['job'])
-    c2.metric("Antagonist", d['antagonist'])
+    c2.metric("Antagonist", d['antagonist']) # Shows generated Name if Dynamic
     c3.metric("MC Method", d['mc_method'])
     c4.metric("POV", d['pov'])
     
@@ -285,7 +284,6 @@ elif st.session_state.step == "casting":
         st.session_state.step = "setup"
         st.rerun()
 
-# --- WRITING PHASE ---
 elif st.session_state.step == "writing":
     d = st.session_state.dossier
     st.header(f"3. Filming: {d.get('destination', 'Story')}")
@@ -342,7 +340,6 @@ elif st.session_state.step == "writing":
             st.error(f"Error: {e}")
             break
             
-    # Editor Logic (Same as before)
     if do_editor:
         status_text.write("Editing...")
         edit_p = f"{bible}\n\nTASK: Polish manuscript. Fix logic. No summaries.\n\nINPUT:\n{raw_story}"
@@ -358,7 +355,6 @@ elif st.session_state.step == "writing":
     st.session_state.step = "final"
     st.rerun()
 
-# --- FINAL PHASE ---
 elif st.session_state.step == "final":
     st.header("4. Final Cut")
     st.text_area("Story", st.session_state.final_story, height=600)

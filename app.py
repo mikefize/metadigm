@@ -309,10 +309,10 @@ elif st.session_state.step == "writing":
     status_text = st.empty()
     
     arc = [
-        ("The Hook", "Normal life + Inciting Incident. The trap is sprung/entered."),
-        ("The First Alteration", "First physical change + First MC session. She resists the process."),
+        ("The Hook", "Normal life + Inciting Incident. The trap is sprung/entered. We get to know the person she is in the beginning"),
+        ("The First Alteration", "First physical change + First mental changes. She resists the process."),
         ("The Escalation", "Physical changes worsen. The coercive force tightens control."),
-        ("The Mental Crack", "The 'Fog' or Logic Virus sets in. Resistance falters."),
+        ("The Mental Crack", "The transformation accelerates. She is still struggling, still resisting, but her will starts to falter."),
         ("The Breaking Point", "Major event where she acts against her own original will."),
         ("Metamorphosis", "Total surrender of identity. Antagonist wins."),
         ("Epilogue", "Life in the new role.")

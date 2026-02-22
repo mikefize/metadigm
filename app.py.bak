@@ -15,8 +15,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-# --- SESSION STATE INITIALIZATION (ABSOLUTELY FIXED) ---
-# No more loops. Explicit, safe initialization.
+# --- SESSION STATE INITIALIZATION (NO LOOPS - EXPLICIT DEFINITION) ---
 if "step" not in st.session_state: 
     st.session_state.step = "setup"
 if "dossier" not in st.session_state: 
@@ -238,8 +237,6 @@ st.session_state.google_key = st.sidebar.text_input("Google Key", type="password
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
-
-# LIVE BUDGET TRACKER
 st.session_state.cost_metric = st.sidebar.empty()
 st.session_state.cost_metric.metric("Budget", f"${st.session_state.stats['cost']:.4f}")
 
@@ -342,7 +339,7 @@ elif st.session_state.step == "writing":
         ("The Escalation", "Physical changes worsen. The coercive force tightens control."),
         ("The Mental Crack", "The 'Fog' or Logic Virus sets in. Resistance falters."),
         ("The Breaking Point", "Major event where she acts against her own original will."),
-        ("Metamorphosis", "Total surrender of identity. The new persona solidifies."),
+        ("Metamorphosis", "Total surrender of identity. Antagonist wins."),
         ("Epilogue", "Life in the new role.")
     ]
     

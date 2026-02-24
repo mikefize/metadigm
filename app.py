@@ -15,12 +15,23 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-keys = ['step', 'dossier', 'attempt', 'raw_story', 'final_story', 'stats', 'seed', 'manual_config']
-for k in keys:
-    if k not in st.session_state:
-        st.session_state[k] = None if k in ['dossier', 'manual_config', 'seed'] else 0
-if 'stats' not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
-if 'step' not in st.session_state: st.session_state.step = "setup"
+# --- SESSION STATE INITIALIZATION (FIXED: NO LOOPS) ---
+if "step" not in st.session_state: 
+    st.session_state.step = "setup"
+if "dossier" not in st.session_state: 
+    st.session_state.dossier = None
+if "attempt" not in st.session_state: 
+    st.session_state.attempt = 0
+if "raw_story" not in st.session_state: 
+    st.session_state.raw_story = ""
+if "final_story" not in st.session_state: 
+    st.session_state.final_story = ""
+if "seed" not in st.session_state: 
+    st.session_state.seed = "Paradigm"
+if "manual_config" not in st.session_state: 
+    st.session_state.manual_config = {}
+if "stats" not in st.session_state: 
+    st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
@@ -140,6 +151,7 @@ def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
     except Exception as e:
         return f"API ERROR: {str(e)}"
 
+# --- FORMATTING UTILS FOR UI ---
 def format_antagonist_option(x):
     if x is None: return "Random from List"
     if x == "__DYNAMIC__": return "Dynamic (AI Invented)"
@@ -189,44 +201,44 @@ def generate_dossier(seed, attempt, config):
         else: selected_f.append(item)
     f_string = ", ".join(selected_f)
 
-    # Process Custom Elements into a single block
+    # Process Custom Elements
     custom_elements = []
     if config.get('person1'): custom_elements.append(f"Character: {config['person1']}")
     if config.get('person2'): custom_elements.append(f"Character: {config['person2']}")
     if config.get('location'): custom_elements.append(f"Location: {config['location']}")
     if config.get('idea1'): custom_elements.append(f"Concept: {config['idea1']}")
     if config.get('idea2'): custom_elements.append(f"Concept: {config['idea2']}")
-    
     elements_string = "\n- ".join(custom_elements) if custom_elements else "None specified. Invent creative elements organically."
 
     name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
     char = f"{name}, {random.randint(23, 45)}, {job}"
 
-    # Simplified Prompt to avoid Parsing Errors
     prompt = f"""
     TASK: Premise for a Dark Transformation novel.
     
-    **INGREDIENTS:**
+    **CORE INGREDIENTS:**
     - Genre: {genre}
+    - POV: {pov}
     - {antag_instr}
     - Mind Control Method: {mc_method}
     - PHYSICAL ALTERATION TARGETS: {body_string}
-    - Kink: {f_string}
+    - Kink/Motifs: {f_string}
     - Protagonist: {char}
+    - Target Archetype: [OPEN - AI INVENT a unique, ironic Destination Archetype]
     
-    **CUSTOM ELEMENTS TO WEAVE IN:**
+    **MODULAR STORY ELEMENTS (Weave these into the plot):**
     - {elements_string}
     
     **INSTRUCTIONS:**
-    1. Invent the Destination Archetype she will become.
-    2. Write a compelling 4-sentence Blurb/Summary that incorporates the custom elements (if any) and explains how she is trapped.
+    1. **ANTAGONIST:** If Dynamic, invent a name. If NONE, state "None".
+    2. **DESTINATION:** Invent the specific Archetype name she transforms into.
     
     **OUTPUT FORMAT (STRICT):**
     {{Antagonist: [Name/Title or "None"]}}
     {{Destination: [Archetype Name]}}
     {{Trigger: [Why she enters the situation]}}
     {{Conflict: [The trap mechanism / How she loses control]}}
-    {{Blurb: [4-sentence summary]}}
+    {{Blurb: [4-sentence summary integrating the elements]}}
     """
     
     res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
@@ -243,7 +255,7 @@ def generate_dossier(seed, attempt, config):
         "conflict": extract_tag(res, "Conflict"), 
         "blurb": extract_tag(res, "Blurb"),
         "arc_name": selected_arc_name,
-        "elements_string": elements_string, # Hidden payload for the Chapter Writer
+        "elements_string": elements_string,
         "raw_response": res,
         "custom_note": ""
     }
@@ -300,7 +312,7 @@ if st.session_state.step == "setup":
 
     if st.button("Draft Premise"):
         if not st.session_state.anthropic_key and not st.session_state.google_key:
-            st.error("API Keys missing!")
+            st.error("API Keys missing! Please check the sidebar or your secrets.toml file.")
         else:
             st.session_state.manual_config = manual_config
             st.session_state.seed = seed
@@ -318,17 +330,25 @@ elif st.session_state.step == "casting":
     d = st.session_state.dossier
     st.header("2. Casting Call")
     
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Protagonist", d['job'])
-    c2.metric("Antagonist", d['antagonist'])
-    c3.metric("MC Method", d['mc_method'])
-    c4.metric("POV", d['pov'])
-    
     st.subheader(f"{d['name']} -> {d.get('destination', 'Unknown')}")
-    st.write(f"**Targeted Physical Changes:** {d['body_parts']}")
+    st.caption(f"**Narrative Arc:** {d['arc_name']}")
+    
+    colA, colB = st.columns(2)
+    with colA:
+        st.markdown("**CORE:**")
+        st.markdown(f"- **Job:** {d['job']}\n- **Genre:** {d['genre']}\n- **POV:** {d['pov']}")
+        st.markdown(f"- **Antagonist:** {d['antagonist']}\n- **Method:** {d['mc_method']}")
+        st.markdown(f"- **Physical:** {d['body_parts']}\n- **Kink:** {d['fetish']}")
+    with colB:
+        st.markdown("**STORY ELEMENTS:**")
+        st.markdown(f"- **Location:** {st.session_state.manual_config.get('location', 'AI Invented')}")
+        st.markdown(f"- **Person 1:** {st.session_state.manual_config.get('person1', 'AI Invented')}")
+        st.markdown(f"- **Idea 1:** {st.session_state.manual_config.get('idea1', 'AI Invented')}")
     
     st.markdown("---")
     if d['blurb']:
+        st.info(f"**Trigger:** {d['trigger']}")
+        st.info(f"**Conflict:** {d['conflict']}")
         st.warning(f"**Premise:** {d['blurb']}")
     else:
         st.error("Parsing Error. Raw Output:")
@@ -341,13 +361,13 @@ elif st.session_state.step == "casting":
         st.session_state.dossier['custom_note'] = note
         st.session_state.step = "writing"
         st.rerun()
-    if b2.button("🔄 Reroll"):
+    if b2.button("🔄 Reroll Elements"):
         st.session_state.attempt += 1
         with st.spinner("Rerolling..."):
             new_d = generate_dossier(st.session_state.seed, st.session_state.attempt, st.session_state.manual_config)
             if new_d: st.session_state.dossier = new_d
             st.rerun()
-    if b3.button("❌ Back"):
+    if b3.button("❌ Back to Setup"):
         st.session_state.step = "setup"
         st.rerun()
 
@@ -358,11 +378,8 @@ elif st.session_state.step == "writing":
     status_text = st.empty()
     
     arc = STORY_ARCS[d['arc_name']]
-    
     premise = d['blurb'] if d['blurb'] else d['raw_response']
     
-    # We silently pass the Custom Elements and Trigger/Conflict to the writer
-    # Even though they were hidden from the Casting UI
     bible = f"""
     GENRE: {d['genre']} | POV: {d['pov']}
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
@@ -381,7 +398,7 @@ elif st.session_state.step == "writing":
     
     full_narrative = ""
     current_state = f"Normal {d['job']}"
-    raw_story = f"# The Transformation of {d['name']}\n\n"
+    raw_story = f"# The Fall of {d['name']}\n\n"
     
     for i, (phase, instr) in enumerate(arc):
         status_text.write(f"Writing Chapter {i+1}: {phase}...")
@@ -396,7 +413,7 @@ elif st.session_state.step == "writing":
         TASK: Write Chapter {i+1} ({phase}). {instr}
         Use {d['pov']} perspective.
         
-        **PACING DIRECTIVE:** SLOW BURN. Do not summarize. Write distinct, heavy scenes with dialogue and internal monologue.
+        **PACING DIRECTIVE:** SLOW BURN. Do not summarize. Write distinct, heavy scenes with dialogue and internal monologue. Ensure the Story Elements appear naturally.
         OUTPUT: {word_count_instr}. End with {{State: ...}} {{Title: ...}}
         """
         

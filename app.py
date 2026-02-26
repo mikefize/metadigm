@@ -1,6 +1,3 @@
-import pyparsing
-pyparsing.DelimitedList = pyparsing.delimitedList
-
 import streamlit as st
 import google.generativeai as genai
 import anthropic
@@ -15,7 +12,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-# --- SESSION STATE INITIALIZATION (FIXED: NO LOOPS) ---
+# --- SESSION STATE INITIALIZATION ---
 if "step" not in st.session_state: 
     st.session_state.step = "setup"
 if "dossier" not in st.session_state: 
@@ -42,6 +39,7 @@ MODELS = {
 }
 
 CONFIG_DIR = 'config'
+SCENARIO_DIR = 'scenarios'
 
 # --- NARRATIVE ARCS ---
 STORY_ARCS = {
@@ -81,18 +79,24 @@ def load_list(filename):
     with open(path, 'r', encoding='utf-8') as f:
         return [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
+def load_file_content(filepath):
+    if not os.path.exists(filepath): return None
+    with open(filepath, 'r', encoding='utf-8') as f: return f.read()
+
+# NEW ROBUST XML PARSER
 def extract_tag(text, tag_name):
     if not text: return ""
-    match = re.search(r'\{\s*' + tag_name + r'\s*:(.*?)\}', text, re.DOTALL | re.IGNORECASE)
-    if match: return match.group(1).strip()
-    match = re.search(r'(?:^|\n|\*)\s*' + tag_name + r'(?:\*\*|)\s*:\s*(.*)', text, re.IGNORECASE)
+    # Matches <tag>content</tag> across multiple lines
+    pattern = rf'<{tag_name}>(.*?)</{tag_name}>'
+    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
     if match: return match.group(1).strip()
     return ""
 
 def clean_artifacts(text):
     if not text: return ""
-    text = re.sub(r'\{\s*(State|Title|Summary|Scene)\s*:.*?\}', '', text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r'\[\s*(State|Title|Summary)\s*:.*?\]', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # Remove XML tags used for state tracking
+    text = re.sub(r'<state>.*?</state>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<title>.*?</title>', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
@@ -158,6 +162,11 @@ def format_antagonist_option(x):
     if x == "__NONE__": return "NO ANTAGONIST (System/Environment driven)"
     return x
 
+def format_archetype_option(x):
+    if x is None: return "Random from List"
+    if x == "__DYNAMIC__": return "Dynamic (AI Invented)"
+    return x
+
 # --- GENERATION ---
 def generate_dossier(seed, attempt, config):
     random.seed(f"{seed}_{attempt}")
@@ -213,6 +222,7 @@ def generate_dossier(seed, attempt, config):
     name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
     char = f"{name}, {random.randint(23, 45)}, {job}"
 
+    # REWRITTEN PROMPT FOR XML OUTPUT
     prompt = f"""
     TASK: Premise for a Dark Transformation novel.
     
@@ -224,7 +234,6 @@ def generate_dossier(seed, attempt, config):
     - PHYSICAL ALTERATION TARGETS: {body_string}
     - Kink/Motifs: {f_string}
     - Protagonist: {char}
-    - Target Archetype: [OPEN - AI INVENT a unique, ironic Destination Archetype]
     
     **MODULAR STORY ELEMENTS (Weave these into the plot):**
     - {elements_string}
@@ -233,27 +242,31 @@ def generate_dossier(seed, attempt, config):
     1. **ANTAGONIST:** If Dynamic, invent a name. If NONE, state "None".
     2. **DESTINATION:** Invent the specific Archetype name she transforms into.
     
-    **OUTPUT FORMAT (STRICT):**
-    {{Antagonist: [Name/Title or "None"]}}
-    {{Destination: [Archetype Name]}}
-    {{Trigger: [Why she enters the situation]}}
-    {{Conflict: [The trap mechanism / How she loses control]}}
-    {{Blurb: [4-sentence summary integrating the elements]}}
+    **OUTPUT FORMAT (STRICT XML):**
+    You MUST wrap your answers in the exact XML tags below. Do not use Markdown.
+    <antagonist>Name/Title or "None"</antagonist>
+    <destination>Archetype Name</destination>
+    <trigger>Why she enters the situation</trigger>
+    <conflict>The trap mechanism / How she loses control</conflict>
+    <blurb>4-sentence summary integrating the elements</blurb>
     """
     
     res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
     
+    if "API ERROR" in res or not res:
+        return None
+
     arc_keys = list(STORY_ARCS.keys())
     selected_arc_name = random.choice(arc_keys)
     
     return {
         "name": name, "job": job, "genre": genre, 
         "fetish": f_string, "body_parts": body_string, "mc_method": mc_method, "pov": pov,
-        "antagonist": extract_tag(res, "Antagonist") or antag_display_name,
-        "destination": extract_tag(res, "Destination"), 
-        "trigger": extract_tag(res, "Trigger"), 
-        "conflict": extract_tag(res, "Conflict"), 
-        "blurb": extract_tag(res, "Blurb"),
+        "antagonist": extract_tag(res, "antagonist") or antag_display_name,
+        "destination": extract_tag(res, "destination"), 
+        "trigger": extract_tag(res, "trigger"), 
+        "conflict": extract_tag(res, "conflict"), 
+        "blurb": extract_tag(res, "blurb"),
         "arc_name": selected_arc_name,
         "elements_string": elements_string,
         "raw_response": res,
@@ -325,6 +338,8 @@ if st.session_state.step == "setup":
                     st.session_state.dossier = d
                     st.session_state.step = "casting"
                     st.rerun()
+                else:
+                    st.error("Failed to generate premise. The API might be overloaded or blocked.")
 
 elif st.session_state.step == "casting":
     d = st.session_state.dossier
@@ -341,17 +356,18 @@ elif st.session_state.step == "casting":
         st.markdown(f"- **Physical:** {d['body_parts']}\n- **Kink:** {d['fetish']}")
     with colB:
         st.markdown("**STORY ELEMENTS:**")
-        st.markdown(f"- **Location:** {st.session_state.manual_config.get('location', 'AI Invented')}")
-        st.markdown(f"- **Person 1:** {st.session_state.manual_config.get('person1', 'AI Invented')}")
-        st.markdown(f"- **Idea 1:** {st.session_state.manual_config.get('idea1', 'AI Invented')}")
+        st.markdown(f"- **Location:** {st.session_state.manual_config.get('location') or 'AI Invented'}")
+        st.markdown(f"- **Person 1:** {st.session_state.manual_config.get('person1') or 'AI Invented'}")
+        st.markdown(f"- **Idea 1:** {st.session_state.manual_config.get('idea1') or 'AI Invented'}")
     
     st.markdown("---")
+    # Check if the blurb was successfully extracted using XML tags
     if d['blurb']:
         st.info(f"**Trigger:** {d['trigger']}")
         st.info(f"**Conflict:** {d['conflict']}")
         st.warning(f"**Premise:** {d['blurb']}")
     else:
-        st.error("Parsing Error. Raw Output:")
+        st.error("Parsing Error. The AI did not use the requested XML tags. Raw Output:")
         st.code(d['raw_response'])
 
     note = st.text_area("Director's Note (Optional)", placeholder="e.g. Make sure the jealous co-worker appears in Chapter 3...")
@@ -378,6 +394,7 @@ elif st.session_state.step == "writing":
     status_text = st.empty()
     
     arc = STORY_ARCS[d['arc_name']]
+    
     premise = d['blurb'] if d['blurb'] else d['raw_response']
     
     bible = f"""
@@ -414,7 +431,11 @@ elif st.session_state.step == "writing":
         Use {d['pov']} perspective.
         
         **PACING DIRECTIVE:** SLOW BURN. Do not summarize. Write distinct, heavy scenes with dialogue and internal monologue. Ensure the Story Elements appear naturally.
-        OUTPUT: {word_count_instr}. End with {{State: ...}} {{Title: ...}}
+        
+        **OUTPUT FORMAT (STRICT XML):**
+        Write the chapter text, then end your response with exactly these tags:
+        <state>Current Physical and Mental State summary</state>
+        <title>Invent a thematic Chapter Title</title>
         """
         
         try:
@@ -423,8 +444,8 @@ elif st.session_state.step == "writing":
                 st.error(text)
                 break
                 
-            current_state = extract_tag(text, "State")
-            title = extract_tag(text, "Title") or phase
+            current_state = extract_tag(text, "state")
+            title = extract_tag(text, "title") or phase
             clean = clean_artifacts(text)
             full_narrative += f"\n\nCHAPTER {i+1}: {title}\n{clean}"
             raw_story += f"\n\n### {title}\n\n{clean}"

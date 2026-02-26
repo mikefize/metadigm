@@ -15,23 +15,15 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-# --- SAFE SESSION STATE INITIALIZATION ---
-if "step" not in st.session_state: 
-    st.session_state.step = "setup"
-if "dossier" not in st.session_state: 
-    st.session_state.dossier = None
-if "attempt" not in st.session_state: 
-    st.session_state.attempt = 0
-if "raw_story" not in st.session_state: 
-    st.session_state.raw_story = ""
-if "final_story" not in st.session_state: 
-    st.session_state.final_story = ""
-if "seed" not in st.session_state: 
-    st.session_state.seed = "Paradigm"
-if "manual_config" not in st.session_state: 
-    st.session_state.manual_config = {}
-if "stats" not in st.session_state: 
-    st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
+# --- SESSION STATE INITIALIZATION ---
+if "step" not in st.session_state: st.session_state.step = "setup"
+if "dossier" not in st.session_state: st.session_state.dossier = None
+if "attempt" not in st.session_state: st.session_state.attempt = 0
+if "raw_story" not in st.session_state: st.session_state.raw_story = ""
+if "final_story" not in st.session_state: st.session_state.final_story = ""
+if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
+if "manual_config" not in st.session_state: st.session_state.manual_config = {}
+if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
@@ -42,7 +34,6 @@ MODELS = {
 }
 
 CONFIG_DIR = 'config'
-SCENARIO_DIR = 'scenarios'
 
 # --- NARRATIVE ARCS ---
 STORY_ARCS = {
@@ -82,24 +73,20 @@ def load_list(filename):
     with open(path, 'r', encoding='utf-8') as f:
         return [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
-def load_file_content(filepath):
-    if not os.path.exists(filepath): return None
-    with open(filepath, 'r', encoding='utf-8') as f: return f.read()
-
 def extract_tag(text, tag_name):
-    """Bulletproof Parser: Checks XML, then Braces, then Markdown."""
+    """Bulletproof Parser using String Concatenation to avoid SyntaxErrors"""
     if not text: return ""
     
     # 1. XML Style: <tag>content</tag>
-    match = re.search(rf'<{tag_name}>(.*?)</{tag_name}>', text, re.DOTALL | re.IGNORECASE)
+    match = re.search(r'<' + tag_name + r'>(.*?)</' + tag_name + r'>', text, re.DOTALL | re.IGNORECASE)
     if match: return match.group(1).strip()
     
     # 2. Brace Style: {tag: content}
-    match = re.search(rf'\{\s*{tag_name}\s*:(.*?)\}', text, re.DOTALL | re.IGNORECASE)
+    match = re.search(r'\{\s*' + tag_name + r'\s*:(.*?)\}', text, re.DOTALL | re.IGNORECASE)
     if match: return match.group(1).strip()
     
     # 3. Markdown Style: **tag**: content
-    match = re.search(rf'(?:^|\n)\s*(?:\*|-)?\s*(?:\*\*)?{tag_name}(?:\*\*)?\s*:\s*(.*)', text, re.IGNORECASE)
+    match = re.search(r'(?:^|\n)\s*(?:\*|-)?\s*(?:\*\*)?' + tag_name + r'(?:\*\*)?\s*:\s*(.*)', text, re.IGNORECASE)
     if match: return match.group(1).strip()
     
     return ""
@@ -176,19 +163,9 @@ def format_antagonist_option(x):
     if x == "__NONE__": return "NO ANTAGONIST (System/Environment driven)"
     return x
 
-def format_archetype_option(x):
-    if x is None: return "Random from List"
-    if x == "__DYNAMIC__": return "Dynamic (AI Invented)"
-    return x
-
 # --- GENERATION ---
 def generate_dossier(seed, attempt, config):
     random.seed(f"{seed}_{attempt}")
-    
-    scenarios = [f for f in os.listdir(SCENARIO_DIR) if f.endswith('.txt')]
-    theme_file = config.get('theme') or random.choice(scenarios)
-    theme_content = load_file_content(os.path.join(SCENARIO_DIR, theme_file))
-    theme_name = theme_file.replace('theme_', '').replace('.txt', '').replace('_', ' ').title()
     
     genre = config.get('genre') or random.choice(load_list('genres.txt'))
     job = config.get('job') or random.choice(load_list('occupations.txt'))
@@ -253,7 +230,7 @@ def generate_dossier(seed, attempt, config):
     - Kink/Motifs: {f_string}
     - Protagonist: {char}
     
-    **MODULAR STORY ELEMENTS (You MUST weave BOTH Idea 1 and Idea 2 into the plot if provided):**
+    **MODULAR STORY ELEMENTS (Weave these into the plot):**
     - {elements_string}
     
     **INSTRUCTIONS:**
@@ -261,6 +238,7 @@ def generate_dossier(seed, attempt, config):
     2. **DESTINATION:** Invent the specific Archetype name she transforms into.
     
     **OUTPUT FORMAT (STRICT XML):**
+    You MUST wrap your answers in the exact XML tags below. Do not use Markdown.
     <antagonist>Name/Title or "None"</antagonist>
     <destination>Archetype Name</destination>
     <trigger>Why she enters the situation</trigger>
@@ -270,6 +248,9 @@ def generate_dossier(seed, attempt, config):
     
     res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
     
+    if "API ERROR" in res or not res:
+        return None
+
     arc_keys = list(STORY_ARCS.keys())
     selected_arc_name = random.choice(arc_keys)
     
@@ -290,7 +271,6 @@ def generate_dossier(seed, attempt, config):
 # --- UI START ---
 st.title("🎬 The Metamorphosis Engine")
 
-# Auto-Load Secrets
 default_anthropic = get_secret("ANTHROPIC_API_KEY")
 default_google = get_secret("GOOGLE_API_KEY")
 
@@ -353,6 +333,8 @@ if st.session_state.step == "setup":
                     st.session_state.dossier = d
                     st.session_state.step = "casting"
                     st.rerun()
+                else:
+                    st.error("Failed to generate premise. The API might be overloaded or blocked.")
 
 elif st.session_state.step == "casting":
     d = st.session_state.dossier
@@ -371,9 +353,9 @@ elif st.session_state.step == "casting":
         st.markdown("**STORY ELEMENTS:**")
         st.markdown(f"- **Location:** {st.session_state.manual_config.get('location') or 'AI Invented'}")
         st.markdown(f"- **Person 1:** {st.session_state.manual_config.get('person1') or 'AI Invented'}")
-        st.markdown(f"- **Person 2:** {st.session_state.manual_config.get('person2') or 'AI Invented'}") # FIXED
+        st.markdown(f"- **Person 2:** {st.session_state.manual_config.get('person2') or 'AI Invented'}") 
         st.markdown(f"- **Idea 1:** {st.session_state.manual_config.get('idea1') or 'AI Invented'}")
-        st.markdown(f"- **Idea 2:** {st.session_state.manual_config.get('idea2') or 'AI Invented'}") # FIXED
+        st.markdown(f"- **Idea 2:** {st.session_state.manual_config.get('idea2') or 'AI Invented'}") 
     
     st.markdown("---")
     if d['blurb']:
@@ -381,7 +363,7 @@ elif st.session_state.step == "casting":
         st.info(f"**Conflict:** {d['conflict']}")
         st.warning(f"**Premise:** {d['blurb']}")
     else:
-        st.error("Parsing Error. Raw Output:")
+        st.error("Parsing Error. The AI did not use the requested XML tags. Raw Output:")
         st.code(d['raw_response'])
 
     note = st.text_area("Director's Note (Optional)", placeholder="e.g. Make sure Idea 1 happens in Chapter 3...")
@@ -410,6 +392,7 @@ elif st.session_state.step == "writing":
     arc = STORY_ARCS[d['arc_name']]
     
     premise = d['blurb'] if d['blurb'] else d['raw_response']
+    
     bible = f"""
     GENRE: {d['genre']} | POV: {d['pov']}
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}

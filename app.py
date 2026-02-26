@@ -1,3 +1,6 @@
+import pyparsing
+pyparsing.DelimitedList = pyparsing.delimitedList
+
 import streamlit as st
 import google.generativeai as genai
 import anthropic
@@ -12,7 +15,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-# --- SESSION STATE INITIALIZATION ---
+# --- SAFE SESSION STATE INITIALIZATION ---
 if "step" not in st.session_state: 
     st.session_state.step = "setup"
 if "dossier" not in st.session_state: 
@@ -83,20 +86,31 @@ def load_file_content(filepath):
     if not os.path.exists(filepath): return None
     with open(filepath, 'r', encoding='utf-8') as f: return f.read()
 
-# NEW ROBUST XML PARSER
 def extract_tag(text, tag_name):
+    """Bulletproof Parser: Checks XML, then Braces, then Markdown."""
     if not text: return ""
-    # Matches <tag>content</tag> across multiple lines
-    pattern = rf'<{tag_name}>(.*?)</{tag_name}>'
-    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+    
+    # 1. XML Style: <tag>content</tag>
+    match = re.search(rf'<{tag_name}>(.*?)</{tag_name}>', text, re.DOTALL | re.IGNORECASE)
     if match: return match.group(1).strip()
+    
+    # 2. Brace Style: {tag: content}
+    match = re.search(rf'\{\s*{tag_name}\s*:(.*?)\}', text, re.DOTALL | re.IGNORECASE)
+    if match: return match.group(1).strip()
+    
+    # 3. Markdown Style: **tag**: content
+    match = re.search(rf'(?:^|\n)\s*(?:\*|-)?\s*(?:\*\*)?{tag_name}(?:\*\*)?\s*:\s*(.*)', text, re.IGNORECASE)
+    if match: return match.group(1).strip()
+    
     return ""
 
 def clean_artifacts(text):
     if not text: return ""
-    # Remove XML tags used for state tracking
-    text = re.sub(r'<state>.*?</state>', '', text, flags=re.DOTALL | re.IGNORECASE)
-    text = re.sub(r'<title>.*?</title>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # Remove XML style tags
+    text = re.sub(r'<(state|title|summary)>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # Remove legacy brace tags
+    text = re.sub(r'\{\s*(State|Title|Summary|Scene)\s*:.*?\}', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'\[\s*(State|Title|Summary)\s*:.*?\]', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
@@ -171,6 +185,11 @@ def format_archetype_option(x):
 def generate_dossier(seed, attempt, config):
     random.seed(f"{seed}_{attempt}")
     
+    scenarios = [f for f in os.listdir(SCENARIO_DIR) if f.endswith('.txt')]
+    theme_file = config.get('theme') or random.choice(scenarios)
+    theme_content = load_file_content(os.path.join(SCENARIO_DIR, theme_file))
+    theme_name = theme_file.replace('theme_', '').replace('.txt', '').replace('_', ' ').title()
+    
     genre = config.get('genre') or random.choice(load_list('genres.txt'))
     job = config.get('job') or random.choice(load_list('occupations.txt'))
     mc_method = config.get('mc_method') or random.choice(load_list('mc_methods.txt'))
@@ -222,7 +241,6 @@ def generate_dossier(seed, attempt, config):
     name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
     char = f"{name}, {random.randint(23, 45)}, {job}"
 
-    # REWRITTEN PROMPT FOR XML OUTPUT
     prompt = f"""
     TASK: Premise for a Dark Transformation novel.
     
@@ -235,7 +253,7 @@ def generate_dossier(seed, attempt, config):
     - Kink/Motifs: {f_string}
     - Protagonist: {char}
     
-    **MODULAR STORY ELEMENTS (Weave these into the plot):**
+    **MODULAR STORY ELEMENTS (You MUST weave BOTH Idea 1 and Idea 2 into the plot if provided):**
     - {elements_string}
     
     **INSTRUCTIONS:**
@@ -243,19 +261,15 @@ def generate_dossier(seed, attempt, config):
     2. **DESTINATION:** Invent the specific Archetype name she transforms into.
     
     **OUTPUT FORMAT (STRICT XML):**
-    You MUST wrap your answers in the exact XML tags below. Do not use Markdown.
     <antagonist>Name/Title or "None"</antagonist>
     <destination>Archetype Name</destination>
     <trigger>Why she enters the situation</trigger>
     <conflict>The trap mechanism / How she loses control</conflict>
-    <blurb>4-sentence summary integrating the elements</blurb>
+    <blurb>4-sentence summary integrating ALL custom elements</blurb>
     """
     
     res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
     
-    if "API ERROR" in res or not res:
-        return None
-
     arc_keys = list(STORY_ARCS.keys())
     selected_arc_name = random.choice(arc_keys)
     
@@ -276,6 +290,7 @@ def generate_dossier(seed, attempt, config):
 # --- UI START ---
 st.title("🎬 The Metamorphosis Engine")
 
+# Auto-Load Secrets
 default_anthropic = get_secret("ANTHROPIC_API_KEY")
 default_google = get_secret("GOOGLE_API_KEY")
 
@@ -338,8 +353,6 @@ if st.session_state.step == "setup":
                     st.session_state.dossier = d
                     st.session_state.step = "casting"
                     st.rerun()
-                else:
-                    st.error("Failed to generate premise. The API might be overloaded or blocked.")
 
 elif st.session_state.step == "casting":
     d = st.session_state.dossier
@@ -358,19 +371,20 @@ elif st.session_state.step == "casting":
         st.markdown("**STORY ELEMENTS:**")
         st.markdown(f"- **Location:** {st.session_state.manual_config.get('location') or 'AI Invented'}")
         st.markdown(f"- **Person 1:** {st.session_state.manual_config.get('person1') or 'AI Invented'}")
+        st.markdown(f"- **Person 2:** {st.session_state.manual_config.get('person2') or 'AI Invented'}") # FIXED
         st.markdown(f"- **Idea 1:** {st.session_state.manual_config.get('idea1') or 'AI Invented'}")
+        st.markdown(f"- **Idea 2:** {st.session_state.manual_config.get('idea2') or 'AI Invented'}") # FIXED
     
     st.markdown("---")
-    # Check if the blurb was successfully extracted using XML tags
     if d['blurb']:
         st.info(f"**Trigger:** {d['trigger']}")
         st.info(f"**Conflict:** {d['conflict']}")
         st.warning(f"**Premise:** {d['blurb']}")
     else:
-        st.error("Parsing Error. The AI did not use the requested XML tags. Raw Output:")
+        st.error("Parsing Error. Raw Output:")
         st.code(d['raw_response'])
 
-    note = st.text_area("Director's Note (Optional)", placeholder="e.g. Make sure the jealous co-worker appears in Chapter 3...")
+    note = st.text_area("Director's Note (Optional)", placeholder="e.g. Make sure Idea 1 happens in Chapter 3...")
     
     b1, b2, b3 = st.columns(3)
     if b1.button("✅ Action!"):
@@ -396,7 +410,6 @@ elif st.session_state.step == "writing":
     arc = STORY_ARCS[d['arc_name']]
     
     premise = d['blurb'] if d['blurb'] else d['raw_response']
-    
     bible = f"""
     GENRE: {d['genre']} | POV: {d['pov']}
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
@@ -433,7 +446,7 @@ elif st.session_state.step == "writing":
         **PACING DIRECTIVE:** SLOW BURN. Do not summarize. Write distinct, heavy scenes with dialogue and internal monologue. Ensure the Story Elements appear naturally.
         
         **OUTPUT FORMAT (STRICT XML):**
-        Write the chapter text, then end your response with exactly these tags:
+        Write the chapter text, then end your response with EXACTLY these tags:
         <state>Current Physical and Mental State summary</state>
         <title>Invent a thematic Chapter Title</title>
         """

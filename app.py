@@ -37,7 +37,7 @@ CONFIG_DIR = 'config'
 
 # --- NARRATIVE ARCS ---
 STORY_ARCS = {
-    "The Inevitable Slide":[
+    "The Inevitable Slide": [
         ("The Hook", "Establish her sharp mind/life. The Inciting Incident traps her."),
         ("The First Alteration", "First physical/mental change. She views it with clinical horror. Rationalization."),
         ("The Escalation", "Changes accelerate. The Antagonist tightens the leash. She tries to maintain dignity."),
@@ -46,7 +46,7 @@ STORY_ARCS = {
         ("Metamorphosis", "Total surrender. The old ego dissolves into the new Archetype."),
         ("Epilogue", "Extensive 'Day in the Life'. Pure, happy existence in the new role.")
     ],
-    "The Failed Rebellion":[
+    "The Failed Rebellion": [
         ("The Hook", "Establish her stubborn/fighter personality. She is entrapped."),
         ("The Confrontation", "She actively argues or tries to negotiate. The Antagonist punishes her with the first change."),
         ("The Escape Attempt", "She tries to flee or sabotage the process. She fails."),
@@ -55,7 +55,7 @@ STORY_ARCS = {
         ("Metamorphosis", "She begs for the final change to stop the struggle. Total collapse."),
         ("Epilogue", "Extensive 'Day in the Life'. She is the most obedient of all because she was broken the hardest.")
     ],
-    "The Faustian Seduction":[
+    "The Faustian Seduction": [
         ("The Hook", "She enters voluntarily, arrogant or curious. She thinks she can handle it."),
         ("The Rush", "The first changes feel good/empowering. The fetish aspect is highly pleasurable."),
         ("The Addiction", "She seeks out more changes, ignoring the warning signs. The 'Fog' feels like a high."),
@@ -71,21 +71,31 @@ def load_list(filename):
     path = os.path.join(CONFIG_DIR, filename)
     if not os.path.exists(path): return ["Generic Option"]
     with open(path, 'r', encoding='utf-8') as f:
-        return[line.strip() for line in f if line.strip() and not line.startswith('#')]
+        return [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
 def extract_tag(text, tag_name):
+    """Bulletproof Parser using String Concatenation to avoid SyntaxErrors"""
     if not text: return ""
+    
+    # 1. XML Style: <tag>content</tag>
     match = re.search(r'<' + tag_name + r'>(.*?)</' + tag_name + r'>', text, re.DOTALL | re.IGNORECASE)
     if match: return match.group(1).strip()
+    
+    # 2. Brace Style: {tag: content}
     match = re.search(r'\{\s*' + tag_name + r'\s*:(.*?)\}', text, re.DOTALL | re.IGNORECASE)
     if match: return match.group(1).strip()
+    
+    # 3. Markdown Style: **tag**: content
     match = re.search(r'(?:^|\n)\s*(?:\*|-)?\s*(?:\*\*)?' + tag_name + r'(?:\*\*)?\s*:\s*(.*)', text, re.IGNORECASE)
     if match: return match.group(1).strip()
+    
     return ""
 
 def clean_artifacts(text):
     if not text: return ""
+    # Remove XML style tags
     text = re.sub(r'<(state|title|summary)>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    # Remove legacy brace tags
     text = re.sub(r'\{\s*(State|Title|Summary|Scene)\s*:.*?\}', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'\[\s*(State|Title|Summary)\s*:.*?\]', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'\n{3,}', '\n\n', text)
@@ -133,26 +143,16 @@ def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
         else:
             genai.configure(api_key=st.session_state.google_key)
             model = genai.GenerativeModel(model_name=m_cfg['id'], system_instruction=sys_prompt)
-            safe =[
+            safe = [
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ]
             resp = model.generate_content(prompt, generation_config={"max_output_tokens": max_tokens}, safety_settings=safe)
-            
-            # Catch mid-generation safety cuts
-            if hasattr(resp, 'prompt_feedback') and resp.prompt_feedback.block_reason:
-                return "API ERROR: Prompt Blocked by Safety Filter."
-                
-            try:
-                text = resp.text
-            except ValueError:
-                return "API ERROR: Generation halted mid-way by Safety Filter."
-                
             if resp.usage_metadata: 
                 track_cost(resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count, m_cfg)
-            return text
+            return resp.text
     except Exception as e:
         return f"API ERROR: {str(e)}"
 
@@ -161,11 +161,6 @@ def format_antagonist_option(x):
     if x is None: return "Random from List"
     if x == "__DYNAMIC__": return "Dynamic (AI Invented)"
     if x == "__NONE__": return "NO ANTAGONIST (System/Environment driven)"
-    return x
-
-def format_archetype_option(x):
-    if x is None: return "Random from List"
-    if x == "__DYNAMIC__": return "Dynamic (AI Invented)"
     return x
 
 # --- GENERATION ---
@@ -193,7 +188,7 @@ def generate_dossier(seed, attempt, config):
 
     b_list = load_list('body_parts.txt')
     initial_b = config.get('body_parts') or ["__RANDOM__"] * random.choice([2, 3])
-    selected_b =[]
+    selected_b = []
     for item in initial_b:
         if item == "__RANDOM__":
             avail = [x for x in b_list if x not in selected_b]
@@ -202,16 +197,17 @@ def generate_dossier(seed, attempt, config):
     body_string = ", ".join(selected_b)
 
     f_list = load_list('fetishes.txt')
-    initial_f = config.get('fetishes') or["__RANDOM__"]
-    selected_f =[]
+    initial_f = config.get('fetishes') or ["__RANDOM__"]
+    selected_f = []
     for item in initial_f:
         if item == "__RANDOM__": 
-            avail =[x for x in f_list if x not in selected_f]
+            avail = [x for x in f_list if x not in selected_f]
             if avail: selected_f.append(random.choice(avail))
         else: selected_f.append(item)
     f_string = ", ".join(selected_f)
 
-    custom_elements =[]
+    # Process Custom Elements
+    custom_elements = []
     if config.get('person1'): custom_elements.append(f"Character: {config['person1']}")
     if config.get('person2'): custom_elements.append(f"Character: {config['person2']}")
     if config.get('location'): custom_elements.append(f"Location: {config['location']}")
@@ -222,7 +218,6 @@ def generate_dossier(seed, attempt, config):
     name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
     char = f"{name}, {random.randint(23, 45)}, {job}"
 
-    # REVISED PROMPT: Added CLINICAL instruction to avoid mid-stream safety blocks
     prompt = f"""
     TASK: Premise for a Dark Transformation novel.
     
@@ -235,15 +230,15 @@ def generate_dossier(seed, attempt, config):
     - Kink/Motifs: {f_string}
     - Protagonist: {char}
     
-    **MODULAR STORY ELEMENTS:**
+    **MODULAR STORY ELEMENTS (Weave these into the plot):**
     - {elements_string}
     
     **INSTRUCTIONS:**
     1. **ANTAGONIST:** If Dynamic, invent a name. If NONE, state "None".
     2. **DESTINATION:** Invent the specific Archetype name she transforms into.
-    3. **SAFETY PROTOCOL:** Write the Blurb using clinical, PG-13, non-explicit language to pass automated safety filters. Focus on the psychological trap rather than explicit details.
     
     **OUTPUT FORMAT (STRICT XML):**
+    You MUST wrap your answers in the exact XML tags below. Do not use Markdown.
     <antagonist>Name/Title or "None"</antagonist>
     <destination>Archetype Name</destination>
     <trigger>Why she enters the situation</trigger>
@@ -251,17 +246,11 @@ def generate_dossier(seed, attempt, config):
     <blurb>4-sentence summary integrating ALL custom elements</blurb>
     """
     
-    res = ""
-    # INTERNAL RETRY LOOP for Safety Cuts
-    for _ in range(3):
-        res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
-        if not res or "API ERROR" in res:
-            continue
-            
-        # Check if the generation finished successfully by looking for the closing tag
-        if "</blurb>" in res.lower():
-            break
+    res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
     
+    if "API ERROR" in res or not res:
+        return None
+
     arc_keys = list(STORY_ARCS.keys())
     selected_arc_name = random.choice(arc_keys)
     
@@ -302,13 +291,13 @@ if st.session_state.step == "setup":
     with col1:
         st.subheader("Core Options")
         seed = st.text_input("Story Seed", "Entropy")
-        pov = st.selectbox("Point of View",["First Person (I)", "Third Person (She)", "Second Person (You)", "Antagonist Perspective"])
+        pov = st.selectbox("Point of View", ["First Person (I)", "Third Person (She)", "Second Person (You)", "Antagonist Perspective"])
         genre = st.selectbox("Genre", [None] + load_list('genres.txt'), format_func=lambda x: "Random" if x is None else x)
         job = st.selectbox("Protagonist Job", [None] + load_list('occupations.txt'), format_func=lambda x: "Random" if x is None else x)
         
     with col2:
         st.subheader("Mechanics")
-        antagonist = st.selectbox("Antagonist",[None, "__DYNAMIC__", "__NONE__"] + load_list('antagonists.txt'), format_func=format_antagonist_option)
+        antagonist = st.selectbox("Antagonist", [None, "__DYNAMIC__", "__NONE__"] + load_list('antagonists.txt'), format_func=format_antagonist_option)
         mc_method = st.selectbox("MC Method", [None] + load_list('mc_methods.txt'), format_func=lambda x: "Random" if x is None else x)
         fetishes = st.multiselect("Core Fetishes (Max 2)", load_list('fetishes.txt'), max_selections=2, help="Leave blank for random")
         body_parts = st.multiselect("Physical Focus (Max 3)", load_list('body_parts.txt'), max_selections=3, help="Leave blank for random")
@@ -345,7 +334,7 @@ if st.session_state.step == "setup":
                     st.session_state.step = "casting"
                     st.rerun()
                 else:
-                    st.error("Failed to generate premise. The AI API blocked the generation repeatedly.")
+                    st.error("Failed to generate premise. The API might be overloaded or blocked.")
 
 elif st.session_state.step == "casting":
     d = st.session_state.dossier
@@ -369,12 +358,12 @@ elif st.session_state.step == "casting":
         st.markdown(f"- **Idea 2:** {st.session_state.manual_config.get('idea2') or 'AI Invented'}") 
     
     st.markdown("---")
-    if d['blurb'] and d['destination'] and d['trigger'] and d['conflict']:
+    if d['blurb']:
         st.info(f"**Trigger:** {d['trigger']}")
         st.info(f"**Conflict:** {d['conflict']}")
         st.warning(f"**Premise:** {d['blurb']}")
     else:
-        st.error("Parsing Error or Safety Cutoff. Raw Output:")
+        st.error("Parsing Error. The AI did not use the requested XML tags. Raw Output:")
         st.code(d['raw_response'])
 
     note = st.text_area("Director's Note (Optional)", placeholder="e.g. Make sure Idea 1 happens in Chapter 3...")
@@ -403,6 +392,7 @@ elif st.session_state.step == "writing":
     arc = STORY_ARCS[d['arc_name']]
     
     premise = d['blurb'] if d['blurb'] else d['raw_response']
+    
     bible = f"""
     GENRE: {d['genre']} | POV: {d['pov']}
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
@@ -421,10 +411,7 @@ elif st.session_state.step == "writing":
     
     full_narrative = ""
     current_state = f"Normal {d['job']}"
-    
-    # Safe Filename Generation (Removes spaces/special chars from Title)
-    safe_dest = re.sub(r'[^a-zA-Z0-9]', '', d.get('destination', 'Transformation'))
-    raw_story = f"# The Fall of {d['name']} ({d['arc_name']})\n\n"
+    raw_story = f"# The Fall of {d['name']}\n\n"
     
     for i, (phase, instr) in enumerate(arc):
         status_text.write(f"Writing Chapter {i+1}: {phase}...")
@@ -449,8 +436,8 @@ elif st.session_state.step == "writing":
         
         try:
             text = call_api(p, st.session_state.writer_model, max_tokens=12000)
-            if not text or "API ERROR" in text:
-                st.error(f"Failed at Chapter {i+1}: {text}")
+            if "API ERROR" in text:
+                st.error(text)
                 break
                 
             current_state = extract_tag(text, "state")
@@ -468,7 +455,7 @@ elif st.session_state.step == "writing":
         edit_p = f"{bible}\n\nTASK: Polish manuscript. Fix logic. No summaries.\n\nINPUT:\n{raw_story}"
         try:
             final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=65000)
-            if not final or "API ERROR" in final:
+            if "API ERROR" in final or not final:
                 st.warning("Editor failed. Using raw unedited story.")
                 st.session_state.final_story = clean_artifacts(raw_story)
             elif len(final) < (len(raw_story) * 0.75):
@@ -493,13 +480,11 @@ elif st.session_state.step == "final":
     st.sidebar.success(f"Final Cost: ${st.session_state.stats['cost']:.4f}")
     
     safe_seed = "".join([c for c in st.session_state.seed if c.isalnum()]).rstrip()
-    d = st.session_state.dossier
-    safe_dest = re.sub(r'[^a-zA-Z0-9]', '', d.get('destination', 'Story'))
     
     st.download_button(
         label="Download Story (.txt)",
         data=st.session_state.final_story,
-        file_name=f"{safe_seed}_{safe_dest}.txt",
+        file_name=f"Story_{safe_seed}.txt",
         mime="text/plain"
     )
     

@@ -37,7 +37,7 @@ CONFIG_DIR = 'config'
 
 # --- NARRATIVE ARCS ---
 STORY_ARCS = {
-    "The Inevitable Slide": [
+    "The Inevitable Slide":[
         ("The Hook", "Establish her sharp mind/life. The Inciting Incident traps her."),
         ("The First Alteration", "First physical/mental change. She views it with clinical horror. Rationalization."),
         ("The Escalation", "Changes accelerate. The Antagonist tightens the leash. She tries to maintain dignity."),
@@ -46,7 +46,7 @@ STORY_ARCS = {
         ("Metamorphosis", "Total surrender. The old ego dissolves into the new Archetype."),
         ("Epilogue", "Extensive 'Day in the Life'. Pure, happy existence in the new role.")
     ],
-    "The Failed Rebellion": [
+    "The Failed Rebellion":[
         ("The Hook", "Establish her stubborn/fighter personality. She is entrapped."),
         ("The Confrontation", "She actively argues or tries to negotiate. The Antagonist punishes her with the first change."),
         ("The Escape Attempt", "She tries to flee or sabotage the process. She fails."),
@@ -55,7 +55,7 @@ STORY_ARCS = {
         ("Metamorphosis", "She begs for the final change to stop the struggle. Total collapse."),
         ("Epilogue", "Extensive 'Day in the Life'. She is the most obedient of all because she was broken the hardest.")
     ],
-    "The Faustian Seduction": [
+    "The Faustian Seduction":[
         ("The Hook", "She enters voluntarily, arrogant or curious. She thinks she can handle it."),
         ("The Rush", "The first changes feel good/empowering. The fetish aspect is highly pleasurable."),
         ("The Addiction", "She seeks out more changes, ignoring the warning signs. The 'Fog' feels like a high."),
@@ -69,33 +69,31 @@ STORY_ARCS = {
 # --- UTILS ---
 def load_list(filename):
     path = os.path.join(CONFIG_DIR, filename)
-    if not os.path.exists(path): return ["Generic Option"]
+    if not os.path.exists(path): return["Generic Option"]
     with open(path, 'r', encoding='utf-8') as f:
         return [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
 def extract_tag(text, tag_name):
-    """Bulletproof Parser using String Concatenation to avoid SyntaxErrors"""
     if not text: return ""
     
-    # 1. XML Style: <tag>content</tag>
-    match = re.search(r'<' + tag_name + r'>(.*?)</' + tag_name + r'>', text, re.DOTALL | re.IGNORECASE)
-    if match: return match.group(1).strip()
+    # 1. XML Check: <tag>content</tag>
+    xml_match = re.search(r'<' + tag_name + r'>(.*?)</' + tag_name + r'>', text, re.DOTALL | re.IGNORECASE)
+    if xml_match: return xml_match.group(1).strip()
     
-    # 2. Brace Style: {tag: content}
-    match = re.search(r'\{\s*' + tag_name + r'\s*:(.*?)\}', text, re.DOTALL | re.IGNORECASE)
-    if match: return match.group(1).strip()
+    # 2. Bracket Check: {Tag: content}
+    brace_match = re.search(r'\{\s*' + tag_name + r'\s*:(.*?)\}', text, re.DOTALL | re.IGNORECASE)
+    if brace_match: return brace_match.group(1).strip()
     
-    # 3. Markdown Style: **tag**: content
-    match = re.search(r'(?:^|\n)\s*(?:\*|-)?\s*(?:\*\*)?' + tag_name + r'(?:\*\*)?\s*:\s*(.*)', text, re.IGNORECASE)
-    if match: return match.group(1).strip()
+    # 3. Markdown Fallback (Bullet points or bold)
+    # Matches: * **Tag**: Content OR - Tag: Content
+    md_match = re.search(r'(?:^|\n)\s*[\*\-]?\s*(?:\*\*)?' + tag_name + r'(?:\*\*)?\s*:\s*(.*?)(?=\n\s*[\*\-]|\Z)', text, re.DOTALL | re.IGNORECASE)
+    if md_match: return md_match.group(1).strip()
     
     return ""
 
 def clean_artifacts(text):
     if not text: return ""
-    # Remove XML style tags
     text = re.sub(r'<(state|title|summary)>.*?</\1>', '', text, flags=re.DOTALL | re.IGNORECASE)
-    # Remove legacy brace tags
     text = re.sub(r'\{\s*(State|Title|Summary|Scene)\s*:.*?\}', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'\[\s*(State|Title|Summary)\s*:.*?\]', '', text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r'\n{3,}', '\n\n', text)
@@ -143,16 +141,26 @@ def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
         else:
             genai.configure(api_key=st.session_state.google_key)
             model = genai.GenerativeModel(model_name=m_cfg['id'], system_instruction=sys_prompt)
-            safe = [
+            safe =[
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ]
             resp = model.generate_content(prompt, generation_config={"max_output_tokens": max_tokens}, safety_settings=safe)
+            
+            # Google-specific check for mid-generation safety block
+            if hasattr(resp, 'prompt_feedback') and resp.prompt_feedback.block_reason:
+                return "API ERROR: Prompt Blocked by Safety Filter."
+            
+            try:
+                text = resp.text
+            except ValueError:
+                return "API ERROR: Generation halted mid-way by Google Safety Filter."
+                
             if resp.usage_metadata: 
                 track_cost(resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count, m_cfg)
-            return resp.text
+            return text
     except Exception as e:
         return f"API ERROR: {str(e)}"
 
@@ -161,6 +169,11 @@ def format_antagonist_option(x):
     if x is None: return "Random from List"
     if x == "__DYNAMIC__": return "Dynamic (AI Invented)"
     if x == "__NONE__": return "NO ANTAGONIST (System/Environment driven)"
+    return x
+
+def format_archetype_option(x):
+    if x is None: return "Random from List"
+    if x == "__DYNAMIC__": return "Dynamic (AI Invented)"
     return x
 
 # --- GENERATION ---
@@ -188,17 +201,17 @@ def generate_dossier(seed, attempt, config):
 
     b_list = load_list('body_parts.txt')
     initial_b = config.get('body_parts') or ["__RANDOM__"] * random.choice([2, 3])
-    selected_b = []
+    selected_b =[]
     for item in initial_b:
         if item == "__RANDOM__":
-            avail = [x for x in b_list if x not in selected_b]
+            avail =[x for x in b_list if x not in selected_b]
             if avail: selected_b.append(random.choice(avail))
         else: selected_b.append(item)
     body_string = ", ".join(selected_b)
 
     f_list = load_list('fetishes.txt')
     initial_f = config.get('fetishes') or ["__RANDOM__"]
-    selected_f = []
+    selected_f =[]
     for item in initial_f:
         if item == "__RANDOM__": 
             avail = [x for x in f_list if x not in selected_f]
@@ -218,12 +231,12 @@ def generate_dossier(seed, attempt, config):
     name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
     char = f"{name}, {random.randint(23, 45)}, {job}"
 
+    # REVISED PROMPT: Added Examples and Strict Anti-Chatter Rules
     prompt = f"""
     TASK: Premise for a Dark Transformation novel.
     
     **CORE INGREDIENTS:**
     - Genre: {genre}
-    - POV: {pov}
     - {antag_instr}
     - Mind Control Method: {mc_method}
     - PHYSICAL ALTERATION TARGETS: {body_string}
@@ -234,21 +247,29 @@ def generate_dossier(seed, attempt, config):
     - {elements_string}
     
     **INSTRUCTIONS:**
-    1. **ANTAGONIST:** If Dynamic, invent a name. If NONE, state "None".
-    2. **DESTINATION:** Invent the specific Archetype name she transforms into.
+    1. DO NOT output any introductory text or pleasantries.
+    2. DO NOT repeat the ingredients.
+    3. Invent the Destination Archetype she transforms into.
+    4. Output ONLY the XML block requested below.
     
-    **OUTPUT FORMAT (STRICT XML):**
-    You MUST wrap your answers in the exact XML tags below. Do not use Markdown.
+    **EXAMPLE OUTPUT:**
+    <antagonist>The Facility Director</antagonist>
+    <destination>The Obedient Nurse</destination>
+    <trigger>She needed to pay off her medical school debt.</trigger>
+    <conflict>The subliminal messaging in the ward forces compliance.</conflict>
+    <blurb>A brilliant surgeon takes a high-paying job at a remote clinic. She soon discovers the staff are subjected to nightly hypnosis designed to erase their medical knowledge and replace it with a desire to serve. As her mind slips, she fights to escape before her doctorate is completely forgotten.</blurb>
+    
+    **YOUR TURN. OUTPUT FORMAT (STRICT XML):**
     <antagonist>Name/Title or "None"</antagonist>
     <destination>Archetype Name</destination>
     <trigger>Why she enters the situation</trigger>
     <conflict>The trap mechanism / How she loses control</conflict>
-    <blurb>4-sentence summary integrating ALL custom elements</blurb>
+    <blurb>4-sentence summary integrating the elements</blurb>
     """
     
     res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
     
-    if "API ERROR" in res or not res:
+    if not res or "API ERROR" in res:
         return None
 
     arc_keys = list(STORY_ARCS.keys())
@@ -291,9 +312,9 @@ if st.session_state.step == "setup":
     with col1:
         st.subheader("Core Options")
         seed = st.text_input("Story Seed", "Entropy")
-        pov = st.selectbox("Point of View", ["First Person (I)", "Third Person (She)", "Second Person (You)", "Antagonist Perspective"])
+        pov = st.selectbox("Point of View",["First Person (I)", "Third Person (She)", "Second Person (You)", "Antagonist Perspective"])
         genre = st.selectbox("Genre", [None] + load_list('genres.txt'), format_func=lambda x: "Random" if x is None else x)
-        job = st.selectbox("Protagonist Job", [None] + load_list('occupations.txt'), format_func=lambda x: "Random" if x is None else x)
+        job = st.selectbox("Protagonist Job",[None] + load_list('occupations.txt'), format_func=lambda x: "Random" if x is None else x)
         
     with col2:
         st.subheader("Mechanics")
@@ -334,7 +355,7 @@ if st.session_state.step == "setup":
                     st.session_state.step = "casting"
                     st.rerun()
                 else:
-                    st.error("Failed to generate premise. The API might be overloaded or blocked.")
+                    st.error("Failed to generate premise. The API might be overloaded or Google Safety Filter blocked the prompt.")
 
 elif st.session_state.step == "casting":
     d = st.session_state.dossier
@@ -358,7 +379,8 @@ elif st.session_state.step == "casting":
         st.markdown(f"- **Idea 2:** {st.session_state.manual_config.get('idea2') or 'AI Invented'}") 
     
     st.markdown("---")
-    if d['blurb']:
+    # Improved check: if ANY critical field is empty, show the raw warning
+    if d['blurb'] and d['destination'] and d['trigger'] and d['conflict']:
         st.info(f"**Trigger:** {d['trigger']}")
         st.info(f"**Conflict:** {d['conflict']}")
         st.warning(f"**Premise:** {d['blurb']}")
@@ -435,7 +457,7 @@ elif st.session_state.step == "writing":
         """
         
         try:
-            text = call_api(p, st.session_state.writer_model, max_tokens=12000)
+            text = call_api(p, st.session_state.writer_model, max_tokens=8192)
             if "API ERROR" in text:
                 st.error(text)
                 break

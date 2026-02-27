@@ -69,26 +69,18 @@ STORY_ARCS = {
 # --- UTILS ---
 def load_list(filename):
     path = os.path.join(CONFIG_DIR, filename)
-    if not os.path.exists(path): return["Generic Option"]
+    if not os.path.exists(path): return ["Generic Option"]
     with open(path, 'r', encoding='utf-8') as f:
-        return [line.strip() for line in f if line.strip() and not line.startswith('#')]
+        return[line.strip() for line in f if line.strip() and not line.startswith('#')]
 
 def extract_tag(text, tag_name):
     if not text: return ""
-    
-    # 1. XML Check: <tag>content</tag>
-    xml_match = re.search(r'<' + tag_name + r'>(.*?)</' + tag_name + r'>', text, re.DOTALL | re.IGNORECASE)
-    if xml_match: return xml_match.group(1).strip()
-    
-    # 2. Bracket Check: {Tag: content}
-    brace_match = re.search(r'\{\s*' + tag_name + r'\s*:(.*?)\}', text, re.DOTALL | re.IGNORECASE)
-    if brace_match: return brace_match.group(1).strip()
-    
-    # 3. Markdown Fallback (Bullet points or bold)
-    # Matches: * **Tag**: Content OR - Tag: Content
-    md_match = re.search(r'(?:^|\n)\s*[\*\-]?\s*(?:\*\*)?' + tag_name + r'(?:\*\*)?\s*:\s*(.*?)(?=\n\s*[\*\-]|\Z)', text, re.DOTALL | re.IGNORECASE)
-    if md_match: return md_match.group(1).strip()
-    
+    match = re.search(r'<' + tag_name + r'>(.*?)</' + tag_name + r'>', text, re.DOTALL | re.IGNORECASE)
+    if match: return match.group(1).strip()
+    match = re.search(r'\{\s*' + tag_name + r'\s*:(.*?)\}', text, re.DOTALL | re.IGNORECASE)
+    if match: return match.group(1).strip()
+    match = re.search(r'(?:^|\n)\s*(?:\*|-)?\s*(?:\*\*)?' + tag_name + r'(?:\*\*)?\s*:\s*(.*)', text, re.IGNORECASE)
+    if match: return match.group(1).strip()
     return ""
 
 def clean_artifacts(text):
@@ -149,14 +141,14 @@ def call_api(prompt, model_key, is_editor=False, max_tokens=8192):
             ]
             resp = model.generate_content(prompt, generation_config={"max_output_tokens": max_tokens}, safety_settings=safe)
             
-            # Google-specific check for mid-generation safety block
+            # Catch mid-generation safety cuts
             if hasattr(resp, 'prompt_feedback') and resp.prompt_feedback.block_reason:
                 return "API ERROR: Prompt Blocked by Safety Filter."
-            
+                
             try:
                 text = resp.text
             except ValueError:
-                return "API ERROR: Generation halted mid-way by Google Safety Filter."
+                return "API ERROR: Generation halted mid-way by Safety Filter."
                 
             if resp.usage_metadata: 
                 track_cost(resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count, m_cfg)
@@ -204,23 +196,22 @@ def generate_dossier(seed, attempt, config):
     selected_b =[]
     for item in initial_b:
         if item == "__RANDOM__":
-            avail =[x for x in b_list if x not in selected_b]
+            avail = [x for x in b_list if x not in selected_b]
             if avail: selected_b.append(random.choice(avail))
         else: selected_b.append(item)
     body_string = ", ".join(selected_b)
 
     f_list = load_list('fetishes.txt')
-    initial_f = config.get('fetishes') or ["__RANDOM__"]
+    initial_f = config.get('fetishes') or["__RANDOM__"]
     selected_f =[]
     for item in initial_f:
         if item == "__RANDOM__": 
-            avail = [x for x in f_list if x not in selected_f]
+            avail =[x for x in f_list if x not in selected_f]
             if avail: selected_f.append(random.choice(avail))
         else: selected_f.append(item)
     f_string = ", ".join(selected_f)
 
-    # Process Custom Elements
-    custom_elements = []
+    custom_elements =[]
     if config.get('person1'): custom_elements.append(f"Character: {config['person1']}")
     if config.get('person2'): custom_elements.append(f"Character: {config['person2']}")
     if config.get('location'): custom_elements.append(f"Location: {config['location']}")
@@ -231,47 +222,46 @@ def generate_dossier(seed, attempt, config):
     name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
     char = f"{name}, {random.randint(23, 45)}, {job}"
 
-    # REVISED PROMPT: Added Examples and Strict Anti-Chatter Rules
+    # REVISED PROMPT: Added CLINICAL instruction to avoid mid-stream safety blocks
     prompt = f"""
     TASK: Premise for a Dark Transformation novel.
     
     **CORE INGREDIENTS:**
     - Genre: {genre}
+    - POV: {pov}
     - {antag_instr}
     - Mind Control Method: {mc_method}
     - PHYSICAL ALTERATION TARGETS: {body_string}
     - Kink/Motifs: {f_string}
     - Protagonist: {char}
     
-    **MODULAR STORY ELEMENTS (Weave these into the plot):**
+    **MODULAR STORY ELEMENTS:**
     - {elements_string}
     
     **INSTRUCTIONS:**
-    1. DO NOT output any introductory text or pleasantries.
-    2. DO NOT repeat the ingredients.
-    3. Invent the Destination Archetype she transforms into.
-    4. Output ONLY the XML block requested below.
+    1. **ANTAGONIST:** If Dynamic, invent a name. If NONE, state "None".
+    2. **DESTINATION:** Invent the specific Archetype name she transforms into.
+    3. **SAFETY PROTOCOL:** Write the Blurb using clinical, PG-13, non-explicit language to pass automated safety filters. Focus on the psychological trap rather than explicit details.
     
-    **EXAMPLE OUTPUT:**
-    <antagonist>The Facility Director</antagonist>
-    <destination>The Obedient Nurse</destination>
-    <trigger>She needed to pay off her medical school debt.</trigger>
-    <conflict>The subliminal messaging in the ward forces compliance.</conflict>
-    <blurb>A brilliant surgeon takes a high-paying job at a remote clinic. She soon discovers the staff are subjected to nightly hypnosis designed to erase their medical knowledge and replace it with a desire to serve. As her mind slips, she fights to escape before her doctorate is completely forgotten.</blurb>
-    
-    **YOUR TURN. OUTPUT FORMAT (STRICT XML):**
+    **OUTPUT FORMAT (STRICT XML):**
     <antagonist>Name/Title or "None"</antagonist>
     <destination>Archetype Name</destination>
     <trigger>Why she enters the situation</trigger>
     <conflict>The trap mechanism / How she loses control</conflict>
-    <blurb>4-sentence summary integrating the elements</blurb>
+    <blurb>4-sentence summary integrating ALL custom elements</blurb>
     """
     
-    res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
+    res = ""
+    # INTERNAL RETRY LOOP for Safety Cuts
+    for _ in range(3):
+        res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
+        if not res or "API ERROR" in res:
+            continue
+            
+        # Check if the generation finished successfully by looking for the closing tag
+        if "</blurb>" in res.lower():
+            break
     
-    if not res or "API ERROR" in res:
-        return None
-
     arc_keys = list(STORY_ARCS.keys())
     selected_arc_name = random.choice(arc_keys)
     
@@ -314,11 +304,11 @@ if st.session_state.step == "setup":
         seed = st.text_input("Story Seed", "Entropy")
         pov = st.selectbox("Point of View",["First Person (I)", "Third Person (She)", "Second Person (You)", "Antagonist Perspective"])
         genre = st.selectbox("Genre", [None] + load_list('genres.txt'), format_func=lambda x: "Random" if x is None else x)
-        job = st.selectbox("Protagonist Job",[None] + load_list('occupations.txt'), format_func=lambda x: "Random" if x is None else x)
+        job = st.selectbox("Protagonist Job", [None] + load_list('occupations.txt'), format_func=lambda x: "Random" if x is None else x)
         
     with col2:
         st.subheader("Mechanics")
-        antagonist = st.selectbox("Antagonist", [None, "__DYNAMIC__", "__NONE__"] + load_list('antagonists.txt'), format_func=format_antagonist_option)
+        antagonist = st.selectbox("Antagonist",[None, "__DYNAMIC__", "__NONE__"] + load_list('antagonists.txt'), format_func=format_antagonist_option)
         mc_method = st.selectbox("MC Method", [None] + load_list('mc_methods.txt'), format_func=lambda x: "Random" if x is None else x)
         fetishes = st.multiselect("Core Fetishes (Max 2)", load_list('fetishes.txt'), max_selections=2, help="Leave blank for random")
         body_parts = st.multiselect("Physical Focus (Max 3)", load_list('body_parts.txt'), max_selections=3, help="Leave blank for random")
@@ -355,7 +345,7 @@ if st.session_state.step == "setup":
                     st.session_state.step = "casting"
                     st.rerun()
                 else:
-                    st.error("Failed to generate premise. The API might be overloaded or Google Safety Filter blocked the prompt.")
+                    st.error("Failed to generate premise. The AI API blocked the generation repeatedly.")
 
 elif st.session_state.step == "casting":
     d = st.session_state.dossier
@@ -379,13 +369,12 @@ elif st.session_state.step == "casting":
         st.markdown(f"- **Idea 2:** {st.session_state.manual_config.get('idea2') or 'AI Invented'}") 
     
     st.markdown("---")
-    # Improved check: if ANY critical field is empty, show the raw warning
     if d['blurb'] and d['destination'] and d['trigger'] and d['conflict']:
         st.info(f"**Trigger:** {d['trigger']}")
         st.info(f"**Conflict:** {d['conflict']}")
         st.warning(f"**Premise:** {d['blurb']}")
     else:
-        st.error("Parsing Error. The AI did not use the requested XML tags. Raw Output:")
+        st.error("Parsing Error or Safety Cutoff. Raw Output:")
         st.code(d['raw_response'])
 
     note = st.text_area("Director's Note (Optional)", placeholder="e.g. Make sure Idea 1 happens in Chapter 3...")
@@ -414,7 +403,6 @@ elif st.session_state.step == "writing":
     arc = STORY_ARCS[d['arc_name']]
     
     premise = d['blurb'] if d['blurb'] else d['raw_response']
-    
     bible = f"""
     GENRE: {d['genre']} | POV: {d['pov']}
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
@@ -433,7 +421,10 @@ elif st.session_state.step == "writing":
     
     full_narrative = ""
     current_state = f"Normal {d['job']}"
-    raw_story = f"# The Fall of {d['name']}\n\n"
+    
+    # Safe Filename Generation (Removes spaces/special chars from Title)
+    safe_dest = re.sub(r'[^a-zA-Z0-9]', '', d.get('destination', 'Transformation'))
+    raw_story = f"# The Fall of {d['name']} ({d['arc_name']})\n\n"
     
     for i, (phase, instr) in enumerate(arc):
         status_text.write(f"Writing Chapter {i+1}: {phase}...")
@@ -457,9 +448,9 @@ elif st.session_state.step == "writing":
         """
         
         try:
-            text = call_api(p, st.session_state.writer_model, max_tokens=8192)
-            if "API ERROR" in text:
-                st.error(text)
+            text = call_api(p, st.session_state.writer_model, max_tokens=12000)
+            if not text or "API ERROR" in text:
+                st.error(f"Failed at Chapter {i+1}: {text}")
                 break
                 
             current_state = extract_tag(text, "state")
@@ -477,7 +468,7 @@ elif st.session_state.step == "writing":
         edit_p = f"{bible}\n\nTASK: Polish manuscript. Fix logic. No summaries.\n\nINPUT:\n{raw_story}"
         try:
             final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=65000)
-            if "API ERROR" in final or not final:
+            if not final or "API ERROR" in final:
                 st.warning("Editor failed. Using raw unedited story.")
                 st.session_state.final_story = clean_artifacts(raw_story)
             elif len(final) < (len(raw_story) * 0.75):
@@ -502,11 +493,13 @@ elif st.session_state.step == "final":
     st.sidebar.success(f"Final Cost: ${st.session_state.stats['cost']:.4f}")
     
     safe_seed = "".join([c for c in st.session_state.seed if c.isalnum()]).rstrip()
+    d = st.session_state.dossier
+    safe_dest = re.sub(r'[^a-zA-Z0-9]', '', d.get('destination', 'Story'))
     
     st.download_button(
         label="Download Story (.txt)",
         data=st.session_state.final_story,
-        file_name=f"Story_{safe_seed}.txt",
+        file_name=f"{safe_seed}_{safe_dest}.txt",
         mime="text/plain"
     )
     

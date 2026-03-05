@@ -110,7 +110,6 @@ def track_cost(in_tok, out_tok, model_config):
 def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192):
     m_cfg = MODELS[model_key]
     
-    # REWRITTEN SYSTEM PROMPT TO BAN AI TROPES
     sys_prompt = "You are a Senior Editor. Polish while preserving length." if is_editor else f"""
     You are a professional novelist.
     
@@ -163,23 +162,23 @@ def generate_dossier(seed, attempt, config):
     random.seed(f"{seed}_{attempt}")
     mode = config.get('mode', 'Random')
     
-    # Writing Style
     style_file = config.get('style_file', 'style_gritty.txt')
     style_guide = load_file_content(os.path.join(CONFIG_DIR, style_file)) or "Write normally."
     
-    # Arc Selection
+    # FIX: Explicitly define custom_arc_text here
+    custom_arc_text = config.get('custom_arc_text', '')
+    
     arc_choice = config.get('arc', 'Random')
     if arc_choice == "Random":
         selected_arc_name = random.choice(list(STORY_ARCS.keys()))
         arc_instr = f"Follow the structure of: '{selected_arc_name}'"
     elif arc_choice == "Custom Arc":
         selected_arc_name = "Custom Director Arc"
-        arc_instr = f"**CUSTOM NARRATIVE ARC:** {config.get('custom_arc_text', '')}"
+        arc_instr = f"**CUSTOM NARRATIVE ARC:** {custom_arc_text}"
     else:
         selected_arc_name = arc_choice
         arc_instr = f"Follow the structure of: '{selected_arc_name}'"
 
-    # Mode overrides
     if mode == 'Director':
         pitch = config.get('pitch', '')
         genre = "OPEN - INFER FROM PITCH"
@@ -211,12 +210,8 @@ def generate_dossier(seed, attempt, config):
         name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
         char = f"{name}, {random.randint(23, 45)}, {job}"
 
-    # WEIGHTED FETISH LOGIC
-    # User selects fetishes and assigns weights. 
-    # Example format from UI: {"Latex": 3, "Bimbofication": 1}
     weighted_fetishes = config.get('weighted_fetishes', {})
     if not weighted_fetishes:
-        # Fallback if random
         f_list = load_list('fetishes.txt')
         f_pick = random.choice(f_list)
         f_string = f"- {f_pick} (Weight: Essential)"
@@ -229,7 +224,6 @@ def generate_dossier(seed, attempt, config):
             f_lines.append(f"- {f_name} (Priority: {w_desc})")
         f_string = "\n".join(f_lines)
 
-    # Physical Logic
     if config.get('enable_physical', True):
         b_list = load_list('body_parts.txt')
         initial_b = config.get('body_parts') or ["__RANDOM__"] * random.choice([2, 3])
@@ -277,7 +271,7 @@ def generate_dossier(seed, attempt, config):
         "conflict": extract_tag(res, "conflict"), 
         "blurb": extract_tag(res, "blurb"),
         "arc_name": selected_arc_name,
-        "custom_arc_text": custom_arc_text,
+        "custom_arc_text": custom_arc_text, # FIXED: Now explicitly defined and passed
         "elements_string": elements_string,
         "raw_response": res,
         "custom_note": "",
@@ -294,7 +288,6 @@ st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
 
-# Load Available Styles
 style_files = [f for f in os.listdir(CONFIG_DIR) if f.startswith('style_') and f.endswith('.txt')]
 style_choice = st.sidebar.selectbox("Writing Style Profile", style_files, format_func=lambda x: x.replace('style_', '').replace('.txt', '').title())
 
@@ -345,7 +338,6 @@ if st.session_state.step == "setup":
             manual_config['idea1'] = st.text_input("Idea 1")
             manual_config['idea2'] = st.text_input("Idea 2")
 
-    # --- NEW: WEIGHTED FETISH UI ---
     st.markdown("---")
     st.subheader("Kink & Motif Weighting (Max 4)")
     f_list = load_list('fetishes.txt')
@@ -357,7 +349,6 @@ if st.session_state.step == "setup":
         cols = [fc1, fc2, fc3, fc4]
         for idx, f in enumerate(selected_f):
             with cols[idx]:
-                # 1 = Minor, 2 = Medium, 3 = Essential
                 weight = st.slider(f"'{f}' Importance", 1, 3, 2, key=f"w_{f}")
                 weighted_fetishes[f] = weight
     manual_config['weighted_fetishes'] = weighted_fetishes
@@ -461,7 +452,7 @@ elif st.session_state.step == "writing":
         STATE: {current_state}
         TASK: Write Chapter {i+1} ({phase}). {instr}
         
-        **INSTRUCTIONS:** Write 1500+ words. Focus on internal monologue. Respect the Motif weights.
+        **INSTRUCTIONS:** Write 1500+ words. Focus on internal monologue. Respect Motif weights.
         OUTPUT: End with EXACTLY: <state>Current Physical/Mental State</state> <title>Chapter Title</title>
         """
         

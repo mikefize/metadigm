@@ -18,6 +18,8 @@ st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", 
 if "step" not in st.session_state: st.session_state.step = "setup"
 if "dossier" not in st.session_state: st.session_state.dossier = None
 if "attempt" not in st.session_state: st.session_state.attempt = 0
+if "raw_story" not in st.session_state: st.session_state.raw_story = ""
+if "final_story" not in st.session_state: st.session_state.final_story = ""
 if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
 if "manual_config" not in st.session_state: st.session_state.manual_config = {}
 if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
@@ -110,6 +112,7 @@ def track_cost(in_tok, out_tok, model_config):
 def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192):
     m_cfg = MODELS[model_key]
     
+    # REWRITTEN SYSTEM PROMPT TO BAN NEW AI TROPES
     sys_prompt = "You are a Senior Editor. Polish while preserving length." if is_editor else f"""
     You are a professional novelist.
     
@@ -118,9 +121,11 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
     **MANDATORY RULES (ANTI-AI CLICHÉ FILTER):**
     1. **NO CLINICAL TERMS:** Do NOT use words like "dopamine," "synapses," "neural pathways," "endorphins," or "cognitive." Describe the human experience (e.g., "a rush of heat," "her mind went blank").
     2. **NO BANNED METAPHORS:** Never use the words "tapestry," "symphony," "dance," "testament," or "labyrinth."
-    3. **NO BANNED SMELLS:** Do NOT describe the smell of "ozone," "copper," or "antiseptic." 
-    4. **NATURAL LANGUAGE:** Write how humans actually think and speak. Avoid robotic, overly analytical narration. 
-    5. **NO SUMMARIES:** Write long, continuous scenes with dialogue and action.
+    3. **NO SMELLS:** You are strictly forbidden from describing any smells or scents. Do not use the words "smell," "scent," "odor," "aroma," "antiseptic," "ozone," or "copper." Focus entirely on tactile (touch), visual, and auditory sensations.
+    4. **NO 'NOT JUST X, BUT Y' TROPES:** Do NOT use the rhetorical structure "It wasn't just X, it was Y." (e.g., Ban: "The pain wasn't just physical, it was mental." Ban: "She didn't just walk, she floated."). Write direct statements.
+    5. **NO "FOG":** Never use the word "fog" or "haze" to describe mental changes. Use biological/emotional terms: dissociation, exhaustion, confusing arousal, or mind slipping.
+    6. **NATURAL LANGUAGE:** Write how humans actually think and speak. Avoid robotic, overly analytical narration. 
+    7. **NO SUMMARIES:** Write long, continuous scenes with dialogue and action.
     """
     
     try:
@@ -165,7 +170,6 @@ def generate_dossier(seed, attempt, config):
     style_file = config.get('style_file', 'style_gritty.txt')
     style_guide = load_file_content(os.path.join(CONFIG_DIR, style_file)) or "Write normally."
     
-    # FIX: Explicitly define custom_arc_text here
     custom_arc_text = config.get('custom_arc_text', '')
     
     arc_choice = config.get('arc', 'Random')
@@ -179,7 +183,7 @@ def generate_dossier(seed, attempt, config):
         selected_arc_name = arc_choice
         arc_instr = f"Follow the structure of: '{selected_arc_name}'"
 
-    if mode == 'Director':
+    if mode == 'Director Mode':
         pitch = config.get('pitch', '')
         genre = "OPEN - INFER FROM PITCH"
         job = "OPEN - INFER FROM PITCH" 
@@ -257,7 +261,7 @@ def generate_dossier(seed, attempt, config):
     <blurb>4-sentence summary</blurb>
     """
     
-    res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
+    res = call_api(prompt, st.session_state.writer_model, style_guide, max_tokens=1024)
     if not res or "API ERROR" in res: return None
     
     final_job = job if "OPEN" not in job else "Inferred from Pitch"
@@ -271,7 +275,7 @@ def generate_dossier(seed, attempt, config):
         "conflict": extract_tag(res, "conflict"), 
         "blurb": extract_tag(res, "blurb"),
         "arc_name": selected_arc_name,
-        "custom_arc_text": custom_arc_text, # FIXED: Now explicitly defined and passed
+        "custom_arc_text": custom_arc_text, 
         "elements_string": elements_string,
         "raw_response": res,
         "custom_note": "",

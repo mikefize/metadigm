@@ -34,34 +34,34 @@ MODELS = {
 
 CONFIG_DIR = 'config'
 
-# --- NARRATIVE ARCS ---
+# --- NARRATIVE ARCS (UPDATED FOR CONTRAST) ---
 STORY_ARCS = {
     "The Inevitable Slide": [
-        ("The Hook", "Establish her sharp mind/life. The Inciting Incident traps her."),
-        ("The First Alteration", "First physical/mental change. She views it with clinical horror. Rationalization."),
-        ("The Escalation", "Changes accelerate. The Antagonist tightens the leash. She tries to maintain dignity."),
-        ("The Fog", "Deep psychological shift. Complexity becomes painful. Simplicity becomes tempting."),
-        ("The Breaking Point", "A major event forces her to act against her old morals/logic."),
-        ("Metamorphosis", "Total surrender. The old ego dissolves into the new Archetype."),
-        ("Epilogue", "Extensive 'Day in the Life'. Pure, happy existence in the new role.")
+        ("The Life Before", "Establish her high intelligence, serious job, and meaningful relationships (spouse/partner/colleague). Show her competence. NO TRANSFORMATION YET."),
+        ("The Inciting Incident", "The trap is sprung. She enters the situation confident she can handle it. The first minor physical change occurs."),
+        ("The First Slip", "Physical changes accelerate. She tries to hide them from her peers/partner. She rationalizes the first mental urge."),
+        ("The Erosion", "The 'Fog' deepens. Her vocabulary simplifies. She struggles to do a basic task she used to master. Panic sets in."),
+        ("The Breaking Point", "A major confrontation with her old life (a meeting, a date). She fails spectacularly and humiliated, finding solace in the 'new' way."),
+        ("Metamorphosis", "Total surrender. She actively rejects her old, difficult life for the new, simple one."),
+        ("Epilogue", "Three months later. Show a specific interaction with someone from Chapter 1 to highlight the devastating contrast.")
     ],
     "The Failed Rebellion": [
-        ("The Hook", "Establish her stubborn/fighter personality. She is entrapped."),
-        ("The Confrontation", "She actively argues or tries to negotiate. The Antagonist punishes her with the first change."),
-        ("The Escape Attempt", "She tries to flee or sabotage the process. She fails."),
-        ("The Punishment", "As a consequence of rebellion, the transformation is accelerated/intensified."),
-        ("The Broken Will", "She realizes fighting is useless. The despair turns into a need for relief (submission)."),
-        ("Metamorphosis", "She begs for the final change to stop the struggle. Total collapse."),
-        ("Epilogue", "Extensive 'Day in the Life'. She is the most obedient of all because she was broken the hardest.")
+        ("The Life Before", "Establish her strong will, feminist values, or leadership role. Show her fighting for something important. NO TRANSFORMATION YET."),
+        ("The Capture", "She is entrapped. She immediately resists/argues. The Antagonist punishes her defiance with the first humiliating change."),
+        ("The Struggle", "She tries to escape or sabotage the process while her body betrays her. The physical changes make resistance harder."),
+        ("The Logic Virus", "The mental conditioning begins. Her anger is chemically converted into arousal/confusion. She hates that she likes it."),
+        ("The Public Fall", "She is forced to display her new self to the public or her peers. The shame breaks her spirit."),
+        ("Metamorphosis", "She begs for the final erasure of her old self to stop the pain of thinking."),
+        ("Epilogue", "She is now the most obedient, empty version of the Archetype. Contrast her silence with her voice in Chapter 1.")
     ],
     "The Faustian Seduction": [
-        ("The Hook", "She enters voluntarily, arrogant or curious. She thinks she can handle it."),
-        ("The Rush", "The first changes feel good/empowering. The fetish aspect is highly pleasurable."),
-        ("The Addiction", "She seeks out more changes, ignoring the warning signs. The 'Fog' feels like a high."),
-        ("The Trap Snaps", "She tries to pause or slow down, but realizes she has lost the agency to say 'Stop'."),
-        ("The Hollow Shell", "Her intelligence fades, but the pleasure centers remain maxed out. Panic mixed with ecstasy."),
-        ("Metamorphosis", "She willingly deletes her old self to maintain the high. Enthusiastic surrender."),
-        ("Epilogue", "Extensive 'Day in the Life'. A portrait of a happy, empty vessel.")
+        ("The Life Before", "Establish her ambition, vanity, or boredom. She is successful but unfulfilled. She wants 'more'. NO TRANSFORMATION YET."),
+        ("The Offer", "She accepts the change voluntarily, thinking it's a temporary upgrade or game. The initial rush is euphoric."),
+        ("The Addiction", "She craves more changes. She alienates her concerned friends/family, seeing them as 'boring' or 'jealous'."),
+        ("The Trap Snaps", "She tries to stop or reverse a change, but realizes she can't. The Antagonist reveals the true cost."),
+        ("The Hollow Shell", "Her intelligence fades, but the pleasure centers remain maxed out. She is terrified but addicted."),
+        ("Metamorphosis", "She willingly deletes her old memories to maintain the high."),
+        ("Epilogue", "She is a perfect, happy object. Show her ignoring a call/visit from her past life.")
     ]
 }
 
@@ -112,20 +112,18 @@ def track_cost(in_tok, out_tok, model_config):
 def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192):
     m_cfg = MODELS[model_key]
     
-    # REWRITTEN SYSTEM PROMPT TO BAN NEW AI TROPES
+    # REWRITTEN STYLE GUIDE FOR CONTRAST
     sys_prompt = "You are a Senior Editor. Polish while preserving length." if is_editor else f"""
-    You are a professional novelist.
+    You are a seasoned author specializing in dark, psychological, and erotic thrillers. Your style is reminiscent of authors like Megan Abbott, Dennis Lehane, and Gillian Flynn. You are a master of creating palpable suspense, exploring moral ambiguity, and writing sophisticated, visceral prose.
     
     {style_guide}
     
-    **MANDATORY RULES (ANTI-AI CLICHÉ FILTER):**
-    1. **NO CLINICAL TERMS:** Do NOT use words like "dopamine," "synapses," "neural pathways," "endorphins," or "cognitive." Describe the human experience (e.g., "a rush of heat," "her mind went blank").
-    2. **NO BANNED METAPHORS:** Never use the words "tapestry," "symphony," "dance," "testament," or "labyrinth."
-    3. **NO SMELLS:** You are strictly forbidden from describing any smells or scents. Do not use the words "smell," "scent," "odor," "aroma," "antiseptic," "ozone," or "copper." Focus entirely on tactile (touch), visual, and auditory sensations.
-    4. **NO 'NOT JUST X, BUT Y' TROPES:** Do NOT use the rhetorical structure "It wasn't just X, it was Y." (e.g., Ban: "The pain wasn't just physical, it was mental." Ban: "She didn't just walk, she floated."). Write direct statements.
-    5. **NO "FOG":** Never use the word "fog" or "haze" to describe mental changes. Use biological/emotional terms: dissociation, exhaustion, confusing arousal, or mind slipping.
-    6. **NATURAL LANGUAGE:** Write how humans actually think and speak. Avoid robotic, overly analytical narration. 
-    7. **NO SUMMARIES:** Write long, continuous scenes with dialogue and action.
+    **MANDATORY RULES:**
+    1. **CONTRAST IS KEY:** contrast the protagonist's current degrading state with her past competence.
+    2. **NO CLINICAL TERMS:** Do NOT use words like "dopamine," "synapses." Describe the feeling (heat, fuzziness).
+    3. **NO BANNED SMELLS:** Do NOT describe the smell of "ozone," "copper," or "antiseptic."
+    4. **NO "FOG":** Use biological terms: dissociation, synaptic misfiring, exhaustion, confusing arousal.
+    5. **SHOW, DON'T TELL:** Instead of "She felt stupid," write "The math problem she could solve yesterday now looked like alien hieroglyphs."
     """
     
     try:
@@ -171,7 +169,6 @@ def generate_dossier(seed, attempt, config):
     style_guide = load_file_content(os.path.join(CONFIG_DIR, style_file)) or "Write normally."
     
     custom_arc_text = config.get('custom_arc_text', '')
-    
     arc_choice = config.get('arc', 'Random')
     if arc_choice == "Random":
         selected_arc_name = random.choice(list(STORY_ARCS.keys()))
@@ -183,7 +180,7 @@ def generate_dossier(seed, attempt, config):
         selected_arc_name = arc_choice
         arc_instr = f"Follow the structure of: '{selected_arc_name}'"
 
-    if mode == 'Director Mode':
+    if mode == 'Director':
         pitch = config.get('pitch', '')
         genre = "OPEN - INFER FROM PITCH"
         job = "OPEN - INFER FROM PITCH" 
@@ -204,8 +201,8 @@ def generate_dossier(seed, attempt, config):
         else: antag_instr = f"**ANTAGONIST:** {antag_raw}"
 
         elements = []
-        if config.get('person1'): elements.append(f"Char: {config['person1']}")
-        if config.get('person2'): elements.append(f"Char: {config['person2']}")
+        if config.get('person1'): elements.append(f"Relationship: {config['person1']}")
+        if config.get('person2'): elements.append(f"Relationship: {config['person2']}")
         if config.get('location'): elements.append(f"Loc: {config['location']}")
         if config.get('idea1'): elements.append(f"Idea: {config['idea1']}")
         if config.get('idea2'): elements.append(f"Idea: {config['idea2']}")
@@ -256,9 +253,9 @@ def generate_dossier(seed, attempt, config):
     **OUTPUT FORMAT (STRICT XML):**
     <antagonist>Name/Title or "None"</antagonist>
     <destination>Archetype Name (Invent a unique destination)</destination>
+    <blurb>4-sentence summary</blurb>
     <trigger>Why she enters the situation</trigger>
     <conflict>The trap mechanism</conflict>
-    <blurb>4-sentence summary</blurb>
     """
     
     res = call_api(prompt, st.session_state.writer_model, style_guide, max_tokens=1024)

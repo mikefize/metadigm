@@ -15,6 +15,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
+# --- SESSION STATE INITIALIZATION ---
 if "step" not in st.session_state: st.session_state.step = "setup"
 if "dossier" not in st.session_state: st.session_state.dossier = None
 if "attempt" not in st.session_state: st.session_state.attempt = 0
@@ -73,10 +74,6 @@ def load_list(filename):
     with open(path, 'r', encoding='utf-8') as f:
         return [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
-def load_file_content(filepath):
-    if not os.path.exists(filepath): return None
-    with open(filepath, 'r', encoding='utf-8') as f: return f.read()
-
 def extract_tag(text, tag_name):
     if not text: return ""
     match = re.search(r'<' + tag_name + r'>(.*?)</' + tag_name + r'>', text, re.DOTALL | re.IGNORECASE)
@@ -98,7 +95,8 @@ def clean_artifacts(text):
 def get_secret(key_name):
     try:
         return st.secrets[key_name]
-    except: return ""
+    except:
+        return ""
 
 # --- API ---
 def track_cost(in_tok, out_tok, model_config):
@@ -129,7 +127,6 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
     """
     
     try:
-        # ANTHROPIC HANDLER
         if m_cfg['vendor'] == 'anthropic':
             client = anthropic.Anthropic(api_key=st.session_state.anthropic_key, timeout=600.0)
             resp = client.messages.create(
@@ -139,7 +136,6 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
             track_cost(resp.usage.input_tokens, resp.usage.output_tokens, m_cfg)
             return resp.content[0].text
             
-        # GOOGLE HANDLER
         elif m_cfg['vendor'] == 'google':
             genai.configure(api_key=st.session_state.google_key)
             model = genai.GenerativeModel(model_name=m_cfg['id'], system_instruction=sys_prompt)
@@ -151,49 +147,56 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
             ]
             resp = model.generate_content(prompt, generation_config={"max_output_tokens": max_tokens}, safety_settings=safe)
             if hasattr(resp, 'prompt_feedback') and resp.prompt_feedback.block_reason:
-                return "API ERROR: Prompt Blocked by Safety Filter."
+                return f"API ERROR: Prompt Blocked by Google Safety Filter ({resp.prompt_feedback.block_reason})."
             try: text = resp.text
-            except ValueError: return "API ERROR: Generation halted by Safety Filter."
+            except ValueError: return "API ERROR: Generation halted by Google Safety Filter mid-stream."
             if resp.usage_metadata: track_cost(resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count, m_cfg)
             return text
             
-        # MISTRAL HANDLER (WITH BACKWARD COMPATIBILITY FIX)
         elif m_cfg['vendor'] == 'mistral':
+            # --- IMPROVED MISTRAL EXCEPTION HANDLING ---
             try:
-                # Try new v1.x import
                 from mistralai import Mistral
                 client = Mistral(api_key=st.session_state.mistral_key)
+                
+                # Debug output to Streamlit console (not UI)
+                print(f"Attempting Mistral API call with model {m_cfg['id']}")
+                
                 resp = client.chat.complete(
-                    model=m_cfg['id'], max_tokens=max_tokens,
+                    model=m_cfg['id'],
+                    max_tokens=max_tokens,
                     messages=[
                         {"role": "system", "content": sys_prompt},
                         {"role": "user", "content": prompt}
                     ]
                 )
             except ImportError:
-                # Fallback to old v0.x import for Streamlit Cloud caches
+                print("Falling back to old mistralai import...")
                 from mistralai.client import MistralClient
                 from mistralai.models.chat_completion import ChatMessage
                 client = MistralClient(api_key=st.session_state.mistral_key)
                 resp = client.chat(
-                    model=m_cfg['id'], max_tokens=max_tokens,
+                    model=m_cfg['id'], 
+                    max_tokens=max_tokens,
                     messages=[
                         ChatMessage(role="system", content=sys_prompt),
                         ChatMessage(role="user", content=prompt)
                     ]
                 )
             
-            if resp.usage:
+            if hasattr(resp, 'usage') and resp.usage:
                 track_cost(resp.usage.prompt_tokens, resp.usage.completion_tokens, m_cfg)
             return resp.choices[0].message.content
             
     except Exception as e:
-        return f"API ERROR: {str(e)}"
+        # Return the exact exception string so the UI can display it
+        return f"API ERROR: [{m_cfg['vendor'].upper()}] {str(e)}"
 
+# --- FORMATTING UTILS FOR UI ---
 def format_antagonist_option(x):
     if x is None: return "Random from List"
     if x == "__DYNAMIC__": return "Dynamic (AI Invented)"
-    if x == "__NONE__": return "NO ANTAGONIST (System/Environment)"
+    if x == "__NONE__": return "NO ANTAGONIST (System/Environment driven)"
     return x
 
 # --- GENERATION ---
@@ -296,7 +299,12 @@ def generate_dossier(seed, attempt, config):
     """
     
     res = call_api(prompt, st.session_state.writer_model, style_guide, max_tokens=1024)
-    if not res or "API ERROR" in res: return None
+    
+    # --- ERROR PROPAGATION ---
+    if res and res.startswith("API ERROR"):
+        return {"error": res} # Pass the error string up to the UI
+    if not res: 
+        return {"error": "API returned an empty string."}
     
     final_job = job if "OPEN" not in job else "Inferred from Pitch"
 
@@ -319,10 +327,14 @@ def generate_dossier(seed, attempt, config):
 # --- UI START ---
 st.title("🎬 The Metamorphosis Engine")
 
+default_anthropic = get_secret("ANTHROPIC_API_KEY")
+default_google = get_secret("GOOGLE_API_KEY")
+default_mistral = get_secret("MISTRAL_API_KEY")
+
 st.sidebar.header("Settings")
-st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", value=get_secret("ANTHROPIC_API_KEY"), type="password")
-st.session_state.google_key = st.sidebar.text_input("Google Key", value=get_secret("GOOGLE_API_KEY"), type="password")
-st.session_state.mistral_key = st.sidebar.text_input("Mistral Key", value=get_secret("MISTRAL_API_KEY"), type="password") 
+st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", value=default_anthropic, type="password")
+st.session_state.google_key = st.sidebar.text_input("Google Key", value=default_google, type="password")
+st.session_state.mistral_key = st.sidebar.text_input("Mistral Key", value=default_mistral, type="password") 
 
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
@@ -394,7 +406,6 @@ if st.session_state.step == "setup":
     manual_config['weighted_fetishes'] = weighted_fetishes
 
     if st.button("Draft Premise"):
-        # Check active model key dynamically
         active_vendor = MODELS[st.session_state.writer_model]['vendor']
         has_key = False
         if active_vendor == 'anthropic' and st.session_state.anthropic_key: has_key = True
@@ -410,11 +421,16 @@ if st.session_state.step == "setup":
             
             with st.spinner("Drafting..."):
                 d = generate_dossier(seed, st.session_state.attempt, manual_config)
-                if d:
+                
+                # UI ERROR HANDLING
+                if d and "error" in d:
+                    st.error(f"Failed to draft premise. Reason: {d['error']}")
+                elif d:
                     st.session_state.dossier = d
                     st.session_state.step = "casting"
                     st.rerun()
-                else: st.error("Generation failed. Check API key/credits.")
+                else: 
+                    st.error("Unknown API Error. Please check terminal.")
 
 elif st.session_state.step == "casting":
     d = st.session_state.dossier
@@ -453,8 +469,11 @@ elif st.session_state.step == "casting":
         st.session_state.attempt += 1
         with st.spinner("Rerolling..."):
             new_d = generate_dossier(st.session_state.seed, st.session_state.attempt, st.session_state.manual_config)
-            if new_d: st.session_state.dossier = new_d
-            st.rerun()
+            if new_d and "error" not in new_d: 
+                st.session_state.dossier = new_d
+                st.rerun()
+            else:
+                st.error(new_d.get("error", "Unknown error during reroll."))
     if b3.button("❌ Back to Setup"):
         st.session_state.step = "setup"
         st.rerun()
@@ -476,9 +495,9 @@ elif st.session_state.step == "writing":
     bible = f"""
     GENRE: {d['genre']} | POV: {d['pov']}
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
-    ALTERATION TARGETS: {d['body_parts']}
-    FETISHES: {d['fetish_str']}
     TARGET ARCHETYPE: {d['destination']}
+    PHYSICAL TARGETS: {d['body_parts']}
+    MOTIFS & IMPORTANCE: \n{d['fetish_str']}
     
     PREMISE: {premise}
     CONFLICT/TRAP: {d['conflict']}
@@ -504,8 +523,8 @@ elif st.session_state.step == "writing":
         """
         
         text = call_api(p, st.session_state.writer_model, style_guide=d['style_guide'], max_tokens=12000)
-        if "API ERROR" in text:
-            st.error(text)
+        if not text or "API ERROR" in text:
+            st.error(f"Failed at Chapter {i+1}. Error: {text}")
             break
             
         current_state = extract_tag(text, "state")
@@ -519,7 +538,12 @@ elif st.session_state.step == "writing":
         status_text.write("Editing...")
         edit_p = f"{bible}\n\nTASK: Polish manuscript. Fix logic. No summaries. Remove tags.\n\nINPUT:\n{raw_story}"
         final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=65000)
-        st.session_state.final_story = clean_artifacts(final) if final and len(final) > len(raw_story)*0.7 else clean_artifacts(raw_story)
+        
+        if not final or "API ERROR" in final:
+            st.warning(f"Editor failed ({final}). Using raw story.")
+            st.session_state.final_story = clean_artifacts(raw_story)
+        else:
+            st.session_state.final_story = clean_artifacts(final) if len(final) > len(raw_story)*0.7 else clean_artifacts(raw_story)
     else:
         st.session_state.final_story = clean_artifacts(raw_story)
 

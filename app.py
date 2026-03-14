@@ -4,6 +4,8 @@ pyparsing.DelimitedList = pyparsing.delimitedList
 import streamlit as st
 import google.generativeai as genai
 import anthropic
+import requests # <--- NEW: Used for bulletproof Mistral API calls
+import json
 import os
 import time
 import random
@@ -100,7 +102,7 @@ def get_secret(key_name):
         return st.secrets[key_name]
     except: return ""
 
-# --- API ---
+# --- API HANDLERS ---
 def track_cost(in_tok, out_tok, model_config):
     st.session_state.stats['input'] += in_tok
     st.session_state.stats['output'] += out_tok
@@ -119,7 +121,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
     {style_guide}
     
     **MANDATORY RULES (ANTI-AI CLICHÉ FILTER):**
-    1. **NO CLINICAL TERMS:** Do NOT use words like "dopamine," "synapses," "neural pathways," "endorphins," or "cognitive." Describe the human experience (e.g., "a rush of heat," "her mind went blank").
+    1. **NO CLINICAL TERMS:** Do NOT use words like "dopamine," "synapses," "neural pathways," "endorphins," or "cognitive." Describe the human experience.
     2. **NO BANNED METAPHORS:** Never use the words "tapestry," "symphony," "dance," "testament," or "labyrinth."
     3. **NO SMELLS:** You are strictly forbidden from describing any smells or scents. Do not use the words "smell," "scent," "odor," "aroma," "antiseptic," "ozone," or "copper." Focus entirely on tactile (touch), visual, and auditory sensations.
     4. **NO 'NOT JUST X, BUT Y' TROPES:** Do NOT use the rhetorical structure "It wasn't just X, it was Y." Write direct statements.
@@ -129,6 +131,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
     """
     
     try:
+        # ANTHROPIC
         if m_cfg['vendor'] == 'anthropic':
             client = anthropic.Anthropic(api_key=st.session_state.anthropic_key, timeout=600.0)
             resp = client.messages.create(
@@ -137,7 +140,9 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
             )
             track_cost(resp.usage.input_tokens, resp.usage.output_tokens, m_cfg)
             return resp.content[0].text
-        else:
+            
+        # GOOGLE
+        elif m_cfg['vendor'] == 'google':
             genai.configure(api_key=st.session_state.google_key)
             model = genai.GenerativeModel(model_name=m_cfg['id'], system_instruction=sys_prompt)
             safe = [
@@ -153,6 +158,43 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
             except ValueError: return "API ERROR: Generation halted by Safety Filter."
             if resp.usage_metadata: track_cost(resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count, m_cfg)
             return text
+            
+        # MISTRAL (DIRECT HTTP REST API TO BYPASS SDK ISSUES)
+        elif m_cfg['vendor'] == 'mistral':
+            api_key = st.session_state.mistral_key
+            if not api_key: return "API ERROR: Mistral key missing."
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+            payload = {
+                "model": m_cfg['id'],
+                "messages": [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": max_tokens,
+                "temperature": 1.0
+            }
+            
+            # Using standard requests library for bulletproof reliability
+            response = requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload)
+            
+            if response.status_code != 200:
+                # If it fails, return the exact JSON error from Mistral so we can see it in the UI
+                return f"API ERROR: HTTP {response.status_code} - {response.text}"
+                
+            data = response.json()
+            
+            # Track Usage if provided
+            if 'usage' in data:
+                in_tok = data['usage'].get('prompt_tokens', 0)
+                out_tok = data['usage'].get('completion_tokens', 0)
+                track_cost(in_tok, out_tok, m_cfg)
+                
+            return data['choices'][0]['message']['content']
+            
     except Exception as e:
         return f"API ERROR: {str(e)}"
 
@@ -171,7 +213,6 @@ def generate_dossier(seed, attempt, config):
     style_guide = load_file_content(os.path.join(CONFIG_DIR, style_file)) or "Write normally."
     
     custom_arc_text = config.get('custom_arc_text', '')
-    
     arc_choice = config.get('arc', 'Random')
     if arc_choice == "Random":
         selected_arc_name = random.choice(list(STORY_ARCS.keys()))
@@ -262,8 +303,13 @@ def generate_dossier(seed, attempt, config):
     """
     
     res = call_api(prompt, st.session_state.writer_model, style_guide, max_tokens=1024)
-    if not res or "API ERROR" in res: return None
     
+    # NEW: Error catching that bubbles up to the UI
+    if not res: 
+        return {"error": "API returned an empty response."}
+    if res.startswith("API ERROR"):
+        return {"error": res}
+        
     final_job = job if "OPEN" not in job else "Inferred from Pitch"
 
     return {
@@ -288,6 +334,8 @@ st.title("🎬 The Metamorphosis Engine")
 st.sidebar.header("Settings")
 st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", value=get_secret("ANTHROPIC_API_KEY"), type="password")
 st.session_state.google_key = st.sidebar.text_input("Google Key", value=get_secret("GOOGLE_API_KEY"), type="password")
+st.session_state.mistral_key = st.sidebar.text_input("Mistral Key", value=get_secret("MISTRAL_API_KEY"), type="password") 
+
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
@@ -358,8 +406,14 @@ if st.session_state.step == "setup":
     manual_config['weighted_fetishes'] = weighted_fetishes
 
     if st.button("Draft Premise"):
-        if not st.session_state.anthropic_key and not st.session_state.google_key:
-            st.error("API Keys missing!")
+        active_vendor = MODELS[st.session_state.writer_model]['vendor']
+        has_key = False
+        if active_vendor == 'anthropic' and st.session_state.anthropic_key: has_key = True
+        if active_vendor == 'google' and st.session_state.google_key: has_key = True
+        if active_vendor == 'mistral' and st.session_state.mistral_key: has_key = True
+
+        if not has_key:
+            st.error(f"API Key missing for the selected Writer Model ({active_vendor.title()})!")
         else:
             st.session_state.manual_config = manual_config
             st.session_state.seed = seed
@@ -367,11 +421,13 @@ if st.session_state.step == "setup":
             
             with st.spinner("Drafting..."):
                 d = generate_dossier(seed, st.session_state.attempt, manual_config)
-                if d:
+                
+                if d and "error" in d:
+                    st.error(f"Generation Failed: {d['error']}")
+                elif d:
                     st.session_state.dossier = d
                     st.session_state.step = "casting"
                     st.rerun()
-                else: st.error("Generation failed. Check API key/credits.")
 
 elif st.session_state.step == "casting":
     d = st.session_state.dossier
@@ -410,8 +466,11 @@ elif st.session_state.step == "casting":
         st.session_state.attempt += 1
         with st.spinner("Rerolling..."):
             new_d = generate_dossier(st.session_state.seed, st.session_state.attempt, st.session_state.manual_config)
-            if new_d: st.session_state.dossier = new_d
-            st.rerun()
+            if new_d and "error" not in new_d: 
+                st.session_state.dossier = new_d
+                st.rerun()
+            else:
+                st.error(new_d.get("error", "Unknown error during reroll."))
     if b3.button("❌ Back to Setup"):
         st.session_state.step = "setup"
         st.rerun()

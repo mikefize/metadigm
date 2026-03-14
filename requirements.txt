@@ -3,3 +3,4 @@ google-generativeai
 anthropic
 pyparsing
 httplib2
+mistralai

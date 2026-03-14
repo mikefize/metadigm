@@ -4,7 +4,8 @@ pyparsing.DelimitedList = pyparsing.delimitedList
 import streamlit as st
 import google.generativeai as genai
 import anthropic
-import requests
+import requests # <--- NEW: Used for bulletproof Mistral API calls
+import json
 import os
 import time
 import random
@@ -16,7 +17,6 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-# --- SESSION STATE INITIALIZATION ---
 if "step" not in st.session_state: st.session_state.step = "setup"
 if "dossier" not in st.session_state: st.session_state.dossier = None
 if "attempt" not in st.session_state: st.session_state.attempt = 0
@@ -73,7 +73,11 @@ def load_list(filename):
     path = os.path.join(CONFIG_DIR, filename)
     if not os.path.exists(path): return ["Generic Option"]
     with open(path, 'r', encoding='utf-8') as f:
-        return[line.strip() for line in f if line.strip() and not line.startswith('#')]
+        return [line.strip() for line in f if line.strip() and not line.startswith('#')]
+
+def load_file_content(filepath):
+    if not os.path.exists(filepath): return None
+    with open(filepath, 'r', encoding='utf-8') as f: return f.read()
 
 def extract_tag(text, tag_name):
     if not text: return ""
@@ -96,10 +100,9 @@ def clean_artifacts(text):
 def get_secret(key_name):
     try:
         return st.secrets[key_name]
-    except:
-        return ""
+    except: return ""
 
-# --- API ---
+# --- API HANDLERS ---
 def track_cost(in_tok, out_tok, model_config):
     st.session_state.stats['input'] += in_tok
     st.session_state.stats['output'] += out_tok
@@ -197,170 +200,212 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
     except Exception as e:
         return f"API ERROR: {str(e)}"
 
-# --- FORMATTING UTILS FOR UI ---
 def format_antagonist_option(x):
     if x is None: return "Random from List"
     if x == "__DYNAMIC__": return "Dynamic (AI Invented)"
-    if x == "__NONE__": return "NO ANTAGONIST (System/Environment driven)"
+    if x == "__NONE__": return "NO ANTAGONIST (System/Environment)"
     return x
 
 # --- GENERATION ---
 def generate_dossier(seed, attempt, config):
     random.seed(f"{seed}_{attempt}")
+    mode = config.get('mode', 'Random')
     
-    genre = config.get('genre') or random.choice(load_list('genres.txt'))
-    job = config.get('job') or random.choice(load_list('occupations.txt'))
-    mc_method = config.get('mc_method') or random.choice(load_list('mc_methods.txt'))
-    pov = config.get('pov') or "First Person (I)"
-
-    antag_raw = config.get('antagonist')
-    if antag_raw is None:
-        antag_raw = random.choice(load_list('antagonists.txt'))
-        
-    if antag_raw == "__DYNAMIC__":
-        antag_instr = "**ANTAGONIST:** [OPEN - AI INVENT]"
-        antag_display_name = "Dynamic (AI)"
-    elif antag_raw == "__NONE__":
-        antag_instr = "**ANTAGONIST:** [NONE]. There is no villain. Driven by environment/hubris."
-        antag_display_name = "None (Environment)"
+    style_file = config.get('style_file', 'style_gritty.txt')
+    style_guide = load_file_content(os.path.join(CONFIG_DIR, style_file)) or "Write normally."
+    
+    custom_arc_text = config.get('custom_arc_text', '')
+    arc_choice = config.get('arc', 'Random')
+    if arc_choice == "Random":
+        selected_arc_name = random.choice(list(STORY_ARCS.keys()))
+        arc_instr = f"Follow the structure of: '{selected_arc_name}'"
+    elif arc_choice == "Custom Arc":
+        selected_arc_name = "Custom Director Arc"
+        arc_instr = f"**CUSTOM NARRATIVE ARC:** {custom_arc_text}"
     else:
-        antag_instr = f"**ANTAGONIST:** {antag_raw}"
-        antag_display_name = antag_raw
+        selected_arc_name = arc_choice
+        arc_instr = f"Follow the structure of: '{selected_arc_name}'"
 
-    b_list = load_list('body_parts.txt')
-    initial_b = config.get('body_parts') or ["__RANDOM__"] * random.choice([2, 3])
-    selected_b =[]
-    for item in initial_b:
-        if item == "__RANDOM__":
-            avail =[x for x in b_list if x not in selected_b]
-            if avail: selected_b.append(random.choice(avail))
-        else: selected_b.append(item)
-    body_string = ", ".join(selected_b)
+    if mode == 'Director Mode':
+        pitch = config.get('pitch', '')
+        genre = "OPEN - INFER FROM PITCH"
+        job = "OPEN - INFER FROM PITCH" 
+        antag_instr = "OPEN - INFER FROM PITCH"
+        mc_method = "OPEN - INFER FROM PITCH"
+        elements_string = f"**PITCH:**\n{pitch}"
+        name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
+        char = f"{name}, Age {random.randint(23, 45)}, Job: Infer from Pitch"
+    else:
+        genre = config.get('genre') or random.choice(load_list('genres.txt'))
+        job = config.get('job') or random.choice(load_list('occupations.txt'))
+        mc_method = config.get('mc_method') or random.choice(load_list('mc_methods.txt'))
+        
+        antag_raw = config.get('antagonist')
+        if antag_raw is None: antag_raw = random.choice(load_list('antagonists.txt'))
+        if antag_raw == "__DYNAMIC__": antag_instr = "**ANTAGONIST:** [OPEN - AI INVENT]"
+        elif antag_raw == "__NONE__": antag_instr = "**ANTAGONIST:** [NONE]"
+        else: antag_instr = f"**ANTAGONIST:** {antag_raw}"
 
-    f_list = load_list('fetishes.txt')
-    initial_f = config.get('fetishes') or ["__RANDOM__"]
-    selected_f =[]
-    for item in initial_f:
-        if item == "__RANDOM__": 
-            avail =[x for x in f_list if x not in selected_f]
-            if avail: selected_f.append(random.choice(avail))
-        else: selected_f.append(item)
-    f_string = ", ".join(selected_f)
+        elements = []
+        if config.get('person1'): elements.append(f"Char: {config['person1']}")
+        if config.get('person2'): elements.append(f"Char: {config['person2']}")
+        if config.get('location'): elements.append(f"Loc: {config['location']}")
+        if config.get('idea1'): elements.append(f"Idea: {config['idea1']}")
+        if config.get('idea2'): elements.append(f"Idea: {config['idea2']}")
+        elements_string = "\n- ".join(elements) if elements else "None."
+        
+        name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
+        char = f"{name}, {random.randint(23, 45)}, {job}"
 
-    custom_elements =[]
-    if config.get('person1'): custom_elements.append(f"Character: {config['person1']}")
-    if config.get('person2'): custom_elements.append(f"Character: {config['person2']}")
-    if config.get('location'): custom_elements.append(f"Location: {config['location']}")
-    if config.get('idea1'): custom_elements.append(f"Concept: {config['idea1']}")
-    if config.get('idea2'): custom_elements.append(f"Concept: {config['idea2']}")
-    elements_string = "\n- ".join(custom_elements) if custom_elements else "None specified. Invent creative elements organically."
+    weighted_fetishes = config.get('weighted_fetishes', {})
+    if not weighted_fetishes:
+        f_list = load_list('fetishes.txt')
+        f_pick = random.choice(f_list)
+        f_string = f"- {f_pick} (Weight: Essential)"
+    else:
+        f_lines = []
+        for f_name, weight in weighted_fetishes.items():
+            if weight == 3: w_desc = "Essential. Central to the plot and transformation."
+            elif weight == 2: w_desc = "Important. A recurring theme."
+            else: w_desc = "Minor. A subtle background detail."
+            f_lines.append(f"- {f_name} (Priority: {w_desc})")
+        f_string = "\n".join(f_lines)
 
-    name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
-    char = f"{name}, {random.randint(23, 45)}, {job}"
+    if config.get('enable_physical', True):
+        b_list = load_list('body_parts.txt')
+        initial_b = config.get('body_parts') or ["__RANDOM__"] * random.choice([2, 3])
+        selected_b = [random.choice(b_list) if i == "__RANDOM__" else i for i in initial_b]
+        body_string = ", ".join(list(set(selected_b)))
+    else:
+        body_string = "NONE. MENTAL CHANGE ONLY."
 
     prompt = f"""
     TASK: Premise for a Dark Transformation novel.
     
     **CORE INGREDIENTS:**
     - Genre: {genre}
-    - POV: {pov}
+    - POV: {config.get('pov', 'First Person')}
     - {antag_instr}
-    - Mind Control Method: {mc_method}
-    - PHYSICAL ALTERATION TARGETS: {body_string}
-    - Kink/Motifs: {f_string}
+    - Method: {mc_method}
+    - PHYSICAL TARGETS: {body_string}
     - Protagonist: {char}
     
-    **MODULAR STORY ELEMENTS:**
-    - {elements_string}
+    **KINK/MOTIFS (With Weights):**
+    {f_string}
     
-    **INSTRUCTIONS:**
-    1. **ANTAGONIST:** If Dynamic, invent a name. If NONE, state "None".
-    2. **DESTINATION:** Invent the specific Archetype name she transforms into.
-    3. **SAFETY PROTOCOL:** Write the Blurb using clinical, PG-13 language to pass automated safety filters.
+    **STORY SOURCE:**
+    {elements_string}
     
     **OUTPUT FORMAT (STRICT XML):**
     <antagonist>Name/Title or "None"</antagonist>
-    <destination>Archetype Name</destination>
+    <destination>Archetype Name (Invent a unique destination)</destination>
     <trigger>Why she enters the situation</trigger>
     <conflict>The trap mechanism</conflict>
     <blurb>4-sentence summary</blurb>
     """
     
-    res = ""
-    for _ in range(3):
-        res = call_api(prompt, st.session_state.writer_model, max_tokens=1024)
-        if not res or "API ERROR" in res: continue
-        if "</blurb>" in res.lower(): break
+    res = call_api(prompt, st.session_state.writer_model, style_guide, max_tokens=1024)
     
-    arc_keys = list(STORY_ARCS.keys())
-    selected_arc_name = random.choice(arc_keys)
-    
+    # NEW: Error catching that bubbles up to the UI
+    if not res: 
+        return {"error": "API returned an empty response."}
+    if res.startswith("API ERROR"):
+        return {"error": res}
+        
+    final_job = job if "OPEN" not in job else "Inferred from Pitch"
+
     return {
-        "name": name, "job": job, "genre": genre, 
-        "fetish": f_string, "body_parts": body_string, "mc_method": mc_method, "pov": pov,
-        "antagonist": extract_tag(res, "antagonist") or antag_display_name,
+        "name": name, "job": final_job, "genre": genre, 
+        "fetish_str": f_string, "body_parts": body_string, "mc_method": mc_method, "pov": config.get('pov'),
+        "antagonist": extract_tag(res, "antagonist"),
         "destination": extract_tag(res, "destination"), 
         "trigger": extract_tag(res, "trigger"), 
         "conflict": extract_tag(res, "conflict"), 
         "blurb": extract_tag(res, "blurb"),
         "arc_name": selected_arc_name,
+        "custom_arc_text": custom_arc_text, 
         "elements_string": elements_string,
         "raw_response": res,
-        "custom_note": ""
+        "custom_note": "",
+        "style_guide": style_guide
     }
 
 # --- UI START ---
 st.title("🎬 The Metamorphosis Engine")
 
-default_anthropic = get_secret("ANTHROPIC_API_KEY")
-default_google = get_secret("GOOGLE_API_KEY")
-default_mistral = get_secret("MISTRAL_API_KEY")
-
 st.sidebar.header("Settings")
-st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", value=default_anthropic, type="password")
-st.session_state.google_key = st.sidebar.text_input("Google Key", value=default_google, type="password")
-st.session_state.mistral_key = st.sidebar.text_input("Mistral Key", value=default_mistral, type="password") 
+st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", value=get_secret("ANTHROPIC_API_KEY"), type="password")
+st.session_state.google_key = st.sidebar.text_input("Google Key", value=get_secret("GOOGLE_API_KEY"), type="password")
+st.session_state.mistral_key = st.sidebar.text_input("Mistral Key", value=get_secret("MISTRAL_API_KEY"), type="password") 
 
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
+
+style_files = [f for f in os.listdir(CONFIG_DIR) if f.startswith('style_') and f.endswith('.txt')]
+style_choice = st.sidebar.selectbox("Writing Style Profile", style_files, format_func=lambda x: x.replace('style_', '').replace('.txt', '').title())
 
 st.session_state.cost_metric = st.sidebar.empty()
 st.session_state.cost_metric.metric("Budget", f"${st.session_state.stats['cost']:.4f}")
 
 if st.session_state.step == "setup":
     st.header("1. Production Setup")
-    col1, col2, col3 = st.columns(3)
+    mode = st.radio("Select Mode:", ["Random Run", "Custom Setup", "Director Mode"], horizontal=True)
     
+    col1, col2, col3 = st.columns(3)
+    manual_config = {'mode': mode, 'style_file': style_choice}
+
     with col1:
-        st.subheader("Core Options")
+        st.subheader("Core")
         seed = st.text_input("Story Seed", "Entropy")
-        pov = st.selectbox("Point of View",["First Person (I)", "Third Person (She)", "Second Person (You)", "Antagonist Perspective"])
-        genre = st.selectbox("Genre", [None] + load_list('genres.txt'), format_func=lambda x: "Random" if x is None else x)
-        job = st.selectbox("Protagonist Job", [None] + load_list('occupations.txt'), format_func=lambda x: "Random" if x is None else x)
+        pov = st.selectbox("Point of View", ["First Person (I)", "Third Person (She)", "Second Person (You)", "Antagonist Perspective"])
+        manual_config['pov'] = pov
         
+        arc_opts = ["Random"] + list(STORY_ARCS.keys()) + ["Custom Arc"]
+        arc_choice = st.selectbox("Narrative Arc", arc_opts)
+        manual_config['arc'] = arc_choice
+        if arc_choice == "Custom Arc":
+            manual_config['custom_arc_text'] = st.text_area("Plot Flow", height=100)
+
     with col2:
         st.subheader("Mechanics")
-        antagonist = st.selectbox("Antagonist",[None, "__DYNAMIC__", "__NONE__"] + load_list('antagonists.txt'), format_func=format_antagonist_option)
-        mc_method = st.selectbox("MC Method", [None] + load_list('mc_methods.txt'), format_func=lambda x: "Random" if x is None else x)
-        fetishes = st.multiselect("Core Fetishes (Max 2)", load_list('fetishes.txt'), max_selections=2, help="Leave blank for random")
-        body_parts = st.multiselect("Physical Focus (Max 3)", load_list('body_parts.txt'), max_selections=3, help="Leave blank for random")
+        if mode == "Custom Setup":
+            manual_config['genre'] = st.selectbox("Genre", [None] + load_list('genres.txt'), format_func=lambda x: "Random" if x is None else x)
+            manual_config['job'] = st.selectbox("Job", [None] + load_list('occupations.txt'), format_func=lambda x: "Random" if x is None else x)
+            manual_config['antagonist'] = st.selectbox("Antagonist", [None, "__DYNAMIC__", "__NONE__"] + load_list('antagonists.txt'), format_func=format_antagonist_option)
+            manual_config['mc_method'] = st.selectbox("MC Method", [None] + load_list('mc_methods.txt'), format_func=lambda x: "Random" if x is None else x)
+        
+        enable_phys = st.checkbox("Physical Changes?", value=True)
+        manual_config['enable_physical'] = enable_phys
+        if enable_phys:
+            manual_config['body_parts'] = st.multiselect("Body Focus (Max 3)", load_list('body_parts.txt'), max_selections=3)
 
     with col3:
-        st.subheader("Story Elements (Optional)")
-        st.caption("Leave blank for AI to invent dynamically.")
-        person1 = st.text_input("Person 1", placeholder="e.g. A jealous co-worker")
-        person2 = st.text_input("Person 2", placeholder="e.g. Her naive younger sister")
-        location = st.text_input("Location", placeholder="e.g. An abandoned mall")
-        idea1 = st.text_input("Story Idea 1", placeholder="e.g. A cursed mirror")
-        idea2 = st.text_input("Story Idea 2", placeholder="e.g. A secret cult")
+        if mode == "Director Mode":
+            st.subheader("The Pitch")
+            manual_config['pitch'] = st.text_area("Main Story Idea", height=150)
+        elif mode == "Custom Setup":
+            st.subheader("Story Elements")
+            manual_config['person1'] = st.text_input("Person 1")
+            manual_config['person2'] = st.text_input("Person 2")
+            manual_config['location'] = st.text_input("Location")
+            manual_config['idea1'] = st.text_input("Idea 1")
+            manual_config['idea2'] = st.text_input("Idea 2")
 
-    manual_config = {
-        'pov': pov, 'genre': genre, 'job': job, 'antagonist': antagonist, 
-        'mc_method': mc_method, 'fetishes': fetishes, 'body_parts': body_parts,
-        'person1': person1, 'person2': person2, 'location': location, 
-        'idea1': idea1, 'idea2': idea2
-    }
+    st.markdown("---")
+    st.subheader("Kink & Motif Weighting (Max 4)")
+    f_list = load_list('fetishes.txt')
+    selected_f = st.multiselect("Select up to 4 Fetishes", f_list, max_selections=4)
+    
+    weighted_fetishes = {}
+    if selected_f:
+        fc1, fc2, fc3, fc4 = st.columns(4)
+        cols = [fc1, fc2, fc3, fc4]
+        for idx, f in enumerate(selected_f):
+            with cols[idx]:
+                weight = st.slider(f"'{f}' Importance", 1, 3, 2, key=f"w_{f}")
+                weighted_fetishes[f] = weight
+    manual_config['weighted_fetishes'] = weighted_fetishes
 
     if st.button("Draft Premise"):
         active_vendor = MODELS[st.session_state.writer_model]['vendor']
@@ -375,23 +420,23 @@ if st.session_state.step == "setup":
             st.session_state.manual_config = manual_config
             st.session_state.seed = seed
             st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
-            st.session_state.cost_metric.metric("Budget", "$0.0000")
             
             with st.spinner("Drafting..."):
                 d = generate_dossier(seed, st.session_state.attempt, manual_config)
-                if d:
+                
+                if d and "error" in d:
+                    st.error(f"Generation Failed: {d['error']}")
+                elif d:
                     st.session_state.dossier = d
                     st.session_state.step = "casting"
                     st.rerun()
-                else:
-                    st.error("Failed to generate premise.")
 
 elif st.session_state.step == "casting":
     d = st.session_state.dossier
     st.header("2. Casting Call")
     
     st.subheader(f"{d['name']} -> {d.get('destination', 'Unknown')}")
-    st.caption(f"**Narrative Arc:** {d['arc_name']}")
+    st.caption(f"**Arc:** {d['arc_name']}")
     
     colA, colB = st.columns(2)
     with colA:
@@ -401,16 +446,15 @@ elif st.session_state.step == "casting":
     with colB:
         st.markdown("**DETAILS:**")
         st.markdown(f"- **Physical:** {d['body_parts']}")
-        st.markdown(f"**Motifs:**\n{d['fetish']}")
+        st.markdown(f"**Motifs & Weights:**\n{d['fetish_str']}")
     
     st.markdown("---")
-    
-    if d['blurb'] and d['destination'] and d['trigger'] and d['conflict']:
+    if d['blurb']:
         st.info(f"**Trigger:** {d['trigger']}")
         st.info(f"**Conflict:** {d['conflict']}")
         st.warning(f"**Premise:** {d['blurb']}")
     else:
-        st.error("Parsing Error or API Cutoff. Raw Output:")
+        st.error("Parsing Error. Raw Output:")
         st.code(d['raw_response'])
 
     note = st.text_area("Director's Note (Optional)", placeholder="e.g. Make sure she begs at the end...")
@@ -424,8 +468,11 @@ elif st.session_state.step == "casting":
         st.session_state.attempt += 1
         with st.spinner("Rerolling..."):
             new_d = generate_dossier(st.session_state.seed, st.session_state.attempt, st.session_state.manual_config)
-            if new_d: st.session_state.dossier = new_d
-            st.rerun()
+            if new_d and "error" not in new_d: 
+                st.session_state.dossier = new_d
+                st.rerun()
+            else:
+                st.error(new_d.get("error", "Unknown error during reroll."))
     if b3.button("❌ Back to Setup"):
         st.session_state.step = "setup"
         st.rerun()
@@ -436,23 +483,25 @@ elif st.session_state.step == "writing":
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    arc = STORY_ARCS[d['arc_name']]
+    if d['arc_name'] == "Custom Director Arc":
+        base_steps = ["The Hook", "The First Alteration", "The Escalation", "The Break", "The Fall", "Metamorphosis", "Epilogue"]
+        arc = [(step, f"Follow CUSTOM ARC: {d['custom_arc_text']}") for step in base_steps]
+    else:
+        arc = STORY_ARCS[d['arc_name']]
+    
     premise = d['blurb'] if d['blurb'] else d['raw_response']
     
     bible = f"""
     GENRE: {d['genre']} | POV: {d['pov']}
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
     ALTERATION TARGETS: {d['body_parts']}
-    FETISHES: {d['fetish']}
+    FETISHES: {d['fetish_str']}
     TARGET ARCHETYPE: {d['destination']}
     
     PREMISE: {premise}
     CONFLICT/TRAP: {d['conflict']}
     NARRATIVE ARC: {d['arc_name']}
     NOTE: {d['custom_note']}
-    
-    MANDATORY STORY ELEMENTS TO WEAVE IN:
-    {d['elements_string']}
     """
     
     full_narrative = ""
@@ -462,46 +511,33 @@ elif st.session_state.step == "writing":
     for i, (phase, instr) in enumerate(arc):
         status_text.write(f"Writing Chapter {i+1}: {phase}...")
         
-        word_count_instr = "1500+ words" if phase == "Epilogue" else "1500 words"
-        if phase == "Epilogue": instr += " Write a long, detailed 'Day in the Life' extended epilogue."
-
         p = f"""
         {bible}
         HISTORY: {full_narrative}
         STATE: {current_state}
         TASK: Write Chapter {i+1} ({phase}). {instr}
-        Use {d['pov']} perspective.
         
-        **PACING DIRECTIVE:** SLOW BURN. Do not summarize or repeat previous events. Move the plot forward.
-        OUTPUT: {word_count_instr}. End with {{State: ...}} {{Title: ...}}
+        **INSTRUCTIONS:** Write 1500+ words. Focus on internal monologue. Respect Motif weights.
+        OUTPUT: End with EXACTLY: <state>Current Physical/Mental State</state> <title>Chapter Title</title>
         """
         
-        try:
-            text = call_api(p, st.session_state.writer_model, max_tokens=12000)
-            if "API ERROR" in text:
-                st.error(text)
-                break
-                
-            current_state = extract_tag(text, "state")
-            title = extract_tag(text, "title") or phase
-            clean = clean_artifacts(text)
-            full_narrative += f"\n\nCHAPTER {i+1}: {title}\n{clean}"
-            raw_story += f"\n\n### {title}\n\n{clean}"
-            progress_bar.progress((i + 1) / (len(arc) + 1))
-        except Exception as e:
-            st.error(f"Error: {e}")
+        text = call_api(p, st.session_state.writer_model, style_guide=d['style_guide'], max_tokens=12000)
+        if "API ERROR" in text:
+            st.error(text)
             break
+            
+        current_state = extract_tag(text, "state")
+        title = extract_tag(text, "title") or phase
+        clean = clean_artifacts(text)
+        full_narrative += f"\n\nCHAPTER {i+1}: {title}\n{clean}"
+        raw_story += f"\n\n### {title}\n\n{clean}"
+        progress_bar.progress((i + 1) / (len(arc) + 1))
             
     if do_editor:
         status_text.write("Editing...")
         edit_p = f"{bible}\n\nTASK: Polish manuscript. Fix logic. No summaries. Remove tags.\n\nINPUT:\n{raw_story}"
         final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=65000)
-        
-        if not final or "API ERROR" in final:
-            st.warning("Editor failed. Using raw story.")
-            st.session_state.final_story = clean_artifacts(raw_story)
-        else:
-            st.session_state.final_story = clean_artifacts(final) if len(final) > len(raw_story)*0.7 else clean_artifacts(raw_story)
+        st.session_state.final_story = clean_artifacts(final) if final and len(final) > len(raw_story)*0.7 else clean_artifacts(raw_story)
     else:
         st.session_state.final_story = clean_artifacts(raw_story)
 

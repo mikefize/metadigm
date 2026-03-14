@@ -4,7 +4,6 @@ pyparsing.DelimitedList = pyparsing.delimitedList
 import streamlit as st
 import google.generativeai as genai
 import anthropic
-from mistralai import Mistral # <--- RESTORED MISTRAL IMPORT
 import os
 import time
 import random
@@ -16,23 +15,14 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 # --- APP CONFIG ---
 st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", layout="wide")
 
-# --- SESSION STATE INITIALIZATION ---
-if "step" not in st.session_state: 
-    st.session_state.step = "setup"
-if "dossier" not in st.session_state: 
-    st.session_state.dossier = None
-if "attempt" not in st.session_state: 
-    st.session_state.attempt = 0
-if "raw_story" not in st.session_state: 
-    st.session_state.raw_story = ""
-if "final_story" not in st.session_state: 
-    st.session_state.final_story = ""
-if "seed" not in st.session_state: 
-    st.session_state.seed = "Paradigm"
-if "manual_config" not in st.session_state: 
-    st.session_state.manual_config = {}
-if "stats" not in st.session_state: 
-    st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
+if "step" not in st.session_state: st.session_state.step = "setup"
+if "dossier" not in st.session_state: st.session_state.dossier = None
+if "attempt" not in st.session_state: st.session_state.attempt = 0
+if "raw_story" not in st.session_state: st.session_state.raw_story = ""
+if "final_story" not in st.session_state: st.session_state.final_story = ""
+if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
+if "manual_config" not in st.session_state: st.session_state.manual_config = {}
+if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
@@ -108,8 +98,7 @@ def clean_artifacts(text):
 def get_secret(key_name):
     try:
         return st.secrets[key_name]
-    except:
-        return ""
+    except: return ""
 
 # --- API ---
 def track_cost(in_tok, out_tok, model_config):
@@ -140,7 +129,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
     """
     
     try:
-        # --- ROUTER LOGIC ---
+        # ANTHROPIC HANDLER
         if m_cfg['vendor'] == 'anthropic':
             client = anthropic.Anthropic(api_key=st.session_state.anthropic_key, timeout=600.0)
             resp = client.messages.create(
@@ -150,6 +139,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
             track_cost(resp.usage.input_tokens, resp.usage.output_tokens, m_cfg)
             return resp.content[0].text
             
+        # GOOGLE HANDLER
         elif m_cfg['vendor'] == 'google':
             genai.configure(api_key=st.session_state.google_key)
             model = genai.GenerativeModel(model_name=m_cfg['id'], system_instruction=sys_prompt)
@@ -167,17 +157,32 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
             if resp.usage_metadata: track_cost(resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count, m_cfg)
             return text
             
+        # MISTRAL HANDLER (WITH BACKWARD COMPATIBILITY FIX)
         elif m_cfg['vendor'] == 'mistral':
-            # --- RESTORED MISTRAL LOGIC ---
-            client = Mistral(api_key=st.session_state.mistral_key)
-            resp = client.chat.complete(
-                model=m_cfg['id'],
-                max_tokens=max_tokens,
-                messages=[
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": prompt}
-                ]
-            )
+            try:
+                # Try new v1.x import
+                from mistralai import Mistral
+                client = Mistral(api_key=st.session_state.mistral_key)
+                resp = client.chat.complete(
+                    model=m_cfg['id'], max_tokens=max_tokens,
+                    messages=[
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+            except ImportError:
+                # Fallback to old v0.x import for Streamlit Cloud caches
+                from mistralai.client import MistralClient
+                from mistralai.models.chat_completion import ChatMessage
+                client = MistralClient(api_key=st.session_state.mistral_key)
+                resp = client.chat(
+                    model=m_cfg['id'], max_tokens=max_tokens,
+                    messages=[
+                        ChatMessage(role="system", content=sys_prompt),
+                        ChatMessage(role="user", content=prompt)
+                    ]
+                )
+            
             if resp.usage:
                 track_cost(resp.usage.prompt_tokens, resp.usage.completion_tokens, m_cfg)
             return resp.choices[0].message.content
@@ -185,7 +190,6 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
     except Exception as e:
         return f"API ERROR: {str(e)}"
 
-# --- FORMATTING UTILS FOR UI ---
 def format_antagonist_option(x):
     if x is None: return "Random from List"
     if x == "__DYNAMIC__": return "Dynamic (AI Invented)"
@@ -315,14 +319,10 @@ def generate_dossier(seed, attempt, config):
 # --- UI START ---
 st.title("🎬 The Metamorphosis Engine")
 
-default_anthropic = get_secret("ANTHROPIC_API_KEY")
-default_google = get_secret("GOOGLE_API_KEY")
-default_mistral = get_secret("MISTRAL_API_KEY") # NEW: Secret loader for Mistral
-
 st.sidebar.header("Settings")
-st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", value=default_anthropic, type="password")
-st.session_state.google_key = st.sidebar.text_input("Google Key", value=default_google, type="password")
-st.session_state.mistral_key = st.sidebar.text_input("Mistral Key", value=default_mistral, type="password") # NEW: Input field
+st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", value=get_secret("ANTHROPIC_API_KEY"), type="password")
+st.session_state.google_key = st.sidebar.text_input("Google Key", value=get_secret("GOOGLE_API_KEY"), type="password")
+st.session_state.mistral_key = st.sidebar.text_input("Mistral Key", value=get_secret("MISTRAL_API_KEY"), type="password") 
 
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
@@ -394,16 +394,15 @@ if st.session_state.step == "setup":
     manual_config['weighted_fetishes'] = weighted_fetishes
 
     if st.button("Draft Premise"):
-        # NEW: Check if the required API key for the SELECTED model is present
-        required_vendor = MODELS[st.session_state.writer_model]['vendor']
-        api_missing = False
-        
-        if required_vendor == 'anthropic' and not st.session_state.anthropic_key: api_missing = True
-        if required_vendor == 'google' and not st.session_state.google_key: api_missing = True
-        if required_vendor == 'mistral' and not st.session_state.mistral_key: api_missing = True
+        # Check active model key dynamically
+        active_vendor = MODELS[st.session_state.writer_model]['vendor']
+        has_key = False
+        if active_vendor == 'anthropic' and st.session_state.anthropic_key: has_key = True
+        if active_vendor == 'google' and st.session_state.google_key: has_key = True
+        if active_vendor == 'mistral' and st.session_state.mistral_key: has_key = True
 
-        if api_missing:
-            st.error(f"API Key for {required_vendor.capitalize()} is missing! Please enter it in the sidebar.")
+        if not has_key:
+            st.error(f"API Key missing for the selected Writer Model ({active_vendor.title()})!")
         else:
             st.session_state.manual_config = manual_config
             st.session_state.seed = seed
@@ -477,9 +476,9 @@ elif st.session_state.step == "writing":
     bible = f"""
     GENRE: {d['genre']} | POV: {d['pov']}
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
+    ALTERATION TARGETS: {d['body_parts']}
+    FETISHES: {d['fetish_str']}
     TARGET ARCHETYPE: {d['destination']}
-    PHYSICAL TARGETS: {d['body_parts']}
-    MOTIFS & IMPORTANCE: \n{d['fetish_str']}
     
     PREMISE: {premise}
     CONFLICT/TRAP: {d['conflict']}

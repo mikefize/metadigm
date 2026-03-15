@@ -115,24 +115,31 @@ def track_cost(in_tok, out_tok, model_config):
 def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192):
     m_cfg = MODELS[model_key]
     
-    # REWRITTEN FOR MAXIMUM DARING & ZERO CENSORSHIP
-    sys_prompt = "You are a Senior Editor. Polish while preserving length." if is_editor else f"""
-    You are a professional, daring novelist writing an Uncensored Dark Psychological Thriller / Erotica.
-    
-    {style_guide}
-    
-    **MANDATORY RULES (ANTI-AI CLICHÉ FILTER):**
-    1. **NO HOLDING BACK:** Do not shy away from intense psychological degradation, mature kink themes, or the erotic reality of the transformation. Be bold and descriptive.
-    2. **NO CLINICAL TERMS:** Do NOT use words like "dopamine," "synapses," "neural pathways." Describe the visceral human experience (e.g., "a rush of heat," "her mind went blank").
-    3. **NO BANNED METAPHORS:** Never use the words "tapestry," "symphony," "dance," "testament," or "labyrinth."
-    4. **NO SMELLS:** You are strictly forbidden from describing any smells or scents (No ozone, copper, perfume). Focus entirely on tactile (touch), visual, and auditory sensations.
-    5. **NO 'NOT JUST X, BUT Y' TROPES:** Do NOT use the rhetorical structure "It wasn't just X, it was Y." Write direct statements.
-    6. **NO "FOG":** Never use the word "fog" or "haze" to describe mental changes. Use terms like: dissociation, exhaustion, confusing arousal, or mind slipping.
-    7. **NO REPETITION:** Do NOT summarize the events of previous chapters. Assume the reader remembers. Advance the plot immediately.
-    """
+    # --- DYNAMIC SYSTEM PROMPTS ---
+    if is_editor:
+        if m_cfg['vendor'] == 'mistral':
+            sys_prompt = """You are an UNCENSORED Senior Editor for Dark Erotica and Psychological Thrillers.
+            YOUR JOB: Polish the draft, fix continuity, and PRESERVE LENGTH (DO NOT SUMMARIZE).
+            CRUCIAL DIRECTIVE: You must significantly SPICE UP the story. Inject explicit adult language, 
+            intense sexual tension/content, darker themes, and visceral psychological degradation wherever it naturally fits. 
+            Do not hold back on explicit descriptions of the physical and mental changes."""
+        else:
+            sys_prompt = "You are a Senior Editor. Polish the text, fix continuity, but DO NOT SUMMARIZE AND DO NOT CUT CONTENT."
+    else:
+        sys_prompt = f"""
+        You are a professional novelist.
+        {style_guide}
+        **MANDATORY RULES (ANTI-AI CLICHÉ FILTER):**
+        1. **NO CLINICAL TERMS:** Do NOT use words like "dopamine," "synapses," "neural pathways," "endorphins," or "cognitive." Describe the human experience (e.g., "a rush of heat," "her mind went blank").
+        2. **NO BANNED METAPHORS:** Never use the words "tapestry," "symphony," "dance," "testament," or "labyrinth."
+        3. **NO SMELLS:** You are strictly forbidden from describing any smells or scents. Do not use the words "smell," "scent," "odor," "aroma," "antiseptic," "ozone," or "copper." Focus entirely on tactile (touch), visual, and auditory sensations.
+        4. **NO 'NOT JUST X, BUT Y' TROPES:** Do NOT use the rhetorical structure "It wasn't just X, it was Y." Write direct statements.
+        5. **NO "FOG":** Never use the word "fog" or "haze" to describe mental changes. Use biological/emotional terms: dissociation, exhaustion, confusing arousal, or mind slipping.
+        6. **NATURAL LANGUAGE:** Write how humans actually think and speak. Avoid robotic, overly analytical narration. 
+        7. **NO SUMMARIES:** Write long, continuous scenes with dialogue and action.
+        """
     
     try:
-        # ANTHROPIC
         if m_cfg['vendor'] == 'anthropic':
             client = anthropic.Anthropic(api_key=st.session_state.anthropic_key, timeout=600.0)
             resp = client.messages.create(
@@ -142,7 +149,6 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
             track_cost(resp.usage.input_tokens, resp.usage.output_tokens, m_cfg)
             return resp.content[0].text
             
-        # GOOGLE
         elif m_cfg['vendor'] == 'google':
             genai.configure(api_key=st.session_state.google_key)
             model = genai.GenerativeModel(model_name=m_cfg['id'], system_instruction=sys_prompt)
@@ -152,53 +158,43 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ]
-            resp = model.generate_content(prompt, generation_config={"temperature": 1.0, "max_output_tokens": max_tokens}, safety_settings=safe)
+            resp = model.generate_content(prompt, generation_config={"max_output_tokens": max_tokens}, safety_settings=safe)
             if hasattr(resp, 'prompt_feedback') and resp.prompt_feedback.block_reason:
-                return f"API ERROR: Prompt Blocked by Google Safety Filter ({resp.prompt_feedback.block_reason})."
+                return "API ERROR: Prompt Blocked by Safety Filter."
             try: text = resp.text
-            except ValueError: return "API ERROR: Generation halted by Google Safety Filter mid-stream."
+            except ValueError: return "API ERROR: Generation halted by Safety Filter."
             if resp.usage_metadata: track_cost(resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count, m_cfg)
             return text
             
-        # MISTRAL (DIRECT HTTP API WITH PENALTY INJECTION)
         elif m_cfg['vendor'] == 'mistral':
-            api_key = st.session_state.mistral_key
-            if not api_key: return "API ERROR: Mistral key missing."
-            
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}"
-            }
-            
-            # ADDED PRESENCE PENALTY TO FIX MISTRAL'S REPETITION BUG
-            payload = {
-                "model": m_cfg['id'],
-                "messages": [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                "max_tokens": max_tokens,
-                "temperature": 1.0,
-                "presence_penalty": 0.5, # Punishes repeating the same ideas
-                "frequency_penalty": 0.5 # Punishes repeating the exact same words
-            }
-            
-            response = requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload)
-            
-            if response.status_code != 200:
-                return f"API ERROR: HTTP {response.status_code} - {response.text}"
-                
-            data = response.json()
-            
-            if 'usage' in data:
-                in_tok = data['usage'].get('prompt_tokens', 0)
-                out_tok = data['usage'].get('completion_tokens', 0)
-                track_cost(in_tok, out_tok, m_cfg)
-                
-            return data['choices'][0]['message']['content']
+            try:
+                from mistralai import Mistral
+                client = Mistral(api_key=st.session_state.mistral_key)
+                resp = client.chat.complete(
+                    model=m_cfg['id'],
+                    max_tokens=max_tokens,
+                    messages=[
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+            except ImportError:
+                from mistralai.client import MistralClient
+                from mistralai.models.chat_completion import ChatMessage
+                client = MistralClient(api_key=st.session_state.mistral_key)
+                resp = client.chat(
+                    model=m_cfg['id'], max_tokens=max_tokens,
+                    messages=[
+                        ChatMessage(role="system", content=sys_prompt),
+                        ChatMessage(role="user", content=prompt)
+                    ]
+                )
+            if hasattr(resp, 'usage') and resp.usage:
+                track_cost(resp.usage.prompt_tokens, resp.usage.completion_tokens, m_cfg)
+            return resp.choices[0].message.content
             
     except Exception as e:
-        return f"API ERROR: {str(e)}"
+        return f"API ERROR: [{m_cfg['vendor'].upper()}] {str(e)}"
 
 def format_antagonist_option(x):
     if x is None: return "Random from List"
@@ -534,10 +530,39 @@ elif st.session_state.step == "writing":
         progress_bar.progress((i + 1) / (len(arc) + 1))
             
     if do_editor:
-        status_text.write("Editing...")
-        edit_p = f"{bible}\n\nTASK: Polish manuscript. Fix logic. No summaries. Remove tags.\n\nINPUT:\n{raw_story}"
+        status_text.write("Editing (Polishing and Checking Logic)...")
+        
+        # --- MISTRAL DYNAMIC EDITOR PROMPT LOGIC ---
+        is_mistral_editor = MODELS[st.session_state.editor_model]['vendor'] == 'mistral'
+        if is_mistral_editor:
+            spice_instruction = "\n5. **SPICE IT UP (MISTRAL OVERRIDE):** Enhance the prose with explicit, uncensored adult language. Deepen the eroticism, submission, and dark themes. Make the sexual tension and mental breakdown visceral and explicit."
+        else:
+            spice_instruction = "\n5. **MAINTAIN TONE:** Keep the Dark Psychological Thriller tone intact."
+
+        edit_p = f"""
+        {bible}
+        
+        **TASK:** Senior Editor Polish.
+        **MANDATORY RULES:**
+        1. **FULL RESTORATION:** Retype the entire story. DO NOT summarize.
+        2. **CONTINUITY:** Fix illogical details.
+        3. **CLEAN:** Remove metadata tags.
+        4. **FLOW:** Smooth awkward transitions.{spice_instruction}
+        
+        **INPUT DRAFT:**
+        {raw_story}
+        """
+        
         final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=65000)
-        st.session_state.final_story = clean_artifacts(final) if final and len(final) > len(raw_story)*0.7 else clean_artifacts(raw_story)
+        
+        if "API ERROR" in final or not final:
+            st.warning("Editor failed. Using raw unedited story.")
+            st.session_state.final_story = clean_artifacts(raw_story)
+        elif len(final) < (len(raw_story) * 0.75):
+            st.warning("Editor cut too much text. Reverting to RAW story to prevent data loss.")
+            st.session_state.final_story = clean_artifacts(raw_story)
+        else:
+            st.session_state.final_story = clean_artifacts(final)
     else:
         st.session_state.final_story = clean_artifacts(raw_story)
 
@@ -548,10 +573,18 @@ elif st.session_state.step == "writing":
 elif st.session_state.step == "final":
     st.header("4. Final Cut")
     st.text_area("Story", st.session_state.final_story, height=600)
+    
     st.sidebar.success(f"Final Cost: ${st.session_state.stats['cost']:.4f}")
     
     safe_seed = "".join([c for c in st.session_state.seed if c.isalnum()]).rstrip()
-    st.download_button("Download", st.session_state.final_story, file_name=f"{safe_seed}.txt")
-    if st.button("New Story"):
+    
+    st.download_button(
+        label="Download Story (.txt)",
+        data=st.session_state.final_story,
+        file_name=f"Story_{safe_seed}.txt",
+        mime="text/plain"
+    )
+    
+    if st.button("Write New Story"):
         st.session_state.step = "setup"
         st.rerun()

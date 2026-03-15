@@ -174,6 +174,9 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
             
         # MISTRAL
         elif m_cfg['vendor'] == 'mistral':
+            # Try multiple client import styles and fall back to a direct HTTP call.
+            last_errs = []
+            # 1) Try modern top-level client
             try:
                 from mistralai import Mistral
                 client = Mistral(api_key=st.session_state.mistral_key)
@@ -185,7 +188,18 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                         {"role": "user", "content": prompt}
                     ]
                 )
-            except ImportError:
+                if hasattr(resp, 'usage') and resp.usage:
+                    track_cost(resp.usage.prompt_tokens, resp.usage.completion_tokens, m_cfg)
+                # Try common locations for the returned text
+                try:
+                    return resp.choices[0].message.content
+                except Exception:
+                    return getattr(resp, 'text', str(resp))
+            except Exception as e_modern:
+                last_errs.append(f"modern_client:{e_modern}")
+
+            # 2) Try legacy client layout
+            try:
                 from mistralai.client import MistralClient
                 from mistralai.models.chat_completion import ChatMessage
                 client = MistralClient(api_key=st.session_state.mistral_key)
@@ -196,9 +210,44 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                         ChatMessage(role="user", content=prompt)
                     ]
                 )
-            if hasattr(resp, 'usage') and resp.usage:
-                track_cost(resp.usage.prompt_tokens, resp.usage.completion_tokens, m_cfg)
-            return resp.choices[0].message.content
+                if hasattr(resp, 'usage') and resp.usage:
+                    track_cost(resp.usage.prompt_tokens, resp.usage.completion_tokens, m_cfg)
+                try:
+                    return resp.choices[0].message.content
+                except Exception:
+                    return getattr(resp, 'text', str(resp))
+            except Exception as e_legacy:
+                last_errs.append(f"legacy_client:{e_legacy}")
+
+            # 3) HTTP fallback: attempt to call Mistral REST API directly
+            try:
+                key = st.session_state.mistral_key
+                if not key:
+                    raise Exception("Mistral API key missing (st.session_state.mistral_key is empty)")
+                # Common Mistral REST chat endpoint pattern
+                url = f"https://api.mistral.ai/v1/models/{m_cfg['id']}/chat/completions"
+                headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+                payload = {
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_tokens": max_tokens,
+                    "temperature": 1.0
+                }
+                r = requests.post(url, headers=headers, json=payload, timeout=120)
+                r.raise_for_status()
+                jr = r.json()
+                # Try common response shapes
+                if 'choices' in jr and jr['choices']:
+                    return jr['choices'][0]['message'].get('content') or jr['choices'][0]['message']
+                if 'result' in jr:
+                    return jr['result']
+                # If unknown shape, return JSON string for debugging
+                return json.dumps(jr)
+            except Exception as e_http:
+                last_errs.append(f"http_fallback:{e_http}")
+                raise Exception("; ".join(last_errs))
             
     except Exception as e:
         return f"API ERROR: [{m_cfg['vendor'].upper()}] {str(e)}"

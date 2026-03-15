@@ -586,6 +586,19 @@ elif st.session_state.step == "writing":
         st.write("Editor returned identical text?", (final or "").strip() == (raw_story or "").strip())
         st.code((final or "")[:1000])
 
+        # Persist diagnostics so they survive the rerun and are visible on the Final page
+        try:
+            st.session_state.editor_diag = {
+                "editor_model": st.session_state.editor_model,
+                "vendor": vendor_name,
+                "raw_len": raw_len,
+                "final_len": final_len,
+                "identical": (final or "").strip() == (raw_story or "").strip(),
+                "preview": (final or "")[:1000]
+            }
+        except Exception:
+            st.session_state.editor_diag = None
+
         if "API ERROR" in (final or "") or not final:
             st.warning("Editor failed. Using raw unedited story.")
             st.session_state.final_story = clean_artifacts(raw_story)
@@ -603,6 +616,16 @@ elif st.session_state.step == "writing":
 
 elif st.session_state.step == "final":
     st.header("4. Final Cut")
+    # Show editor diagnostics if present (helps debug invisible editor pass)
+    if 'editor_diag' in st.session_state and st.session_state.editor_diag:
+        ed = st.session_state.editor_diag
+        st.subheader("Editor diagnostics")
+        st.markdown(f"- **Editor Model:** {ed.get('editor_model')} ({ed.get('vendor')})")
+        st.markdown(f"- **Original length:** {ed.get('raw_len')}")
+        st.markdown(f"- **Edited length:** {ed.get('final_len')}")
+        st.markdown(f"- **Identical?:** {ed.get('identical')}")
+        st.markdown("**Editor preview (first 1000 chars):**")
+        st.code(ed.get('preview') or "")
     st.text_area("Story", st.session_state.final_story, height=600)
     
     st.sidebar.success(f"Final Cost: ${st.session_state.stats['cost']:.4f}")

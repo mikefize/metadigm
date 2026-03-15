@@ -545,37 +545,42 @@ elif st.session_state.step == "writing":
         progress_bar.progress((i + 1) / (len(arc) + 1))
             
     if do_editor:
-        status_text.info(f"Editing Pass with {MODELS[st.session_state.editor_model]['name']}...")
+        status_text.write("Editing (Polishing and Checking Logic)...")
+        
+        # --- MISTRAL DYNAMIC EDITOR PROMPT LOGIC ---
+        is_mistral_editor = MODELS[st.session_state.editor_model]['vendor'] == 'mistral'
+        if is_mistral_editor:
+            spice_instruction = "\n5. **SPICE IT UP (MISTRAL OVERRIDE):** Enhance the prose with explicit, uncensored adult language. Deepen the eroticism, submission, and dark themes. Make the sexual tension and mental breakdown visceral and explicit."
+        else:
+            spice_instruction = "\n5. **MAINTAIN TONE:** Keep the Dark Psychological Thriller tone intact."
+
         edit_p = f"""
         {bible}
         
-        **TASK:** Polish manuscript. Fix logic. No summaries. Remove tags.
+        **TASK:** Senior Editor Polish.
+        **MANDATORY RULES:**
+        1. **FULL RESTORATION:** Retype the entire story. DO NOT summarize.
+        2. **CONTINUITY:** Fix illogical details.
+        3. **CLEAN:** Remove metadata tags.
+        4. **FLOW:** Smooth awkward transitions.{spice_instruction}
         
-        **INPUT:**
+        **INPUT DRAFT:**
         {raw_story}
         """
-        try:
-            final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=65000)
-            if "API ERROR" in final or not final:
-                st.warning("Editor failed. Using raw unedited story.")
-                st.session_state.final_story = clean_artifacts(raw_story)
-            elif len(final) < (len(raw_story) * 0.75):
-                st.warning("Editor cut too much text. Reverting to RAW story to prevent data loss.")
-                st.session_state.final_story = clean_artifacts(raw_story)
-            else:
-                st.session_state.final_story = clean_artifacts(final)
-                st.success("Editor pass successful!")
-        except Exception as e:
-            st.error(f"Editor Pass failed: {e}. Using raw story.")
+        
+        final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=65000)
+        
+        if "API ERROR" in final or not final:
+            st.warning("Editor failed. Using raw unedited story.")
             st.session_state.final_story = clean_artifacts(raw_story)
+        elif len(final) < (len(raw_story) * 0.75):
+            st.warning("Editor cut too much text. Reverting to RAW story to prevent data loss.")
+            st.session_state.final_story = clean_artifacts(raw_story)
+        else:
+            st.session_state.final_story = clean_artifacts(final)
     else:
         st.session_state.final_story = clean_artifacts(raw_story)
 
-    # ---------------------------------------------------------
-    # NEW: AUTOMATIC RAW BACKUP SAVE
-    # ---------------------------------------------------------
-    save_to_file(clean_artifacts(raw_story), st.session_state.seed, label="RAW_BACKUP")
-    
     progress_bar.progress(1.0)
     st.session_state.step = "final"
     st.rerun()

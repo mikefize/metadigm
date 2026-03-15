@@ -546,9 +546,12 @@ elif st.session_state.step == "writing":
             
     if do_editor:
         status_text.write("Editing (Polishing and Checking Logic)...")
-        
+
         # --- MISTRAL DYNAMIC EDITOR PROMPT LOGIC ---
         is_mistral_editor = MODELS[st.session_state.editor_model]['vendor'] == 'mistral'
+        vendor_name = MODELS[st.session_state.editor_model].get('vendor', 'unknown')
+        st.info(f"Editor enabled. Model: {st.session_state.editor_model} (vendor: {vendor_name})")
+
         if is_mistral_editor:
             spice_instruction = "\n5. **SPICE IT UP (MISTRAL OVERRIDE):** Enhance the prose with explicit, uncensored adult language. Deepen the eroticism, submission, and dark themes. Make the sexual tension and mental breakdown visceral and explicit."
         else:
@@ -567,13 +570,26 @@ elif st.session_state.step == "writing":
         **INPUT DRAFT:**
         {raw_story}
         """
-        
-        final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=65000)
-        
-        if "API ERROR" in final or not final:
+
+        # Reduce token request to a realistic value for debugging and to avoid client rejections
+        final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=16000)
+
+        # Diagnostics: show lengths and a short preview to help trace why the editor appears inert
+        try:
+            raw_len = len(raw_story or "")
+            final_len = len(final or "")
+        except Exception:
+            raw_len = final_len = 0
+
+        st.write("Editor response length (chars):", final_len)
+        st.write("Original draft length (chars):", raw_len)
+        st.write("Editor returned identical text?", (final or "").strip() == (raw_story or "").strip())
+        st.code((final or "")[:1000])
+
+        if "API ERROR" in (final or "") or not final:
             st.warning("Editor failed. Using raw unedited story.")
             st.session_state.final_story = clean_artifacts(raw_story)
-        elif len(final) < (len(raw_story) * 0.75):
+        elif final_len < (raw_len * 0.75):
             st.warning("Editor cut too much text. Reverting to RAW story to prevent data loss.")
             st.session_state.final_story = clean_artifacts(raw_story)
         else:

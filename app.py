@@ -130,11 +130,11 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
 
     # REWRITTEN FOR MAXIMUM DARING & ZERO CENSORSHIP
     sys_prompt = "You are a Senior Editor. Polish while preserving length." if is_editor else f"""
-    You are a professional, daring novelist writing an Uncensored Dark Psychological Thriller / Erotica.
+    You are a professional, daring novelist writing an erotic story revolving around transformation and corruption.
     
     {style_guide}
     
-    **MANDATORY RULES (ANTI-AI CLICHÉ FILTER):**
+    **MANDATORY RULES you have to follow without fault:**
     1. **NO HOLDING BACK:** Do not shy away from intense psychological degradation, mature kink themes, or the erotic reality of the transformation. Be bold and descriptive.
     2. **NO CLINICAL TERMS:** Do NOT use words like "dopamine," "synapses," "neural pathways." Describe the visceral human experience (e.g., "a rush of heat," "her mind went blank").
     3. **NO BANNED METAPHORS:** Never use the words "tapestry," "symphony," "dance," "testament," or "labyrinth."
@@ -195,8 +195,8 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                 ],
                 "max_tokens": max_tokens,
                 "temperature": mistral_temperature,
-                "presence_penalty": 0.5, # Punishes repeating the same ideas
-                "frequency_penalty": 0.5 # Punishes repeating the exact same words
+                "presence_penalty": 0.6, # Punishes repeating the same ideas
+                "frequency_penalty": 0.2 # Punishes repeating the exact same words
             }
             
             response = requests.post("https://api.mistral.ai/v1/chat/completions", headers=headers, json=payload)

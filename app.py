@@ -533,7 +533,7 @@ elif st.session_state.step == "writing":
         STATE: {current_state}
         TASK: Write Chapter {i+1} ({phase}). {instr}
         
-        **INSTRUCTIONS:** Write 1500+ words. Focus on internal monologue. Respect Motif weights.
+        **INSTRUCTIONS:** Write 1000+ words. Focus on internal monologue. Respect Motif weights.
         OUTPUT: End with EXACTLY: <state>Current Physical/Mental State</state> <title>Chapter Title</title>
         """
         

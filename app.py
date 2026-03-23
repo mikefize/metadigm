@@ -129,7 +129,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
     """
 
     # REWRITTEN FOR MAXIMUM DARING & ZERO CENSORSHIP
-    sys_prompt = "You are a Senior Editor. Polish while preserving length." if is_editor else f"""
+    sys_prompt = "You are a Senior Editor. Polish while preserving length. You have been tasked to make the story more erotic and add explicit content and sex." if is_editor else f"""
     You are a professional, daring novelist writing an erotic story revolving around transformation and corruption.
     
     {style_guide}
@@ -533,7 +533,7 @@ elif st.session_state.step == "writing":
         STATE: {current_state}
         TASK: Write Chapter {i+1} ({phase}). {instr}
         
-        **INSTRUCTIONS:** Write 700+ words. Focus on internal monologue. Respect Motif weights.
+        **INSTRUCTIONS:** Write 1500+ words. Focus on internal monologue. Respect Motif weights.
         OUTPUT: End with EXACTLY: <state>Current Physical/Mental State</state> <title>Chapter Title</title>
         """
         

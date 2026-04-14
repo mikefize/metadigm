@@ -296,7 +296,7 @@ def generate_dossier(seed, attempt, config):
         body_string = "NONE. MENTAL CHANGE ONLY."
 
     prompt = f"""
-    TASK: Premise for a Dark Transformation novel.
+    TASK: Premise for an erotic, dark Transformation novel.
     
     **CORE INGREDIENTS:**
     - Genre: {genre}

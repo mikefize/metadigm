@@ -115,7 +115,7 @@ def track_cost(in_tok, out_tok, model_config):
 
 def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192):
     m_cfg = MODELS[model_key]
-    is_mistral = m_cfg['vendor'] == 'mistral'
+    is_mistral = m_cfg['vendor'] == 'mistral || google'
 
     # MISTRAL-EXCLUSIVE NSFW ADDENDUM — injected only when Mistral is the writer
     MISTRAL_NSFW_ADDENDUM = """

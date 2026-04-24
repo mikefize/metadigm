@@ -16,3 +16,7 @@ Doctor
 Veterinarian
 Bartender
 College Student
+Social Worker
+Environment Activist
+Police Officer
+Private Investigator

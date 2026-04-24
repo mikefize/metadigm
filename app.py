@@ -461,7 +461,7 @@ def generate_dossier(seed, attempt, config):
         body_string = "NONE. MENTAL CHANGE ONLY."
 
     prompt = f"""
-    TASK: Premise for an erotic, dark Transformation novel.
+    TASK: Premise for an erotic, dark Transformation novel. Push limits, don't shy away from taboo topics. Be explicit, make it dark and filthy.
     
     **CORE INGREDIENTS:**
     - Genre: {genre}

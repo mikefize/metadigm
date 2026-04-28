@@ -114,7 +114,7 @@ def track_cost(in_tok, out_tok, model_config):
     if 'cost_metric' in st.session_state:
         st.session_state.cost_metric.metric("Budget", f"${st.session_state.stats['cost']:.4f}")
 
-def show_prompt_debug(prompt, model_key, is_editor=False):
+def show_prompt_debug(system_prompt, prompt, model_key, is_editor=False):
     if not st.session_state.get("show_prompt_debug", False):
         return
     model_name = MODELS[model_key].get("name", model_key)
@@ -123,11 +123,13 @@ def show_prompt_debug(prompt, model_key, is_editor=False):
     if is_editor:
         label += " — Editor Pass"
     with st.expander(label, expanded=False):
+        st.subheader("System Prompt")
+        st.code(system_prompt, language="text")
+        st.subheader("User Prompt")
         st.code(prompt, language="text")
 
 def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192):
     m_cfg = MODELS[model_key]
-    show_prompt_debug(prompt, model_key, is_editor=is_editor)
     is_mistral = m_cfg['vendor'] == 'mistral'
 
     # MISTRAL-EXCLUSIVE NSFW ADDENDUM — injected only when Mistral is the writer

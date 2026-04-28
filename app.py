@@ -417,7 +417,7 @@ def generate_dossier(seed, attempt, config):
         
         antag_raw = config.get('antagonist')
         if antag_raw is None: antag_raw = random.choice(load_list('antagonists.txt'))
-        if antag_raw == "__DYNAMIC__": antag_instr = "**ANTAGONIST:** [OPEN - AI INVENT]"
+        if antag_raw == "__DYNAMIC__": antag_instr = "**ANTAGONIST:** [OPEN - AI INVENT - FEMALE BY DEFAULT]"
         elif antag_raw == "__NONE__": antag_instr = "**ANTAGONIST:** [NONE]"
         else: antag_instr = f"**ANTAGONIST:** {antag_raw}"
 

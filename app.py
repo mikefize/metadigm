@@ -44,7 +44,7 @@ STORY_ARCS = {
     "The Inevitable Slide USE": [
         ("The Life Before", "Introduce her demanding job, her sharp intellect, and her relationships. Establish the Trigger (why she needs money/help). NO TRANSFORMATION YET. STRICTLY NORMAL LIFE."),
         ("The Meeting", "She meets the Antagonist or encounters the mechanism. Establish the setting and the tension. Drop subtle, unsettling hints about what might happen, but DO NOT start the transformation yet."),
-        ("The Threshold", "She officially enters the trap/signs the contract. The first very slight changes occur. She starts to notice, but can fight their effects."),
+        ("The Threshold", "The first very slight changes occur. She starts to notice, but can fight their effects."),
         ("The Unraveling", "The struggle against the changes intensify as the pressure rises."),
         ("The Breaking Point", "Her mind is at war with her changing body and desires as her peers start to notice the changes and ask questions."),
         ("Metamorphosis", "The final surrender. Her old ego shatters. She accepts and embraces the new Archetype with euphoric relief."),
@@ -377,7 +377,7 @@ Now come here and show me what you've got. ⚡</user_style>"
 
 def format_antagonist_option(x):
     if x is None: return "Random from List"
-    if x == "__DYNAMIC__": return "Dynamic (AI Invented)"
+    if x == "__DYNAMIC__": return "Dynamic (AI Invented, female by default)"
     if x == "__NONE__": return "NO ANTAGONIST (System/Environment)"
     return x
 
@@ -473,7 +473,6 @@ def generate_dossier(seed, attempt, config):
     
     **OUTPUT FORMAT (STRICT XML):**
     <antagonist>Name/Title or "None"</antagonist>
-    <destination>Archetype Name (Invent a unique destination)</destination>
     <trigger>Why she enters the situation</trigger>
     <conflict>The trap mechanism</conflict>
     <blurb>4-sentence summary</blurb>
@@ -493,7 +492,6 @@ def generate_dossier(seed, attempt, config):
         "name": name, "job": final_job, "genre": genre, 
         "fetish_str": f_string, "body_parts": body_string, "mc_method": mc_method, "pov": config.get('pov'),
         "antagonist": extract_tag(res, "antagonist"),
-        "destination": extract_tag(res, "destination"), 
         "trigger": extract_tag(res, "trigger"), 
         "conflict": extract_tag(res, "conflict"), 
         "blurb": extract_tag(res, "blurb"),
@@ -610,7 +608,6 @@ elif st.session_state.step == "casting":
     d = st.session_state.dossier
     st.header("2. Casting Call")
     
-    st.subheader(f"{d['name']} -> {d.get('destination', 'Unknown')}")
     st.caption(f"**Arc:** {d['arc_name']}")
     
     colA, colB = st.columns(2)
@@ -654,7 +651,7 @@ elif st.session_state.step == "casting":
 
 elif st.session_state.step == "writing":
     d = st.session_state.dossier
-    st.header(f"3. Filming: {d.get('destination', 'Story')}")
+    st.header(f"3. Filming: {d.get('Story')}")
     progress_bar = st.progress(0)
     status_text = st.empty()
     
@@ -671,7 +668,6 @@ elif st.session_state.step == "writing":
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
     ALTERATION TARGETS: {d['body_parts']}
     FETISHES: {d['fetish_str']}
-    TARGET ARCHETYPE: {d['destination']}
     
     PREMISE: {premise}
     CONFLICT/TRAP: {d['conflict']}

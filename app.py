@@ -25,6 +25,7 @@ if "final_story" not in st.session_state: st.session_state.final_story = ""
 if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
 if "manual_config" not in st.session_state: st.session_state.manual_config = {}
 if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
+if "show_prompt_debug" not in st.session_state: st.session_state.show_prompt_debug = False
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
@@ -112,6 +113,20 @@ def track_cost(in_tok, out_tok, model_config):
     st.session_state.stats['cost'] += (c_in + c_out)
     if 'cost_metric' in st.session_state:
         st.session_state.cost_metric.metric("Budget", f"${st.session_state.stats['cost']:.4f}")
+
+def show_prompt_debug(system_prompt, prompt, model_key, is_editor=False):
+    if not st.session_state.get("show_prompt_debug", False):
+        return
+    model_name = MODELS[model_key].get("name", model_key)
+    vendor = MODELS[model_key].get("vendor", "unknown").title()
+    label = f"LLM Prompt Debug — {model_name} ({vendor})"
+    if is_editor:
+        label += " — Editor Pass"
+    with st.expander(label, expanded=False):
+        st.subheader("System Prompt")
+        st.code(system_prompt, language="text")
+        st.subheader("User Prompt")
+        st.code(prompt, language="text")
 
 def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192):
     m_cfg = MODELS[model_key]

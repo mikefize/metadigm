@@ -414,6 +414,7 @@ CRUCIALLY, you must never use the phrase, “Cold coffee, warm LO, I can't lose 
     """
     
     if st.session_state.get("show_prompt_debug", False):
+        show_prompt_debug(sys_prompt, prompt, model_key, is_editor=is_editor)
         debug_print_prompt(sys_prompt, prompt, model_key)
 
     try:

@@ -130,7 +130,7 @@ def track_cost(in_tok, out_tok, model_config):
     if 'cost_metric' in st.session_state:
         st.session_state.cost_metric.metric("Budget", f"${st.session_state.stats['cost']:.4f}")
 
-def show_prompt_debug(system_prompt, prompt, model_key, is_editor=False):
+def show_prompt_debug(system_prompt, prompt, model_key, is_editor=False, expanded=False):
     if not st.session_state.get("show_prompt_debug", False):
         return
     model_name = MODELS[model_key].get("name", model_key)
@@ -138,7 +138,7 @@ def show_prompt_debug(system_prompt, prompt, model_key, is_editor=False):
     label = f"LLM Prompt Debug — {model_name} ({vendor})"
     if is_editor:
         label += " — Editor Pass"
-    with st.expander(label, expanded=False):
+    with st.expander(label, expanded=expanded):
         st.subheader("System Prompt")
         st.code(system_prompt, language="text")
         st.subheader("User Prompt")
@@ -414,6 +414,10 @@ CRUCIALLY, you must never use the phrase, “Cold coffee, warm LO, I can't lose 
     """
     
     if st.session_state.get("show_prompt_debug", False):
+        st.session_state.last_sys_prompt = sys_prompt
+        st.session_state.last_user_prompt = prompt
+        st.session_state.last_prompt_model_key = model_key
+        st.session_state.last_prompt_is_editor = is_editor
         show_prompt_debug(sys_prompt, prompt, model_key, is_editor=is_editor)
         debug_print_prompt(sys_prompt, prompt, model_key)
 
@@ -869,6 +873,15 @@ elif st.session_state.step == "writing":
 
 elif st.session_state.step == "final":
     st.header("4. Final Cut")
+    # If prompt debugging is enabled, show the last system/user prompts (persisted from last API call)
+    if st.session_state.get("show_prompt_debug", False) and st.session_state.get("last_user_prompt"):
+        show_prompt_debug(
+            st.session_state.get("last_sys_prompt", ""),
+            st.session_state.get("last_user_prompt", ""),
+            st.session_state.get("last_prompt_model_key", st.session_state.get('writer_model')),
+            is_editor=st.session_state.get("last_prompt_is_editor", False),
+            expanded=True
+        )
     st.text_area("Story", st.session_state.final_story, height=600)
     st.sidebar.success(f"Final Cost: ${st.session_state.stats['cost']:.4f}")
     

@@ -811,7 +811,7 @@ elif st.session_state.step == "writing":
     status_text = st.empty()
     
     if d['arc_name'] == "Custom Director Arc":
-        base_steps = ["The Hook", "The First Alteration", "The Escalation", "The Break", "The Fall", "Metamorphosis", "Epilogue"]
+        base_steps = ["Chapter 1", "Chapter 2", "Chapter 3", "Chapter 4", "Chapter 5", "Chapter 6", "Epilogue"]
         arc = [(step, f"Follow CUSTOM ARC: {d['custom_arc_text']}") for step in base_steps]
     else:
         arc = STORY_ARCS[d['arc_name']]

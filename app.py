@@ -26,6 +26,12 @@ if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
 if "manual_config" not in st.session_state: st.session_state.manual_config = {}
 if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
 if "show_prompt_debug" not in st.session_state: st.session_state.show_prompt_debug = False
+if "cyoa_segments" not in st.session_state: st.session_state.cyoa_segments = []
+if "cyoa_choices" not in st.session_state: st.session_state.cyoa_choices = []
+if "cyoa_history" not in st.session_state: st.session_state.cyoa_history = ""
+if "cyoa_state" not in st.session_state: st.session_state.cyoa_state = ""
+if "cyoa_round" not in st.session_state: st.session_state.cyoa_round = 0
+if "cyoa_choice_made" not in st.session_state: st.session_state.cyoa_choice_made = None
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
@@ -634,6 +640,92 @@ def generate_dossier(seed, attempt, config):
         "style_guide": style_guide
     }
 
+# --- CYOA HELPERS ---
+def generate_cyoa_segment(d, history, state, choice_made, round_num, style_guide, model_key):
+    premise = d.get('blurb') or d.get('raw_response', '')
+    bible = (
+        f"GENRE: {d.get('genre', 'Open')} | POV: {d.get('pov', 'Third Person')}\n"
+        f"ANTAGONIST: {d.get('antagonist', 'None')} | MC METHOD: {d.get('mc_method', 'Unknown')}\n"
+        f"ALTERATION TARGETS: {d.get('body_parts', 'None')}\n"
+        f"FETISHES/MOTIFS: {d.get('fetish_str', '')}\n"
+        f"PREMISE: {premise}\n"
+        f"CONFLICT: {d.get('conflict', '')}\n"
+        f"DIRECTOR NOTE: {d.get('custom_note', '')}"
+    )
+    if round_num == 0:
+        task = (
+            "Begin the story. Write 2-3 immersive paragraphs (~400-600 words) that introduce the "
+            "protagonist and establish the world. Do NOT rush into transformation — ground the reader first."
+        )
+    else:
+        task = (
+            f"Continue the story. The reader chose: \"{choice_made}\".\n"
+            "Write 2-3 paragraphs (~400-600 words) that flow naturally from that choice. "
+            "Stay true to the established tone and deepen the tension."
+        )
+    prompt = f"""{bible}
+
+STORY SO FAR:
+{history or '(Story is just beginning.)'}
+
+CURRENT STATE OF PROTAGONIST: {state}
+
+TASK: {task}
+
+After the segment, generate exactly 3 short reader choices (one sentence each). Offer meaningfully different paths: e.g., one compliant/submissive, one resistant, one unexpected twist.
+
+OUTPUT FORMAT (strict XML):
+<segment>
+[Story content here]
+</segment>
+<choice1>[Option A]</choice1>
+<choice2>[Option B]</choice2>
+<choice3>[Option C]</choice3>
+<state>[Brief current physical/mental state of protagonist]</state>
+"""
+    res = call_api(prompt, model_key, style_guide=style_guide, max_tokens=2000)
+    if not res or res.startswith("API ERROR"):
+        return None, [], state, (res or "Empty response from API")
+    segment = extract_tag(res, "segment")
+    choice1 = extract_tag(res, "choice1")
+    choice2 = extract_tag(res, "choice2")
+    choice3 = extract_tag(res, "choice3")
+    new_state = extract_tag(res, "state") or state
+    if not segment:
+        segment = clean_artifacts(res)
+    choices = [c for c in [choice1, choice2, choice3] if c]
+    return segment, choices, new_state, None
+
+
+def generate_cyoa_conclusion(d, history, state, style_guide, model_key):
+    premise = d.get('blurb') or d.get('raw_response', '')
+    bible = (
+        f"GENRE: {d.get('genre', 'Open')} | POV: {d.get('pov', 'Third Person')}\n"
+        f"ANTAGONIST: {d.get('antagonist', 'None')} | FETISHES: {d.get('fetish_str', '')}\n"
+        f"PREMISE: {premise}"
+    )
+    prompt = f"""{bible}
+
+STORY SO FAR:
+{history}
+
+CURRENT STATE: {state}
+
+TASK: Write a satisfying conclusion (~400-600 words). Bring the narrative to a clear, resonant close. No cliffhangers — end definitively.
+
+<conclusion>
+[Your conclusion here]
+</conclusion>
+"""
+    res = call_api(prompt, model_key, style_guide=style_guide, max_tokens=2000)
+    if not res or res.startswith("API ERROR"):
+        return None, (res or "Empty response")
+    conclusion = extract_tag(res, "conclusion")
+    if not conclusion:
+        conclusion = clean_artifacts(res)
+    return conclusion, None
+
+
 # --- UI START ---
 st.title("🎬 The Metamorphosis Engine")
 
@@ -657,9 +749,10 @@ st.session_state.cost_metric.metric("Budget", f"${st.session_state.stats['cost']
 if st.session_state.step == "setup":
     st.header("1. Production Setup")
     mode = st.radio("Select Mode:", ["Random Run", "Custom Setup", "Director Mode"], horizontal=True)
+    story_mode = st.radio("Story Mode:", ["Full Narrative", "Choose Your Own Adventure"], horizontal=True)
     
     col1, col2, col3 = st.columns(3)
-    manual_config = {'mode': mode, 'style_file': style_choice}
+    manual_config = {'mode': mode, 'story_mode': story_mode, 'style_file': style_choice}
 
     with col1:
         st.subheader("Core")
@@ -768,7 +861,16 @@ elif st.session_state.step == "casting":
     b1, b2, b3 = st.columns(3)
     if b1.button("✅ Action!"):
         st.session_state.dossier['custom_note'] = note
-        st.session_state.step = "writing"
+        if st.session_state.manual_config.get('story_mode') == 'Choose Your Own Adventure':
+            st.session_state.cyoa_segments = []
+            st.session_state.cyoa_choices = []
+            st.session_state.cyoa_history = ""
+            st.session_state.cyoa_state = f"Normal {st.session_state.dossier.get('job', 'person')}"
+            st.session_state.cyoa_round = 0
+            st.session_state.cyoa_choice_made = None
+            st.session_state.step = "cyoa"
+        else:
+            st.session_state.step = "writing"
         st.rerun()
     if b2.button("🔄 Reroll Elements"):
         st.session_state.attempt += 1
@@ -849,6 +951,92 @@ elif st.session_state.step == "writing":
     progress_bar.progress(1.0)
     st.session_state.step = "final"
     st.rerun()
+
+elif st.session_state.step == "cyoa":
+    d = st.session_state.dossier
+    st.header(f"3. Interactive Story — {d['name']}")
+    st.caption(f"Scene {st.session_state.cyoa_round} | Arc: {d['arc_name']}")
+
+    # Render all completed segments
+    for seg in st.session_state.cyoa_segments:
+        st.markdown(seg)
+        st.divider()
+
+    # Generate next segment if no choices are pending
+    if not st.session_state.cyoa_choices:
+        with st.spinner(f"Writing scene {st.session_state.cyoa_round + 1}..."):
+            segment, choices, new_state, err = generate_cyoa_segment(
+                d,
+                st.session_state.cyoa_history,
+                st.session_state.cyoa_state,
+                st.session_state.cyoa_choice_made,
+                st.session_state.cyoa_round,
+                d['style_guide'],
+                st.session_state.writer_model
+            )
+        if err or not segment:
+            st.error(f"Generation failed: {err}")
+            if st.button("⬅️ Back to Setup"):
+                st.session_state.step = "setup"
+                st.rerun()
+        else:
+            st.session_state.cyoa_segments.append(segment)
+            st.session_state.cyoa_history += f"\n\n{segment}"
+            st.session_state.cyoa_state = new_state
+            st.session_state.cyoa_choices = choices
+            st.session_state.cyoa_round += 1
+            st.rerun()
+    else:
+        st.subheader("What happens next?")
+        for idx, choice_text in enumerate(st.session_state.cyoa_choices, 1):
+            if st.button(
+                f"{idx}. {choice_text}",
+                key=f"cyoa_choice_{st.session_state.cyoa_round}_{idx}",
+                use_container_width=True
+            ):
+                st.session_state.cyoa_choice_made = choice_text
+                st.session_state.cyoa_choices = []
+                st.rerun()
+
+        st.divider()
+        col_end, col_back = st.columns(2)
+        if col_end.button("🔚 End Story Here", use_container_width=True):
+            with st.spinner("Writing conclusion..."):
+                conclusion, err = generate_cyoa_conclusion(
+                    d,
+                    st.session_state.cyoa_history,
+                    st.session_state.cyoa_state,
+                    d['style_guide'],
+                    st.session_state.writer_model
+                )
+            if err or not conclusion:
+                st.error(f"Conclusion failed: {err}")
+            else:
+                st.session_state.cyoa_segments.append(conclusion)
+                full_raw = f"# {d['name']}\n\n" + "\n\n---\n\n".join(st.session_state.cyoa_segments)
+                if do_editor:
+                    with st.spinner("Editing..."):
+                        bible_str = (
+                            f"GENRE: {d['genre']} | POV: {d['pov']}\n"
+                            f"ANTAGONIST: {d['antagonist']}\nPREMISE: {d.get('blurb', '')}"
+                        )
+                        edit_p = (
+                            f"{bible_str}\n\nTASK: Polish this manuscript. "
+                            f"Fix logic, flow and consistency. Remove any XML tags or artifacts.\n\nINPUT:\n{full_raw}"
+                        )
+                        final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=65000)
+                        st.session_state.final_story = (
+                            clean_artifacts(final)
+                            if final and len(final) > len(full_raw) * 0.7
+                            else clean_artifacts(full_raw)
+                        )
+                else:
+                    st.session_state.final_story = clean_artifacts(full_raw)
+                st.session_state.step = "final"
+                st.rerun()
+        if col_back.button("⬅️ Back to Setup", use_container_width=True):
+            st.session_state.step = "setup"
+            st.rerun()
 
 elif st.session_state.step == "final":
     st.header("4. Final Cut")

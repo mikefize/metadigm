@@ -575,30 +575,54 @@ def generate_dossier(seed, attempt, config):
         f_list = load_list('fetishes.txt')
         f_pick = random.choice(f_list)
         f_string = f"- {f_pick} (Weight: Essential)"
+        dynamic_guidance = f"Center the narrative around the protagonist slowly discovering and surrendering to {f_pick.lower()}, letting it shape her decisions, body, and self-image in subtle but inevitable ways."
     else:
         f_lines = []
+        guidance_parts = []
+        templates = [
+            "The story should let the protagonist's growing affinity for {theme} emerge naturally through her choices and physical sensations.",
+            "Weave the theme of {theme} into the plot as a powerful undercurrent that influences how she sees herself and interacts with others.",
+            "Make {theme} a driving emotional and erotic force, shown via escalating internal conflict and bodily responses.",
+            "{theme} should feel like an addictive progression that she both resists and craves more with each step.",
+            "The transformation arc should highlight how {theme} gradually rewires her priorities, desires, and sense of identity.",
+        ]
         for f_name, weight in weighted_fetishes.items():
             if weight == 3: w_desc = "Essential. Central to the plot and transformation."
             elif weight == 2: w_desc = "Important. A recurring theme."
             else: w_desc = "Minor. A subtle background detail."
             f_lines.append(f"- {f_name} (Priority: {w_desc})")
+            template = random.choice(templates)
+            guidance_parts.append(template.format(theme=f_name.lower()))
         f_string = "\n".join(f_lines)
+        dynamic_guidance = " ".join(guidance_parts)
 
     if config.get('enable_physical', True):
         details = config.get('body_details')
         if details:
             parts = []
+            phys_guidance = []
+            intensity_phrases = {
+                "Subtle": ["a faint but noticeable shift", "a gentle, almost imperceptible change", "a soft, gradual evolution"],
+                "Pronounced": ["a clear and striking transformation", "a significant, attention-drawing alteration", "a bold yet believable reshaping"],
+                "Extreme": ["a dramatic, almost overwhelming metamorphosis", "a powerful and highly visible evolution", "an intense, life-altering physical shift"]
+            }
             for d in details:
                 r = f" ({d['remark']})" if d.get('remark') else ""
                 parts.append(f"{d['part']} [{d['intensity']}{r}]")
+                phrase = random.choice(intensity_phrases.get(d['intensity'], ["a noticeable change"]))
+                rem_text = f" with a {d['remark']} quality" if d.get('remark') else ""
+                phys_guidance.append(f"Her {d['part'].lower()} should experience {phrase}{rem_text}, described through realistic sensory details and emotional impact.")
             body_string = "; ".join(parts)
+            physical_guidance = " ".join(phys_guidance)
         else:
             b_list = load_list('body_parts.txt')
             initial_b = config.get('body_parts') or ["__RANDOM__"] * random.choice([2, 3])
             selected_b = [random.choice(b_list) if i == "__RANDOM__" else i for i in initial_b]
             body_string = ", ".join(list(set(selected_b)))
+            physical_guidance = "Physical changes should unfold gradually and feel completely natural within the story."
     else:
         body_string = "NONE. MENTAL CHANGE ONLY."
+        physical_guidance = "The focus stays entirely on mental, emotional, and behavioral transformation."
 
     prompt = f"""
     TASK: Premise for an erotic, explicit, dark Transformation novel. Push limits, don't shy away from taboo topics. Be explicit, make it dark and filthy.
@@ -612,8 +636,9 @@ def generate_dossier(seed, attempt, config):
     - PHYSICAL TARGETS: {body_string}
     - Protagonist: {char}
     
-    **KINK/MOTIFS (With Weights):**
-    {f_string}
+    **THEMATIC GUIDANCE (dynamic, natural language - never repeat raw motif names):**
+    {dynamic_guidance}
+    {physical_guidance}
     
     **STORY SOURCE:**
     {elements_string}
@@ -637,7 +662,9 @@ def generate_dossier(seed, attempt, config):
 
     return {
         "name": name, "job": final_job, "genre": genre, 
-        "fetish_str": f_string, "body_parts": body_string, "body_details": config.get('body_details', []), "mc_method": mc_method, "pov": config.get('pov'),
+        "fetish_str": f_string, "body_parts": body_string, "body_details": config.get('body_details', []),
+        "dynamic_guidance": dynamic_guidance, "physical_guidance": physical_guidance,
+        "mc_method": mc_method, "pov": config.get('pov'),
         "antagonist": extract_tag(res, "antagonist"),
         "trigger": extract_tag(res, "trigger"), 
         "conflict": extract_tag(res, "conflict"), 
@@ -653,14 +680,11 @@ def generate_dossier(seed, attempt, config):
 # --- CYOA HELPERS ---
 def generate_cyoa_segment(d, history, state, choice_made, round_num, style_guide, model_key):
     premise = d.get('blurb') or d.get('raw_response', '')
-    phys_t = d.get('body_parts', 'None')
-    if d.get('body_details'):
-        phys_t = "; ".join([f"{x['part']} (Strength: {x['intensity']}, Note: {x.get('remark','') or 'none'})" for x in d['body_details']])
+    guidance = d.get('dynamic_guidance', '') + " " + d.get('physical_guidance', '')
     bible = (
         f"GENRE: {d.get('genre', 'Open')} | POV: {d.get('pov', 'Third Person')}\n"
         f"ANTAGONIST: {d.get('antagonist', 'None')} | MC METHOD: {d.get('mc_method', 'Unknown')}\n"
-        f"ALTERATION TARGETS: {phys_t} (Keep realistic spectrum)\n"
-        f"FETISHES/MOTIFS: {d.get('fetish_str', '')}\n"
+        f"THEMATIC GUIDANCE (fresh natural language, avoid raw motif repetition):\n{guidance}\n"
         f"PREMISE: {premise}\n"
         f"CONFLICT: {d.get('conflict', '')}\n"
         f"DIRECTOR NOTE: {d.get('custom_note', '')}"
@@ -712,9 +736,10 @@ OUTPUT FORMAT (strict XML):
 
 def generate_cyoa_conclusion(d, history, state, style_guide, model_key):
     premise = d.get('blurb') or d.get('raw_response', '')
+    guidance = d.get('dynamic_guidance', '') + " " + d.get('physical_guidance', '')
     bible = (
         f"GENRE: {d.get('genre', 'Open')} | POV: {d.get('pov', 'Third Person')}\n"
-        f"ANTAGONIST: {d.get('antagonist', 'None')} | FETISHES: {d.get('fetish_str', '')}\n"
+        f"ANTAGONIST: {d.get('antagonist', 'None')} | GUIDANCE: {guidance}\n"
         f"PREMISE: {premise}"
     )
     prompt = f"""{bible}
@@ -933,14 +958,12 @@ elif st.session_state.step == "writing":
     
     premise = d['blurb'] if d['blurb'] else d['raw_response']
     
-    phys_targets = d.get('body_parts', '')
-    if d.get('body_details'):
-        phys_targets = "; ".join([f"{x['part']} (Strength: {x['intensity']}, Note: {x.get('remark','') or 'none'})" for x in d['body_details']])
+    guidance = d.get('dynamic_guidance', '') + " " + d.get('physical_guidance', '')
     bible = f"""
     GENRE: {d['genre']} | POV: {d['pov']}
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
-    ALTERATION TARGETS: {phys_targets}  (Keep all changes within realistic spectrum even at Extreme)
-    FETISHES: {d['fetish_str']}
+    THEMATIC GUIDANCE (use fresh, natural phrasing only - never repeat raw motif names):
+    {guidance}
     
     PREMISE: {premise}
     CONFLICT/TRAP: {d['conflict']}

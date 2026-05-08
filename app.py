@@ -585,10 +585,18 @@ def generate_dossier(seed, attempt, config):
         f_string = "\n".join(f_lines)
 
     if config.get('enable_physical', True):
-        b_list = load_list('body_parts.txt')
-        initial_b = config.get('body_parts') or ["__RANDOM__"] * random.choice([2, 3])
-        selected_b = [random.choice(b_list) if i == "__RANDOM__" else i for i in initial_b]
-        body_string = ", ".join(list(set(selected_b)))
+        details = config.get('body_details')
+        if details:
+            parts = []
+            for d in details:
+                r = f" ({d['remark']})" if d.get('remark') else ""
+                parts.append(f"{d['part']} [{d['intensity']}{r}]")
+            body_string = "; ".join(parts)
+        else:
+            b_list = load_list('body_parts.txt')
+            initial_b = config.get('body_parts') or ["__RANDOM__"] * random.choice([2, 3])
+            selected_b = [random.choice(b_list) if i == "__RANDOM__" else i for i in initial_b]
+            body_string = ", ".join(list(set(selected_b)))
     else:
         body_string = "NONE. MENTAL CHANGE ONLY."
 
@@ -629,7 +637,7 @@ def generate_dossier(seed, attempt, config):
 
     return {
         "name": name, "job": final_job, "genre": genre, 
-        "fetish_str": f_string, "body_parts": body_string, "mc_method": mc_method, "pov": config.get('pov'),
+        "fetish_str": f_string, "body_parts": body_string, "body_details": config.get('body_details', []), "mc_method": mc_method, "pov": config.get('pov'),
         "antagonist": extract_tag(res, "antagonist"),
         "trigger": extract_tag(res, "trigger"), 
         "conflict": extract_tag(res, "conflict"), 
@@ -645,10 +653,13 @@ def generate_dossier(seed, attempt, config):
 # --- CYOA HELPERS ---
 def generate_cyoa_segment(d, history, state, choice_made, round_num, style_guide, model_key):
     premise = d.get('blurb') or d.get('raw_response', '')
+    phys_t = d.get('body_parts', 'None')
+    if d.get('body_details'):
+        phys_t = "; ".join([f"{x['part']} (Strength: {x['intensity']}, Note: {x.get('remark','') or 'none'})" for x in d['body_details']])
     bible = (
         f"GENRE: {d.get('genre', 'Open')} | POV: {d.get('pov', 'Third Person')}\n"
         f"ANTAGONIST: {d.get('antagonist', 'None')} | MC METHOD: {d.get('mc_method', 'Unknown')}\n"
-        f"ALTERATION TARGETS: {d.get('body_parts', 'None')}\n"
+        f"ALTERATION TARGETS: {phys_t} (Keep realistic spectrum)\n"
         f"FETISHES/MOTIFS: {d.get('fetish_str', '')}\n"
         f"PREMISE: {premise}\n"
         f"CONFLICT: {d.get('conflict', '')}\n"
@@ -779,7 +790,25 @@ if st.session_state.step == "setup":
         enable_phys = st.checkbox("Physical Changes?", value=True)
         manual_config['enable_physical'] = enable_phys
         if enable_phys:
-            manual_config['body_parts'] = st.multiselect("Body Focus (Max 3)", load_list('body_parts.txt'), max_selections=3)
+            b_list = load_list('body_parts.txt')
+            selected_b = st.multiselect("Body Focus (Max 3)", b_list, max_selections=3, key="phys_sel")
+            body_details = []
+            for idx, bp in enumerate(selected_b):
+                with st.expander(f"⚙️ {bp}", expanded=True):
+                    intensity = st.select_slider(
+                        "Change Strength (realistic spectrum)",
+                        options=["Subtle", "Pronounced", "Extreme"],
+                        value="Pronounced",
+                        key=f"phys_int_{idx}"
+                    )
+                    remark = st.text_input(
+                        "Short Remark (e.g. natural, fake, surgical, etc.)",
+                        key=f"phys_rem_{idx}",
+                        placeholder="natural look"
+                    )
+                    body_details.append({"part": bp, "intensity": intensity, "remark": remark.strip()})
+            manual_config['body_details'] = body_details
+            manual_config['body_parts'] = ", ".join(selected_b) if selected_b else ""
 
     with col3:
         if mode == "Director Mode":
@@ -846,7 +875,10 @@ elif st.session_state.step == "casting":
         st.markdown(f"- **Antagonist:** {d['antagonist']}\n- **Method:** {d['mc_method']}")
     with colB:
         st.markdown("**DETAILS:**")
-        st.markdown(f"- **Physical:** {d['body_parts']}")
+        phys = d.get('body_parts', '')
+        if d.get('body_details'):
+            phys = "; ".join([f"{x['part']} [{x['intensity']}{(' ' + x['remark']) if x.get('remark') else ''}]" for x in d['body_details']])
+        st.markdown(f"- **Physical:** {phys}")
         st.markdown(f"**Motifs & Weights:**\n{d['fetish_str']}")
     
     st.markdown("---")
@@ -901,10 +933,13 @@ elif st.session_state.step == "writing":
     
     premise = d['blurb'] if d['blurb'] else d['raw_response']
     
+    phys_targets = d.get('body_parts', '')
+    if d.get('body_details'):
+        phys_targets = "; ".join([f"{x['part']} (Strength: {x['intensity']}, Note: {x.get('remark','') or 'none'})" for x in d['body_details']])
     bible = f"""
     GENRE: {d['genre']} | POV: {d['pov']}
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
-    ALTERATION TARGETS: {d['body_parts']}
+    ALTERATION TARGETS: {phys_targets}  (Keep all changes within realistic spectrum even at Extreme)
     FETISHES: {d['fetish_str']}
     
     PREMISE: {premise}

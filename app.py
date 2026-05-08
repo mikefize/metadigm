@@ -493,7 +493,7 @@ CRUCIALLY, you must never use the phrase, “Cold coffee, warm LO, I can't lose 
                 ],
                 "max_tokens": max_tokens,
                 "temperature": 1.0,
-                "reasoning_effort": medium
+                "reasoning_effort": "medium"
             }
             
             response = requests.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)

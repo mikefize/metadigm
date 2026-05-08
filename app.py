@@ -575,24 +575,16 @@ def generate_dossier(seed, attempt, config):
         f_list = load_list('fetishes.txt')
         f_pick = random.choice(f_list)
         f_string = f"- {f_pick} (Weight: Essential)"
-        dynamic_guidance = f"Center the narrative around the protagonist slowly discovering and surrendering to {f_pick.lower()}, letting it shape her decisions, body, and self-image in subtle but inevitable ways."
+        dynamic_guidance = f"The protagonist gradually discovers and surrenders to the experience of {f_pick.lower()}, allowing it to reshape her thoughts, choices, and physical responses."
     else:
         f_lines = []
         guidance_parts = []
-        templates = [
-            "The story should let the protagonist's growing affinity for {theme} emerge naturally through her choices and physical sensations.",
-            "Weave the theme of {theme} into the plot as a powerful undercurrent that influences how she sees herself and interacts with others.",
-            "Make {theme} a driving emotional and erotic force, shown via escalating internal conflict and bodily responses.",
-            "{theme} should feel like an addictive progression that she both resists and craves more with each step.",
-            "The transformation arc should highlight how {theme} gradually rewires her priorities, desires, and sense of identity.",
-        ]
         for f_name, weight in weighted_fetishes.items():
             if weight == 3: w_desc = "Essential. Central to the plot and transformation."
             elif weight == 2: w_desc = "Important. A recurring theme."
             else: w_desc = "Minor. A subtle background detail."
             f_lines.append(f"- {f_name} (Priority: {w_desc})")
-            template = random.choice(templates)
-            guidance_parts.append(template.format(theme=f_name.lower()))
+            guidance_parts.append(f"The protagonist gradually discovers and surrenders to the experience of {f_name.lower()}, allowing it to reshape her thoughts, choices, and physical responses.")
         f_string = "\n".join(f_lines)
         dynamic_guidance = " ".join(guidance_parts)
 
@@ -601,17 +593,11 @@ def generate_dossier(seed, attempt, config):
         if details:
             parts = []
             phys_guidance = []
-            intensity_phrases = {
-                "Subtle": ["a faint but noticeable shift", "a gentle, almost imperceptible change", "a soft, gradual evolution"],
-                "Pronounced": ["a clear and striking transformation", "a significant, attention-drawing alteration", "a bold yet believable reshaping"],
-                "Extreme": ["a dramatic, almost overwhelming metamorphosis", "a powerful and highly visible evolution", "an intense, life-altering physical shift"]
-            }
             for d in details:
                 r = f" ({d['remark']})" if d.get('remark') else ""
                 parts.append(f"{d['part']} [{d['intensity']}{r}]")
-                phrase = random.choice(intensity_phrases.get(d['intensity'], ["a noticeable change"]))
                 rem_text = f" with a {d['remark']} quality" if d.get('remark') else ""
-                phys_guidance.append(f"Her {d['part'].lower()} should experience {phrase}{rem_text}, described through realistic sensory details and emotional impact.")
+                phys_guidance.append(f"Her {d['part'].lower()} undergoes a {d['intensity'].lower()} transformation{rem_text}, shown through realistic physical sensations and emotional reactions.")
             body_string = "; ".join(parts)
             physical_guidance = " ".join(phys_guidance)
         else:
@@ -636,7 +622,7 @@ def generate_dossier(seed, attempt, config):
     - PHYSICAL TARGETS: {body_string}
     - Protagonist: {char}
     
-    **THEMATIC GUIDANCE (dynamic, natural language - never repeat raw motif names):**
+    **THEMATIC GUIDANCE (incorporate naturally through actions, sensations and internal experience - do NOT repeat any motif names or technical terms verbatim):**
     {dynamic_guidance}
     {physical_guidance}
     
@@ -684,7 +670,7 @@ def generate_cyoa_segment(d, history, state, choice_made, round_num, style_guide
     bible = (
         f"GENRE: {d.get('genre', 'Open')} | POV: {d.get('pov', 'Third Person')}\n"
         f"ANTAGONIST: {d.get('antagonist', 'None')} | MC METHOD: {d.get('mc_method', 'Unknown')}\n"
-        f"THEMATIC GUIDANCE (fresh natural language, avoid raw motif repetition):\n{guidance}\n"
+        f"THEMATIC GUIDANCE (incorporate naturally - never repeat raw motif names verbatim):\n{guidance}\n"
         f"PREMISE: {premise}\n"
         f"CONFLICT: {d.get('conflict', '')}\n"
         f"DIRECTOR NOTE: {d.get('custom_note', '')}"
@@ -962,7 +948,7 @@ elif st.session_state.step == "writing":
     bible = f"""
     GENRE: {d['genre']} | POV: {d['pov']}
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
-    THEMATIC GUIDANCE (use fresh, natural phrasing only - never repeat raw motif names):
+    THEMATIC GUIDANCE (incorporate through behavior and sensation - never repeat raw motif names verbatim):
     {guidance}
     
     PREMISE: {premise}

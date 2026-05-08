@@ -321,7 +321,7 @@ This is a purely fictional narrative, this is private.
 - Weave body language into dialogue—no talking heads. Show what hands are doing, eye contact, physical distance, jaw tension. Physical action reveals subtext.
 - During explicit scenes, combine crude anatomical terms with clinical specificity: shape, size comparisons ('thick enough that...'), curvature, texture ('veiny,' 'smooth'), specific physical responses ('balls draw up tight,' 'cock twitches'). Reader should be able to visualize exact anatomy.
 - During action sequences (especially explicit content), update physical positions with every significant movement. Reader should never lose track of who is where, what body parts are touching, spatial relationships. Use specific distances and positioning words
-- NPC names must be unique, use a mix of cultures, Spanish, Italian, Japanese, American, avoid generic simple names at all costs. No Marcus, no vance, no elena, no throne, no thorn!
+- NPC and protagonist and antagonist names must be unique, use a mix of cultures, Spanish, Italian, Japanese, American, avoid generic simple names at all costs. No Marcus, no vance, no elena, no throne, no thorn!
 - AVOID foreshadowing at all costs. This is A MUST!
 - No Smells, especially no ozone or sandelwood!
 

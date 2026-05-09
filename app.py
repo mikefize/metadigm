@@ -543,6 +543,9 @@ def generate_dossier(seed, attempt, config):
     elif arc_choice == "Custom Arc":
         selected_arc_name = "Custom Director Arc"
         arc_instr = f"**CUSTOM NARRATIVE ARC:** {custom_arc_text}"
+    elif arc_choice == "LLM Proposed Arc":
+        selected_arc_name = "LLM Proposed Arc"
+        arc_instr = "**LLM PROPOSED NARRATIVE ARC:** (will be generated after premise)"
     else:
         selected_arc_name = arc_choice
         arc_instr = f"Follow the structure of: '{selected_arc_name}'"
@@ -669,7 +672,9 @@ def generate_dossier(seed, attempt, config):
         "elements_string": elements_string,
         "raw_response": res,
         "custom_note": "",
-        "style_guide": style_guide
+        "style_guide": style_guide,
+        "num_chapters": config.get('num_chapters', 7),
+        "target_words": config.get('target_words', 10000)
     }
 
 # --- CYOA HELPERS ---
@@ -761,6 +766,43 @@ TASK: Write a satisfying conclusion (~400-600 words). Bring the narrative to a c
     return conclusion, None
 
 
+def generate_arc_proposal(d, model_key):
+    """Generate a custom story arc proposal using the LLM based on premise and params."""
+    num_ch = d.get('num_chapters', 7)
+    target = d.get('target_words', 10000)
+    words_per = target // num_ch
+    premise = d.get('blurb') or d.get('raw_response', '')
+    prompt = f"""
+You are a master story architect for erotic transformation fiction.
+
+Given this premise:
+{premise}
+
+Genre: {d.get('genre')}
+Fetishes/Motifs: {d.get('fetish_str', '')}
+Protagonist Gender: {d.get('protagonist_gender', 'Female')}
+Number of chapters: {num_ch}
+Target total words: {target} (~{words_per} words per chapter)
+
+Create a compelling, detailed narrative arc with exactly {num_ch} chapters.
+For each chapter provide:
+- A short evocative chapter title
+- 1-2 sentences of what happens in that chapter (focusing on setup, rising transformation, struggle, breaking point, resolution/epilogue as appropriate)
+- Key emotional/physical beats to hit
+
+Output ONLY in this strict format (no extra text):
+CHAPTER 1: [Title]
+[Description and beats]
+CHAPTER 2: [Title]
+...
+"""
+    res = call_api(prompt, model_key, max_tokens=2048)
+    if res.startswith("API ERROR") or not res:
+        # Fallback simple arc
+        return "\n".join([f"CHAPTER {i+1}: Chapter {i+1}\nDevelop the story and transformation gradually." for i in range(num_ch)])
+    return clean_artifacts(res)
+
+
 # --- UI START ---
 st.title("🎬 The Metamorphosis Engine")
 
@@ -798,12 +840,15 @@ if st.session_state.step == "setup":
         manual_config['protagonist_gender'] = st.selectbox("Protagonist Gender", ["Female", "Male", "Non-binary"], index=0)
         manual_config['antagonist_gender'] = st.selectbox("Antagonist Gender", ["Female", "Male", "Non-binary"], index=0)
         
-        arc_opts = ["Random"] + list(STORY_ARCS.keys()) + ["Custom Arc"]
-        arc_choice = st.selectbox("Narrative Arc", arc_opts)
-        manual_config['arc'] = arc_choice
-        if arc_choice == "Custom Arc":
-            DEFAULT_CUSTOM_ARC = "Chapter 1 and 2 give context. Introduce the protagonist, their life, motivations, peers, family and friends and also introduce other important characters of the story. Then chapter 3, chapter 4 and chapter 5 should revolve around the changes/transformation, the struggle against it and the effects on the protagonist's life, the alienation from peers, irritation, etc. Then, chapter 6 is the breaking point when the protagonist gives in. Chapter 7 is an epilogue."
-            manual_config['custom_arc_text'] = st.text_area("Plot Flow", value=DEFAULT_CUSTOM_ARC, height=100)
+        if mode != "Custom Setup":
+            arc_opts = ["Random"] + list(STORY_ARCS.keys()) + ["Custom Arc"]
+            arc_choice = st.selectbox("Narrative Arc", arc_opts)
+            manual_config['arc'] = arc_choice
+            if arc_choice == "Custom Arc":
+                DEFAULT_CUSTOM_ARC = "Chapter 1 and 2 give context. Introduce the protagonist, their life, motivations, peers, family and friends and also introduce other important characters of the story. Then chapter 3, chapter 4 and chapter 5 should revolve around the changes/transformation, the struggle against it and the effects on the protagonist's life, the alienation from peers, irritation, etc. Then, chapter 6 is the breaking point when the protagonist gives in. Chapter 7 is an epilogue."
+                manual_config['custom_arc_text'] = st.text_area("Plot Flow", value=DEFAULT_CUSTOM_ARC, height=100)
+        else:
+            manual_config['arc'] = "LLM Proposed Arc"
 
     with col2:
         st.subheader("Mechanics")
@@ -812,6 +857,8 @@ if st.session_state.step == "setup":
             manual_config['job'] = st.selectbox("Job", [None] + load_list('occupations.txt'), format_func=lambda x: "Random" if x is None else x)
             manual_config['antagonist'] = st.selectbox("Antagonist", [None, "__DYNAMIC__", "__NONE__"] + load_list('antagonists.txt'), format_func=format_antagonist_option)
             manual_config['mc_method'] = st.selectbox("MC Method", [None] + load_list('mc_methods.txt'), format_func=lambda x: "Random" if x is None else x)
+            manual_config['num_chapters'] = st.number_input("Number of Chapters", min_value=3, max_value=15, value=7, step=1)
+            manual_config['target_words'] = st.number_input("Target Total Word Count", min_value=3000, max_value=30000, value=10000, step=500)
         
         enable_phys = st.checkbox("Physical Changes?", value=True)
         manual_config['enable_physical'] = enable_phys
@@ -917,6 +964,28 @@ elif st.session_state.step == "casting":
         st.error("Parsing Error. Raw Output:")
         st.code(d['raw_response'])
 
+    # --- LLM Arc Proposal (Custom Setup only) ---
+    if d.get('arc_name') == "LLM Proposed Arc":
+        if 'arc_proposal' not in d or not d['arc_proposal']:
+            with st.spinner("Generating story arc proposal..."):
+                proposal = generate_arc_proposal(d, st.session_state.writer_model)
+                d['arc_proposal'] = proposal
+                st.session_state.dossier = d
+        st.markdown("---")
+        st.subheader("📖 Story Arc Proposal (editable)")
+        edited_arc = st.text_area(
+            "Edit the chapter-by-chapter arc as needed. The story will follow this structure.",
+            value=d.get('arc_proposal', ''),
+            height=250,
+            key="arc_edit"
+        )
+        if edited_arc != d.get('arc_proposal'):
+            d['arc_proposal'] = edited_arc
+            st.session_state.dossier = d
+        st.caption(f"Target: {d.get('num_chapters', 7)} chapters | ~{d.get('target_words', 10000)} total words")
+    else:
+        st.caption(f"Using fixed arc: {d['arc_name']}")
+
     note = st.text_area("Director's Note (Optional)", placeholder="e.g. Make sure she begs at the end...")
     
     b1, b2, b3 = st.columns(3)
@@ -952,11 +1021,31 @@ elif st.session_state.step == "writing":
     progress_bar = st.progress(0)
     status_text = st.empty()
     
-    if d['arc_name'] == "Custom Director Arc":
-        base_steps = ["Chapter 1", "Chapter 2", "Chapter 3", "Chapter 4", "Chapter 5", "Chapter 6", "Epilogue"]
+    if d['arc_name'] == "LLM Proposed Arc":
+        # Parse the (possibly edited) proposal into chapter list
+        proposal = d.get('arc_proposal', '')
+        arc_lines = [line.strip() for line in proposal.split('\n') if line.strip()]
+        arc = []
+        current_title = None
+        current_desc = []
+        for line in arc_lines:
+            if line.upper().startswith("CHAPTER"):
+                if current_title:
+                    arc.append((current_title, "\n".join(current_desc)))
+                current_title = line
+                current_desc = []
+            else:
+                current_desc.append(line)
+        if current_title:
+            arc.append((current_title, "\n".join(current_desc)))
+        if not arc:  # fallback
+            num = d.get('num_chapters', 7)
+            arc = [(f"CHAPTER {i+1}", "Continue the transformation arc as per premise.") for i in range(num)]
+    elif d['arc_name'] == "Custom Director Arc":
+        base_steps = [f"Chapter {i+1}" for i in range(d.get('num_chapters', 7))]
         arc = [(step, f"Follow CUSTOM ARC: {d['custom_arc_text']}") for step in base_steps]
     else:
-        arc = STORY_ARCS[d['arc_name']]
+        arc = STORY_ARCS.get(d['arc_name'], STORY_ARCS["The Inevitable Slide USE"])
     
     premise = d['blurb'] if d['blurb'] else d['raw_response']
     
@@ -978,6 +1067,8 @@ elif st.session_state.step == "writing":
     current_state = f"Normal {d['job']}"
     raw_story = f"# The Fall of {d['name']}\n\n"
     
+    num_chapters = len(arc)
+    words_per_chapter = d.get('target_words', 10000) // max(num_chapters, 1)
     for i, (phase, instr) in enumerate(arc):
         status_text.write(f"Writing Chapter {i+1}: {phase}...")
         
@@ -987,11 +1078,11 @@ elif st.session_state.step == "writing":
         STATE: {current_state}
         TASK: Write Chapter {i+1} ({phase}). {instr}
         
-        **INSTRUCTIONS:** Write 1500+ words. Focus on internal monologue. Respect Motif weights.
+        **INSTRUCTIONS:** Aim for approximately {words_per_chapter} words. Focus on internal monologue, sensations and gradual transformation. Respect Motif weights and the overall arc.
         OUTPUT: End with EXACTLY: <state>Current Physical/Mental State</state> <title>Chapter Title</title>
         """
         
-        text = call_api(p, st.session_state.writer_model, style_guide=d['style_guide'], max_tokens=12000)
+        text = call_api(p, st.session_state.writer_model, style_guide=d['style_guide'], max_tokens=16000)
         if "API ERROR" in text:
             st.error(text)
             break

@@ -1072,11 +1072,18 @@ elif st.session_state.step == "writing":
     for i, (phase, instr) in enumerate(arc):
         status_text.write(f"Writing Chapter {i+1}: {phase}...")
         
+        first_chapter_rule = ""
+        if i == 0:
+            first_chapter_rule = """
+**CRITICAL RULE FOR CHAPTER 1 (ALWAYS APPLIES):** This chapter MUST NOT dive into the story or any transformation. Instead, it is a pure CONTEXT chapter. Fully introduce the protagonist: her full name, detailed daily life, job routine, personality quirks, motivations, ambitions, fears, relationships with family, friends, colleagues, and romantic partners if any. Show scenes of her normal world, conversations, work, home life, and what makes her tick. Establish the Trigger subtly through her circumstances without hinting at changes. NO erotic content, NO physical/mental alterations, NO antagonist actions, NO fetish elements whatsoever. The reader must understand exactly who she is and what kind of life she leads BEFORE anything happens. Write as if this is a standalone character study chapter.
+"""
+        
         p = f"""
         {bible}
         HISTORY: {full_narrative}
         STATE: {current_state}
         TASK: Write Chapter {i+1} ({phase}). {instr}
+        {first_chapter_rule}
         
         **INSTRUCTIONS:** Aim for approximately {words_per_chapter} words. Focus on internal monologue, sensations and gradual transformation. Respect Motif weights and the overall arc.
         OUTPUT: End with EXACTLY: <state>Current Physical/Mental State</state> <title>Chapter Title</title>

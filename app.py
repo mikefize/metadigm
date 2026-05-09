@@ -802,7 +802,8 @@ if st.session_state.step == "setup":
         arc_choice = st.selectbox("Narrative Arc", arc_opts)
         manual_config['arc'] = arc_choice
         if arc_choice == "Custom Arc":
-            manual_config['custom_arc_text'] = st.text_area("Plot Flow", height=100)
+            DEFAULT_CUSTOM_ARC = "Chapter 1 and 2 give context. Introduce the protagonist, their life, motivations, peers, family and friends and also introduce other important characters of the story. Then chapter 3, chapter 4 and chapter 5 should revolve around the changes/transformation, the struggle against it and the effects on the protagonist's life, the alienation from peers, irritation, etc. Then, chapter 6 is the breaking point when the protagonist gives in. Chapter 7 is an epilogue."
+            manual_config['custom_arc_text'] = st.text_area("Plot Flow", value=DEFAULT_CUSTOM_ARC, height=100)
 
     with col2:
         st.subheader("Mechanics")

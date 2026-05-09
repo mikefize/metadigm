@@ -526,6 +526,14 @@ def generate_dossier(seed, attempt, config):
     
     style_file = config.get('style_file', 'style_gritty.txt')
     style_guide = load_file_content(os.path.join(CONFIG_DIR, style_file)) or "Write normally."
+
+    # Gender handling (default female)
+    protagonist_gender = config.get('protagonist_gender', 'Female')
+    antagonist_gender = config.get('antagonist_gender', 'Female')
+    prot_pronoun = "she" if protagonist_gender == "Female" else ("he" if protagonist_gender == "Male" else "they")
+    prot_possessive = "her" if protagonist_gender == "Female" else ("his" if protagonist_gender == "Male" else "their")
+    antag_pronoun = "she" if antagonist_gender == "Female" else ("he" if antagonist_gender == "Male" else "they")
+    antag_possessive = "her" if antagonist_gender == "Female" else ("his" if antagonist_gender == "Male" else "their")
     
     custom_arc_text = config.get('custom_arc_text', '')
     arc_choice = config.get('arc', 'Random')
@@ -547,7 +555,7 @@ def generate_dossier(seed, attempt, config):
         mc_method = "OPEN - INFER FROM PITCH"
         elements_string = f"**PITCH:**\n{pitch}"
         name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
-        char = f"{name}, Age {random.randint(23, 45)}, Job: Infer from Pitch"
+        char = f"{name}, Age {random.randint(23, 45)}, Job: Infer from Pitch, Gender: {protagonist_gender}"
     else:
         genre = config.get('genre') or random.choice(load_list('genres.txt'))
         job = config.get('job') or random.choice(load_list('occupations.txt'))
@@ -555,7 +563,7 @@ def generate_dossier(seed, attempt, config):
         
         antag_raw = config.get('antagonist')
         if antag_raw is None: antag_raw = random.choice(load_list('antagonists.txt'))
-        if antag_raw == "__DYNAMIC__": antag_instr = "**ANTAGONIST:** [OPEN - AI INVENT - FEMALE BY DEFAULT]"
+        if antag_raw == "__DYNAMIC__": antag_instr = f"**ANTAGONIST:** [OPEN - AI INVENT - {antagonist_gender.upper()} BY DEFAULT]"
         elif antag_raw == "__NONE__": antag_instr = "**ANTAGONIST:** [NONE]"
         else: antag_instr = f"**ANTAGONIST:** {antag_raw}"
 
@@ -568,14 +576,14 @@ def generate_dossier(seed, attempt, config):
         elements_string = "\n- ".join(elements) if elements else "None."
         
         name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
-        char = f"{name}, {random.randint(23, 45)}, {job}"
+        char = f"{name}, {random.randint(23, 45)}, {job}, Gender: {protagonist_gender}"
 
     weighted_fetishes = config.get('weighted_fetishes', {})
     if not weighted_fetishes:
         f_list = load_list('fetishes.txt')
         f_pick = random.choice(f_list)
         f_string = f"- {f_pick} (Weight: Essential)"
-        dynamic_guidance = f"The protagonist gradually discovers and surrenders to the experience of {f_pick.lower()}, allowing it to reshape her thoughts, choices, and physical responses."
+        dynamic_guidance = f"The protagonist gradually discovers and surrenders to the experience of {f_pick.lower()}, allowing it to reshape {prot_possessive} thoughts, choices, and physical responses."
     else:
         f_lines = []
         guidance_parts = []
@@ -584,7 +592,7 @@ def generate_dossier(seed, attempt, config):
             elif weight == 2: w_desc = "Important. A recurring theme."
             else: w_desc = "Minor. A subtle background detail."
             f_lines.append(f"- {f_name} (Priority: {w_desc})")
-            guidance_parts.append(f"The protagonist gradually discovers and surrenders to the experience of {f_name.lower()}, allowing it to reshape her thoughts, choices, and physical responses.")
+            guidance_parts.append(f"The protagonist gradually discovers and surrenders to the experience of {f_name.lower()}, allowing it to reshape {prot_possessive} thoughts, choices, and physical responses.")
         f_string = "\n".join(f_lines)
         dynamic_guidance = " ".join(guidance_parts)
 
@@ -597,7 +605,7 @@ def generate_dossier(seed, attempt, config):
                 r = f" ({d['remark']})" if d.get('remark') else ""
                 parts.append(f"{d['part']} [{d['intensity']}{r}]")
                 rem_text = f" with a {d['remark']} quality" if d.get('remark') else ""
-                phys_guidance.append(f"Her {d['part'].lower()} undergoes a {d['intensity'].lower()} transformation{rem_text}, shown through realistic physical sensations and emotional reactions.")
+                phys_guidance.append(f"{prot_possessive.capitalize()} {d['part'].lower()} undergoes a {d['intensity'].lower()} transformation{rem_text}, shown through realistic physical sensations and emotional reactions.")
             body_string = "; ".join(parts)
             physical_guidance = " ".join(phys_guidance)
         else:
@@ -631,7 +639,7 @@ def generate_dossier(seed, attempt, config):
     
     **OUTPUT FORMAT (STRICT XML):**
     <antagonist>Name/Title or "None"</antagonist>
-    <trigger>What kind of person she is, describe her personality and motivations</trigger>
+    <trigger>What kind of person the protagonist is, describe {prot_possessive} personality and motivations</trigger>
     <conflict>The way the transformation unfolds</conflict>
     <blurb>6-sentence summary</blurb>
     """
@@ -651,6 +659,7 @@ def generate_dossier(seed, attempt, config):
         "fetish_str": f_string, "body_parts": body_string, "body_details": config.get('body_details', []),
         "dynamic_guidance": dynamic_guidance, "physical_guidance": physical_guidance,
         "mc_method": mc_method, "pov": config.get('pov'),
+        "protagonist_gender": protagonist_gender, "antagonist_gender": antagonist_gender,
         "antagonist": extract_tag(res, "antagonist"),
         "trigger": extract_tag(res, "trigger"), 
         "conflict": extract_tag(res, "conflict"), 
@@ -669,6 +678,7 @@ def generate_cyoa_segment(d, history, state, choice_made, round_num, style_guide
     guidance = d.get('dynamic_guidance', '') + " " + d.get('physical_guidance', '')
     bible = (
         f"GENRE: {d.get('genre', 'Open')} | POV: {d.get('pov', 'Third Person')}\n"
+        f"PROTAGONIST GENDER: {d.get('protagonist_gender', 'Female')} | ANTAGONIST GENDER: {d.get('antagonist_gender', 'Female')}\n"
         f"ANTAGONIST: {d.get('antagonist', 'None')} | MC METHOD: {d.get('mc_method', 'Unknown')}\n"
         f"THEMATIC GUIDANCE (incorporate naturally - never repeat raw motif names verbatim):\n{guidance}\n"
         f"PREMISE: {premise}\n"
@@ -725,6 +735,7 @@ def generate_cyoa_conclusion(d, history, state, style_guide, model_key):
     guidance = d.get('dynamic_guidance', '') + " " + d.get('physical_guidance', '')
     bible = (
         f"GENRE: {d.get('genre', 'Open')} | POV: {d.get('pov', 'Third Person')}\n"
+        f"PROTAGONIST GENDER: {d.get('protagonist_gender', 'Female')} | ANTAGONIST GENDER: {d.get('antagonist_gender', 'Female')}\n"
         f"ANTAGONIST: {d.get('antagonist', 'None')} | GUIDANCE: {guidance}\n"
         f"PREMISE: {premise}"
     )
@@ -783,6 +794,9 @@ if st.session_state.step == "setup":
         seed = st.text_input("Story Seed", "Entropy")
         pov = st.selectbox("Point of View", ["First Person (I)", "Third Person (She)", "Second Person (You)", "Antagonist Perspective"])
         manual_config['pov'] = pov
+
+        manual_config['protagonist_gender'] = st.selectbox("Protagonist Gender", ["Female", "Male", "Non-binary"], index=0)
+        manual_config['antagonist_gender'] = st.selectbox("Antagonist Gender", ["Female", "Male", "Non-binary"], index=0)
         
         arc_opts = ["Random"] + list(STORY_ARCS.keys()) + ["Custom Arc"]
         arc_choice = st.selectbox("Narrative Arc", arc_opts)
@@ -883,6 +897,7 @@ elif st.session_state.step == "casting":
     with colA:
         st.markdown("**CORE:**")
         st.markdown(f"- **Job:** {d['job']}\n- **Genre:** {d['genre']}\n- **POV:** {d['pov']}")
+        st.markdown(f"- **Protagonist Gender:** {d.get('protagonist_gender', 'Female')}\n- **Antagonist Gender:** {d.get('antagonist_gender', 'Female')}")
         st.markdown(f"- **Antagonist:** {d['antagonist']}\n- **Method:** {d['mc_method']}")
     with colB:
         st.markdown("**DETAILS:**")
@@ -947,6 +962,7 @@ elif st.session_state.step == "writing":
     guidance = d.get('dynamic_guidance', '') + " " + d.get('physical_guidance', '')
     bible = f"""
     GENRE: {d['genre']} | POV: {d['pov']}
+    PROTAGONIST GENDER: {d.get('protagonist_gender', 'Female')} | ANTAGONIST GENDER: {d.get('antagonist_gender', 'Female')}
     ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
     THEMATIC GUIDANCE (incorporate through behavior and sensation - never repeat raw motif names verbatim):
     {guidance}

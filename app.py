@@ -413,7 +413,6 @@ END OF SYSTEM PROMPT
                 ],
                 "max_tokens": max_tokens,
                 "temperature": 1.0,
-                "reasoning_effort": "medium"
             }
             
             response = requests.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)

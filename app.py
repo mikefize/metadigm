@@ -299,7 +299,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                 "Authorization": f"Bearer {api_key}"
             }
 
-            kimi_max_tokens = max(max_tokens, 4096)
+            kimi_max_tokens = max(max_tokens, 256000)
             payload = {
                 "model": m_cfg['id'],
                 "messages": [

@@ -307,7 +307,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                     {"role": "user", "content": prompt}
                 ],
                 "max_tokens": kimi_max_tokens,
-                "temperature": 0.9,
+                "temperature": 1,
                 "presence_penalty": 0.3,
             }
 

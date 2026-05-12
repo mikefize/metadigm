@@ -817,8 +817,17 @@ if st.session_state.step == "setup":
         if mode == "Director Mode":
             st.subheader("The Pitch")
             manual_config['pitch'] = st.text_area("Main Story Idea", height=150)
-        elif mode == "Custom Setup":
-            st.caption("Define your cast and high-level premise")
+        elif mode == "Random Run":
+            st.caption("Fully randomized run")
+            st.info("Characters, premise, and details will be generated automatically from the seed and your selected kinks.")
+
+    # === Custom Setup: Protagonist + Antagonist side-by-side, then full-width Main Idea ===
+    if mode == "Custom Setup":
+        st.markdown("---")
+        st.caption("Define your cast and high-level premise")
+        prot_col, antag_col = st.columns(2)
+
+        with prot_col:
             st.subheader("Protagonists")
             num_prot = st.number_input("Number of Protagonists", min_value=1, max_value=3, value=1, step=1)
             protagonists = []
@@ -831,6 +840,7 @@ if st.session_state.step == "setup":
             manual_config['protagonists'] = protagonists
             manual_config['num_protagonists'] = int(num_prot)
 
+        with antag_col:
             st.subheader("Antagonist")
             include_antag = st.checkbox("Include Antagonist", value=True)
             if include_antag:
@@ -842,11 +852,8 @@ if st.session_state.step == "setup":
             else:
                 manual_config['antagonist'] = {"include": False}
 
-            st.subheader("Main Story Idea (optional)")
-            manual_config['main_idea'] = st.text_area("Main Story Idea", height=100, placeholder="High-level concept or specific plot hook...")
-        else:
-            st.caption("Fully randomized run")
-            st.info("Characters, premise, and details will be generated automatically from the seed and your selected kinks.")
+        st.subheader("Main Story Idea (optional)")
+        manual_config['main_idea'] = st.text_area("Main Story Idea", height=120, placeholder="High-level concept or specific plot hook...")
 
     st.markdown("---")
     with st.expander("Kink & Motif Weighting (Max 4)", expanded=True):

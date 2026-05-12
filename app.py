@@ -316,6 +316,10 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
 
             data = response.json()
 
+            if st.session_state.get("show_prompt_debug", False):
+                st.write("**KIMI RAW API RESPONSE:**")
+                st.json(data)
+
             if 'usage' in data:
                 in_tok = data['usage'].get('prompt_tokens', 0)
                 out_tok = data['usage'].get('completion_tokens', 0)

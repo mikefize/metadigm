@@ -42,7 +42,8 @@ MODELS = {
     "Gemini 3.1 Pro": {"name": "Gemini 3 Pro", "id": "gemini-3.1-pro-preview", "vendor": "google", "price_in": 2.00, "price_out": 12.00},
     "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.5, "price_out": 3.00},
     "Gemini 3.1 Flash": {"name": "Gemini 3.1 Flash", "id": "gemini-3.1-flash-lite-preview", "vendor": "google", "price_in": 0.25, "price_out": 1.50},
-    "Mistral Large": {"id": "mistral-large-latest", "vendor": "mistral", "price_in": 0.5, "price_out": 1.5} # NEW
+    "Mistral Large": {"id": "mistral-large-latest", "vendor": "mistral", "price_in": 0.5, "price_out": 1.5},
+    "Kimi K2.6": {"name": "Kimi K2.6", "id": "kimi-k2.6", "vendor": "kimi", "price_in": 0.95, "price_out": 4} # Moonshot Kimi
 }
 
 CONFIG_DIR = 'config'
@@ -286,6 +287,40 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                 out_tok = data['usage'].get('completion_tokens', 0)
                 track_cost(in_tok, out_tok, m_cfg)
             
+            return data['choices'][0]['message']['content']
+
+        # KIMI (MOONSHOT - OpenAI compatible)
+        elif m_cfg['vendor'] == 'kimi':
+            api_key = st.session_state.kimi_key
+            if not api_key: return "API ERROR: Kimi key missing."
+
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}"
+            }
+
+            payload = {
+                "model": m_cfg['id'],
+                "messages": [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": max_tokens,
+                "temperature": 1.0,
+            }
+
+            response = requests.post("https://api.moonshot.cn/v1/chat/completions", headers=headers, json=payload)
+
+            if response.status_code != 200:
+                return f"API ERROR: HTTP {response.status_code} - {response.text}"
+
+            data = response.json()
+
+            if 'usage' in data:
+                in_tok = data['usage'].get('prompt_tokens', 0)
+                out_tok = data['usage'].get('completion_tokens', 0)
+                track_cost(in_tok, out_tok, m_cfg)
+
             return data['choices'][0]['message']['content']
             
     except Exception as e:
@@ -608,6 +643,7 @@ st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", value=ge
 st.session_state.google_key = st.sidebar.text_input("Google Key", value=get_secret("GOOGLE_API_KEY"), type="password")
 st.session_state.mistral_key = st.sidebar.text_input("Mistral Key", value=get_secret("MISTRAL_API_KEY"), type="password") 
 st.session_state.xai_key = st.sidebar.text_input("xAI (Grok) Key", value=get_secret("XAI_API_KEY"), type="password")
+st.session_state.kimi_key = st.sidebar.text_input("Kimi Key", value=get_secret("KIMI_API_KEY"), type="password")
 
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
@@ -743,6 +779,7 @@ if st.session_state.step == "setup":
         if active_vendor == 'google' and st.session_state.google_key: has_key = True
         if active_vendor == 'mistral' and st.session_state.mistral_key: has_key = True
         if active_vendor == 'xai' and st.session_state.xai_key: has_key = True
+        if active_vendor == 'kimi' and st.session_state.kimi_key: has_key = True
 
         if not has_key:
             st.error(f"API Key missing for the selected Writer Model ({active_vendor.title()})!")

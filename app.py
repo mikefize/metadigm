@@ -299,14 +299,16 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                 "Authorization": f"Bearer {api_key}"
             }
 
+            kimi_max_tokens = max(max_tokens, 4096)
             payload = {
                 "model": m_cfg['id'],
                 "messages": [
                     {"role": "system", "content": sys_prompt},
                     {"role": "user", "content": prompt}
                 ],
-                "max_tokens": max_tokens,
-                "temperature": 1.0,
+                "max_tokens": kimi_max_tokens,
+                "temperature": 0.9,
+                "presence_penalty": 0.3,
             }
 
             response = requests.post("https://api.moonshot.ai/v1/chat/completions", headers=headers, json=payload)
@@ -484,7 +486,7 @@ def generate_dossier(seed, attempt, config):
     <blurb>6-sentence summary</blurb>
     """
     
-    res = call_api(prompt, st.session_state.writer_model, style_guide, max_tokens=1024)
+    res = call_api(prompt, st.session_state.writer_model, style_guide, max_tokens=4096)
     
     # NEW: Error catching that bubbles up to the UI
     if not res: 

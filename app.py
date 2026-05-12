@@ -43,7 +43,7 @@ MODELS = {
     "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.5, "price_out": 3.00},
     "Gemini 3.1 Flash": {"name": "Gemini 3.1 Flash", "id": "gemini-3.1-flash-lite-preview", "vendor": "google", "price_in": 0.25, "price_out": 1.50},
     "Mistral Large": {"id": "mistral-large-latest", "vendor": "mistral", "price_in": 0.5, "price_out": 1.5},
-    "Kimi K2.6": {"name": "Kimi K2.6", "id": "kimi-k2.6", "vendor": "kimi", "price_in": 0.95, "price_out": 4} # Moonshot Kimi
+    "Kimi K2.6": {"name": "Kimi K2.6", "id": "moonshot-v1-32k", "vendor": "kimi", "price_in": 0.95, "price_out": 4} # Moonshot Kimi (using stable moonshot-v1-32k)
 }
 
 CONFIG_DIR = 'config'
@@ -320,6 +320,9 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                 in_tok = data['usage'].get('prompt_tokens', 0)
                 out_tok = data['usage'].get('completion_tokens', 0)
                 track_cost(in_tok, out_tok, m_cfg)
+
+            if not data.get('choices') or not data['choices'][0].get('message', {}).get('content'):
+                return "API ERROR: Kimi/Moonshot returned empty or invalid response."
 
             return data['choices'][0]['message']['content']
             

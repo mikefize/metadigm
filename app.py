@@ -786,11 +786,10 @@ if st.session_state.step == "setup":
             manual_config['arc'] = "LLM Proposed Arc"
 
     with col2:
-        st.subheader("Mechanics")
-        if mode == "Custom Setup":
-            manual_config['num_chapters'] = st.number_input("Number of Chapters", min_value=3, max_value=15, value=7, step=1)
-            manual_config['target_words'] = st.number_input("Target Total Word Count", min_value=3000, max_value=30000, value=10000, step=500)
-        
+        st.subheader("Story Parameters")
+        manual_config['num_chapters'] = st.number_input("Number of Chapters", min_value=3, max_value=15, value=7, step=1)
+        manual_config['target_words'] = st.number_input("Target Total Word Count", min_value=3000, max_value=30000, value=10000, step=500)
+
         enable_phys = st.checkbox("Physical Changes?", value=True)
         manual_config['enable_physical'] = enable_phys
         if enable_phys:
@@ -819,6 +818,7 @@ if st.session_state.step == "setup":
             st.subheader("The Pitch")
             manual_config['pitch'] = st.text_area("Main Story Idea", height=150)
         elif mode == "Custom Setup":
+            st.caption("Define your cast and high-level premise")
             st.subheader("Protagonists")
             num_prot = st.number_input("Number of Protagonists", min_value=1, max_value=3, value=1, step=1)
             protagonists = []
@@ -844,21 +844,24 @@ if st.session_state.step == "setup":
 
             st.subheader("Main Story Idea (optional)")
             manual_config['main_idea'] = st.text_area("Main Story Idea", height=100, placeholder="High-level concept or specific plot hook...")
+        else:
+            st.caption("Fully randomized run")
+            st.info("Characters, premise, and details will be generated automatically from the seed and your selected kinks.")
 
     st.markdown("---")
-    st.subheader("Kink & Motif Weighting (Max 4)")
-    f_list = load_list('fetishes.txt')
-    selected_f = st.multiselect("Select up to 4 Fetishes", f_list, max_selections=4)
-    
-    weighted_fetishes = {}
-    if selected_f:
-        fc1, fc2, fc3, fc4 = st.columns(4)
-        cols = [fc1, fc2, fc3, fc4]
-        for idx, f in enumerate(selected_f):
-            with cols[idx]:
-                weight = st.slider(f"'{f}' Importance", 1, 3, 2, key=f"w_{f}")
-                weighted_fetishes[f] = weight
-    manual_config['weighted_fetishes'] = weighted_fetishes
+    with st.expander("Kink & Motif Weighting (Max 4)", expanded=True):
+        f_list = load_list('fetishes.txt')
+        selected_f = st.multiselect("Select up to 4 Fetishes", f_list, max_selections=4)
+        
+        weighted_fetishes = {}
+        if selected_f:
+            fc1, fc2, fc3, fc4 = st.columns(4)
+            cols = [fc1, fc2, fc3, fc4]
+            for idx, f in enumerate(selected_f):
+                with cols[idx]:
+                    weight = st.slider(f"'{f}' Importance", 1, 3, 2, key=f"w_{f}")
+                    weighted_fetishes[f] = weight
+        manual_config['weighted_fetishes'] = weighted_fetishes
 
     if st.button("Draft Premise"):
         active_vendor = MODELS[st.session_state.writer_model]['vendor']

@@ -307,7 +307,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                     {"role": "user", "content": prompt}
                 ],
                 "max_tokens": kimi_max_tokens,
-                "reasoning_effort": "off"
+                "reasoning_effort": "minimal"
             }
 
             response = requests.post("https://api.moonshot.ai/v1/chat/completions", headers=headers, json=payload)

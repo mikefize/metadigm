@@ -43,7 +43,7 @@ MODELS = {
     "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.5, "price_out": 3.00},
     "Gemini 3.1 Flash": {"name": "Gemini 3.1 Flash", "id": "gemini-3.1-flash-lite-preview", "vendor": "google", "price_in": 0.25, "price_out": 1.50},
     "Mistral Large": {"id": "mistral-large-latest", "vendor": "mistral", "price_in": 0.5, "price_out": 1.5},
-    "Kimi K2.6": {"name": "Kimi K2.6", "id": "moonshot-v1-32k", "vendor": "kimi", "price_in": 0.95, "price_out": 4} # Moonshot Kimi (using stable moonshot-v1-32k)
+    "Kimi K2.6": {"name": "Kimi K2.6", "id": "kimi-k2.6", "vendor": "kimi", "price_in": 0.95, "price_out": 4} # Moonshot Kimi (using stable moonshot-v1-32k)
 }
 
 CONFIG_DIR = 'config'

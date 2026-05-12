@@ -774,9 +774,6 @@ if st.session_state.step == "setup":
         seed = st.text_input("Story Seed", "Entropy")
         pov = st.selectbox("Point of View", ["First Person (I)", "Third Person (She)", "Second Person (You)", "Antagonist Perspective"])
         manual_config['pov'] = pov
-
-        manual_config['protagonist_gender'] = st.selectbox("Protagonist Gender", ["Female", "Male", "Non-binary"], index=0)
-        manual_config['antagonist_gender'] = st.selectbox("Antagonist Gender", ["Female", "Male", "Non-binary"], index=0)
         
         if mode != "Custom Setup":
             arc_opts = ["Random"] + list(STORY_ARCS.keys()) + ["Custom Arc"]

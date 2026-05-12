@@ -308,7 +308,6 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                 ],
                 "max_tokens": kimi_max_tokens,
                 "temperature": 1,
-                "presence_penalty": 0.3,
             }
 
             response = requests.post("https://api.moonshot.ai/v1/chat/completions", headers=headers, json=payload)

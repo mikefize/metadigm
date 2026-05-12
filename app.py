@@ -309,7 +309,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                 "temperature": 1.0,
             }
 
-            response = requests.post("https://api.moonshot.cn/v1/chat/completions", headers=headers, json=payload)
+            response = requests.post("https://api.moonshot.ai/v1/chat/completions", headers=headers, json=payload)
 
             if response.status_code != 200:
                 return f"API ERROR: HTTP {response.status_code} - {response.text}"

@@ -482,23 +482,40 @@ def generate_dossier(seed, attempt, config):
         genre = config.get('genre') or random.choice(load_list('genres.txt'))
         job = config.get('job') or random.choice(load_list('occupations.txt'))
         mc_method = config.get('mc_method') or random.choice(load_list('mc_methods.txt'))
-        
-        antag_raw = config.get('antagonist')
-        if antag_raw is None: antag_raw = random.choice(load_list('antagonists.txt'))
-        if antag_raw == "__DYNAMIC__": antag_instr = f"**ANTAGONIST:** [OPEN - AI INVENT - {antagonist_gender.upper()} BY DEFAULT]"
-        elif antag_raw == "__NONE__": antag_instr = "**ANTAGONIST:** [NONE]"
-        else: antag_instr = f"**ANTAGONIST:** {antag_raw}"
 
-        elements = []
-        if config.get('person1'): elements.append(f"Char: {config['person1']}")
-        if config.get('person2'): elements.append(f"Char: {config['person2']}")
-        if config.get('location'): elements.append(f"Loc: {config['location']}")
-        if config.get('idea1'): elements.append(f"Idea: {config['idea1']}")
-        if config.get('idea2'): elements.append(f"Idea: {config['idea2']}")
-        elements_string = "\n- ".join(elements) if elements else "None."
-        
-        name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
-        char = f"{name}, {random.randint(23, 45)}, {job}, Gender: {protagonist_gender}"
+        # --- NEW MULTI-PROTAGONIST + ANTAGONIST + MAIN IDEA SUPPORT ---
+        prots = config.get('protagonists', [])
+        if not prots:
+            # fallback single random
+            p_name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
+            prots = [{"name": p_name, "gender": protagonist_gender, "info": ""}]
+
+        prot_lines = []
+        for p in prots:
+            pname = p['name'] or f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
+            pinfo = f", {p['info']}" if p.get('info') else ""
+            prot_lines.append(f"{pname} (Gender: {p['gender']}{pinfo})")
+        char = "; ".join(prot_lines)
+        name = prots[0]['name'] or prot_lines[0].split(' (')[0]
+
+        antag_cfg = config.get('antagonist', {})
+        if isinstance(antag_cfg, dict):
+            if not antag_cfg.get('include', True):
+                antag_instr = "**ANTAGONIST:** [NONE]"
+            else:
+                aname = antag_cfg.get('name') or "Dynamic (AI Invented)"
+                ainfo = f" - {antag_cfg.get('info')}" if antag_cfg.get('info') else ""
+                antag_instr = f"**ANTAGONIST:** {aname} (Gender: {antag_cfg.get('gender', 'Female')}{ainfo})"
+        else:
+            # legacy support for old __DYNAMIC__ / list values
+            if antag_cfg is None: antag_cfg = random.choice(load_list('antagonists.txt'))
+            if antag_cfg == "__DYNAMIC__": antag_instr = f"**ANTAGONIST:** [OPEN - AI INVENT - {antagonist_gender.upper()} BY DEFAULT]"
+            elif antag_cfg == "__NONE__": antag_instr = "**ANTAGONIST:** [NONE]"
+            else: antag_instr = f"**ANTAGONIST:** {antag_cfg}"
+
+        main_idea = config.get('main_idea', '').strip()
+        elements_string = f"**MAIN STORY IDEA:** {main_idea}" if main_idea else "None."
+        # --- END NEW SUPPORT ---
 
     weighted_fetishes = config.get('weighted_fetishes', {})
     if not weighted_fetishes:
@@ -582,7 +599,8 @@ def generate_dossier(seed, attempt, config):
         "dynamic_guidance": dynamic_guidance, "physical_guidance": physical_guidance,
         "mc_method": mc_method, "pov": config.get('pov'),
         "protagonist_gender": protagonist_gender, "antagonist_gender": antagonist_gender,
-        "antagonist": extract_tag(res, "antagonist"),
+        "antagonist": config.get('antagonist', extract_tag(res, "antagonist")),
+        "protagonists": config.get('protagonists', []),
         "trigger": extract_tag(res, "trigger"), 
         "conflict": extract_tag(res, "conflict"), 
         "blurb": extract_tag(res, "blurb"),
@@ -593,7 +611,8 @@ def generate_dossier(seed, attempt, config):
         "custom_note": "",
         "style_guide": style_guide,
         "num_chapters": config.get('num_chapters', 7),
-        "target_words": config.get('target_words', 10000)
+        "target_words": config.get('target_words', 10000),
+        "main_idea": config.get('main_idea', '')
     }
 
 # --- CYOA HELPERS ---
@@ -772,10 +791,6 @@ if st.session_state.step == "setup":
     with col2:
         st.subheader("Mechanics")
         if mode == "Custom Setup":
-            manual_config['genre'] = st.selectbox("Genre", [None] + load_list('genres.txt'), format_func=lambda x: "Random" if x is None else x)
-            manual_config['job'] = st.selectbox("Job", [None] + load_list('occupations.txt'), format_func=lambda x: "Random" if x is None else x)
-            manual_config['antagonist'] = st.selectbox("Antagonist", [None, "__DYNAMIC__", "__NONE__"] + load_list('antagonists.txt'), format_func=format_antagonist_option)
-            manual_config['mc_method'] = st.selectbox("MC Method", [None] + load_list('mc_methods.txt'), format_func=lambda x: "Random" if x is None else x)
             manual_config['num_chapters'] = st.number_input("Number of Chapters", min_value=3, max_value=15, value=7, step=1)
             manual_config['target_words'] = st.number_input("Target Total Word Count", min_value=3000, max_value=30000, value=10000, step=500)
         
@@ -807,12 +822,31 @@ if st.session_state.step == "setup":
             st.subheader("The Pitch")
             manual_config['pitch'] = st.text_area("Main Story Idea", height=150)
         elif mode == "Custom Setup":
-            st.subheader("Story Elements")
-            manual_config['person1'] = st.text_input("Person 1")
-            manual_config['person2'] = st.text_input("Person 2")
-            manual_config['location'] = st.text_input("Location")
-            manual_config['idea1'] = st.text_input("Idea 1")
-            manual_config['idea2'] = st.text_input("Idea 2")
+            st.subheader("Protagonists")
+            num_prot = st.number_input("Number of Protagonists", min_value=1, max_value=3, value=1, step=1)
+            protagonists = []
+            for i in range(int(num_prot)):
+                with st.expander(f"Protagonist {i+1}", expanded=(i==0)):
+                    p_name = st.text_input(f"Name {i+1} (blank = random)", key=f"pname_{i}")
+                    p_gender = st.selectbox(f"Gender {i+1}", ["Female", "Male", "Non-binary"], index=0, key=f"pgender_{i}")
+                    p_info = st.text_input(f"Additional Info {i+1} (age/job/personality)", key=f"pinfo_{i}", placeholder="Optional details")
+                    protagonists.append({"name": p_name.strip(), "gender": p_gender, "info": p_info.strip()})
+            manual_config['protagonists'] = protagonists
+            manual_config['num_protagonists'] = int(num_prot)
+
+            st.subheader("Antagonist")
+            include_antag = st.checkbox("Include Antagonist", value=True)
+            if include_antag:
+                with st.expander("Antagonist Details", expanded=True):
+                    a_name = st.text_input("Name (blank = random or AI-invented)")
+                    a_gender = st.selectbox("Gender", ["Female", "Male", "Non-binary"], index=0)
+                    a_info = st.text_input("Additional Info (optional)")
+                    manual_config['antagonist'] = {"name": a_name.strip(), "gender": a_gender, "info": a_info.strip(), "include": True}
+            else:
+                manual_config['antagonist'] = {"include": False}
+
+            st.subheader("Main Story Idea (optional)")
+            manual_config['main_idea'] = st.text_area("Main Story Idea", height=100, placeholder="High-level concept or specific plot hook...")
 
     st.markdown("---")
     st.subheader("Kink & Motif Weighting (Max 4)")
@@ -864,8 +898,23 @@ elif st.session_state.step == "casting":
     with colA:
         st.markdown("**CORE:**")
         st.markdown(f"- **Job:** {d['job']}\n- **Genre:** {d['genre']}\n- **POV:** {d['pov']}")
-        st.markdown(f"- **Protagonist Gender:** {d.get('protagonist_gender', 'Female')}\n- **Antagonist Gender:** {d.get('antagonist_gender', 'Female')}")
-        st.markdown(f"- **Antagonist:** {d['antagonist']}\n- **Method:** {d['mc_method']}")
+        # Multi-protagonist display
+        prots = d.get('protagonists', [])
+        if prots:
+            prot_display = "; ".join([f"{p.get('name') or 'Random'} ({p.get('gender', '?')})" for p in prots])
+            st.markdown(f"- **Protagonist(s):** {prot_display}")
+        else:
+            st.markdown(f"- **Protagonist Gender:** {d.get('protagonist_gender', 'Female')}")
+        antag = d.get('antagonist', 'N/A')
+        if isinstance(antag, dict):
+            if not antag.get('include', True):
+                st.markdown("- **Antagonist:** NONE")
+            else:
+                an = antag.get('name') or 'Dynamic/AI'
+                st.markdown(f"- **Antagonist:** {an} ({antag.get('gender', 'Female')})")
+        else:
+            st.markdown(f"- **Antagonist:** {antag}")
+        st.markdown(f"- **Method:** {d['mc_method']}")
     with colB:
         st.markdown("**DETAILS:**")
         phys = d.get('body_parts', '')

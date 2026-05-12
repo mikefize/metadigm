@@ -711,6 +711,13 @@ if st.session_state.step == "setup":
             else:
                 manual_config['antagonist'] = {"include": False}
 
+        # Allow editing Genre and MC Method in Custom Mode
+        gcol, mcol = st.columns(2)
+        with gcol:
+            manual_config['genre'] = st.selectbox("Genre", [None] + load_list('genres.txt'), format_func=lambda x: "Random" if x is None else x, key="custom_genre")
+        with mcol:
+            manual_config['mc_method'] = st.selectbox("MC Method", [None] + load_list('mc_methods.txt'), format_func=lambda x: "Random" if x is None else x, key="custom_mc")
+
         st.subheader("Main Story Idea (optional)")
         manual_config['main_idea'] = st.text_area("Main Story Idea", height=120, placeholder="High-level concept or specific plot hook...")
 
@@ -763,8 +770,8 @@ elif st.session_state.step == "casting":
     colA, colB = st.columns(2)
     with colA:
         st.markdown("**CORE:**")
-        st.markdown(f"- **Job:** {d['job']}\n- **Genre:** {d['genre']}\n- **POV:** {d['pov']}")
-        # Multi-protagonist display
+        st.markdown(f"- **Genre:** {d['genre']}\n- **POV:** {d['pov']}")
+        # Multi-protagonist display (no single Job to avoid clash)
         prots = d.get('protagonists', [])
         if prots:
             prot_display = "; ".join([f"{p.get('name') or 'Random'} ({p.get('gender', '?')})" for p in prots])
@@ -829,7 +836,7 @@ elif st.session_state.step == "casting":
             st.session_state.cyoa_segments = []
             st.session_state.cyoa_choices = []
             st.session_state.cyoa_history = ""
-            st.session_state.cyoa_state = f"Normal {st.session_state.dossier.get('job', 'person')}"
+            st.session_state.cyoa_state = "Normal state"
             st.session_state.cyoa_round = 0
             st.session_state.cyoa_choice_made = None
             st.session_state.step = "cyoa"

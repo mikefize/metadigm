@@ -915,6 +915,18 @@ elif st.session_state.step == "writing":
         st.session_state.step = "final"
         st.rerun()
 
+    # === RESUME-SAFE GENERATION STATE ===
+    if "gen_full_narrative" not in st.session_state:
+        st.session_state.gen_full_narrative = ""
+        st.session_state.gen_raw_story = f"# The Fall of {d['name']}\n\n"
+        st.session_state.gen_current_state = f"Normal {d['job']}"
+        st.session_state.gen_chapter_index = 0
+
+    full_narrative = st.session_state.gen_full_narrative
+    raw_story = st.session_state.gen_raw_story
+    current_state = st.session_state.gen_current_state
+    start_i = st.session_state.gen_chapter_index
+
     if d['arc_name'] == "LLM Proposed Arc":
         # Parse the (possibly edited) proposal into chapter list
         proposal = d.get('arc_proposal', '')
@@ -963,7 +975,9 @@ elif st.session_state.step == "writing":
     
     num_chapters = len(arc)
     words_per_chapter = d.get('target_words', 10000) // max(num_chapters, 1)
-    for i, (phase, instr) in enumerate(arc):
+
+    for i in range(start_i, len(arc)):
+        phase, instr = arc[i]
         status_text.write(f"Writing Chapter {i+1}: {phase}...")
         
         first_chapter_rule = ""
@@ -999,6 +1013,13 @@ elif st.session_state.step == "writing":
         clean = clean_artifacts(text)
         full_narrative += f"\n\nCHAPTER {i+1}: {title}\n{clean}"
         raw_story += f"\n\n### {title}\n\n{clean}"
+
+        # Persist progress so we can resume if Streamlit reruns
+        st.session_state.gen_full_narrative = full_narrative
+        st.session_state.gen_raw_story = raw_story
+        st.session_state.gen_current_state = current_state
+        st.session_state.gen_chapter_index = i + 1
+
         progress_bar.progress((i + 1) / (len(arc) + 1))
             
     if do_editor:
@@ -1011,6 +1032,12 @@ elif st.session_state.step == "writing":
         st.session_state.final_story = clean_artifacts(raw_story)
 
     progress_bar.progress(1.0)
+
+    # Clear temporary generation state
+    for key in ["gen_full_narrative", "gen_raw_story", "gen_current_state", "gen_chapter_index"]:
+        if key in st.session_state:
+            del st.session_state[key]
+
     st.session_state.story_generated = True
     st.session_state.step = "final"
     st.rerun()
@@ -1127,4 +1154,6 @@ elif st.session_state.step == "final":
         st.session_state.step = "setup"
         st.session_state.story_generated = False
         st.session_state.kimi_last_raw = None
+        for key in ["gen_full_narrative", "gen_raw_story", "gen_current_state", "gen_chapter_index"]:
+            st.session_state.pop(key, None)
         st.rerun()

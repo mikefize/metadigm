@@ -969,7 +969,7 @@ elif st.session_state.step == "writing":
         first_chapter_rule = ""
         if i == 0:
             first_chapter_rule = """
-**CRITICAL RULE FOR CHAPTER 1 (ALWAYS APPLIES):** This chapter MUST NOT dive into the story or any transformation. Instead, it is a pure CONTEXT chapter. Fully introduce the protagonist: her full name, detailed daily life, job routine, personality quirks, motivations, ambitions, fears, relationships with family, friends, colleagues, and romantic partners if any. Show scenes of her normal world, conversations, work, home life, and what makes her tick. Establish the Trigger subtly through her circumstances without hinting at changes. NO erotic content, NO physical/mental alterations, NO antagonist actions, NO fetish elements whatsoever. The reader must understand exactly who she is and what kind of life she leads BEFORE anything happens. Write as if this is a standalone character study chapter.
+**CRITICAL RULE FOR CHAPTER 1 (ALWAYS APPLIES):** This chapter MUST NOT dive into the story or any transformation. Instead, it is a pure CONTEXT chapter. Fully introduce the protagonist: her full name, detailed daily life, job routine, personality quirks, motivations, ambitions, fears, relationships with family, friends, colleagues, and romantic partners if any. Show scenes of her normal world, conversations, work, home life, and what makes her tick. Establish the Trigger subtly through her circumstances without hinting at changes. NO erotic content, NO physical/mental alterations, NO antagonist actions, NO fetish elements whatsoever. The reader must understand exactly who she is and what kind of life she leads BEFORE anything happens. This is the foundation for the chapters that follow — write a rich, substantial opening chapter.
 """
         
         p = f"""
@@ -979,11 +979,13 @@ elif st.session_state.step == "writing":
         TASK: Write Chapter {i+1} ({phase}). {instr}
         {first_chapter_rule}
         
-        **INSTRUCTIONS:** Aim for approximately {words_per_chapter} words. Focus on internal monologue, sensations and gradual transformation. Respect Motif weights and the overall arc.
-        After you finish the chapter, output on new lines exactly:
+        **INSTRUCTIONS:** Write the FULL chapter of approximately {words_per_chapter} words. Focus on internal monologue, sensations and gradual transformation. Respect Motif weights and the overall arc. Do not stop early or truncate the chapter.
+
+        Write the complete chapter content first. Only at the very end of your entire response, on new lines, add exactly:
         <state>Current Physical/Mental State</state>
         <title>Chapter Title</title>
-        Do NOT add any closing remarks, summaries, or extra text after the tags. Treat this as one chapter in a longer manuscript — do not stop early.
+
+        Do not add any text, summaries, or remarks after the tags. The chapter must feel substantial and complete before the tags appear.
         """
         
         chapter_max = 65000 if MODELS[st.session_state.writer_model]['vendor'] == 'kimi' else 16000

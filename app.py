@@ -299,15 +299,15 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                 "Authorization": f"Bearer {api_key}"
             }
 
-            kimi_max_tokens = max(max_tokens, 256000)
+            kimi_max_tokens = 256000  # Maximum possible for Kimi K2.6 (max_completion_tokens)
             payload = {
                 "model": m_cfg['id'],
                 "messages": [
                     {"role": "system", "content": sys_prompt},
                     {"role": "user", "content": prompt}
                 ],
-                "max_tokens": kimi_max_tokens,
-                "thinking": {"type": "disabled"} # Add this line
+                "max_completion_tokens": kimi_max_tokens,
+                "thinking": {"type": "disabled"}
             }
 
             response = requests.post("https://api.moonshot.ai/v1/chat/completions", headers=headers, json=payload)

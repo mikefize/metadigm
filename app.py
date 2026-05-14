@@ -975,10 +975,14 @@ elif st.session_state.step == "writing":
         {first_chapter_rule}
         
         **INSTRUCTIONS:** Aim for approximately {words_per_chapter} words. Focus on internal monologue, sensations and gradual transformation. Respect Motif weights and the overall arc.
-        OUTPUT: End with EXACTLY: <state>Current Physical/Mental State</state> <title>Chapter Title</title>
+        After you finish the chapter, output on new lines exactly:
+        <state>Current Physical/Mental State</state>
+        <title>Chapter Title</title>
+        Do NOT add any closing remarks, summaries, or extra text after the tags. Treat this as one chapter in a longer manuscript — do not stop early.
         """
         
-        text = call_api(p, st.session_state.writer_model, style_guide=d['style_guide'], max_tokens=16000)
+        chapter_max = 65000 if MODELS[st.session_state.writer_model]['vendor'] == 'kimi' else 16000
+        text = call_api(p, st.session_state.writer_model, style_guide=d['style_guide'], max_tokens=chapter_max)
         if "API ERROR" in text:
             st.error(text)
             break
@@ -993,7 +997,8 @@ elif st.session_state.step == "writing":
     if do_editor:
         status_text.write("Editing...")
         edit_p = f"{bible}\n\nTASK: Polish manuscript. Fix logic. No summaries. Remove tags.\n\nINPUT:\n{raw_story}"
-        final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=65000)
+        editor_max = 200000 if MODELS[st.session_state.editor_model]['vendor'] == 'kimi' else 65000
+        final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=editor_max)
         st.session_state.final_story = clean_artifacts(final) if final and len(final) > len(raw_story)*0.7 else clean_artifacts(raw_story)
     else:
         st.session_state.final_story = clean_artifacts(raw_story)
@@ -1074,7 +1079,8 @@ elif st.session_state.step == "cyoa":
                             f"{bible_str}\n\nTASK: Polish this manuscript. "
                             f"Fix logic, flow and consistency. Remove any XML tags or artifacts.\n\nINPUT:\n{full_raw}"
                         )
-                        final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=65000)
+                        editor_max = 200000 if MODELS[st.session_state.editor_model]['vendor'] == 'kimi' else 65000
+                        final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=editor_max)
                         st.session_state.final_story = (
                             clean_artifacts(final)
                             if final and len(final) > len(full_raw) * 0.7

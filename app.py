@@ -317,6 +317,9 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
 
             data = response.json()
 
+            # Always store raw Kimi response for debugging final generation
+            st.session_state.kimi_last_raw = data
+
             if st.session_state.get("show_prompt_debug", False):
                 st.write("**KIMI RAW API RESPONSE:**")
                 st.json(data)
@@ -1096,6 +1099,11 @@ elif st.session_state.step == "final":
             is_editor=st.session_state.get("last_prompt_is_editor", False),
             expanded=True
         )
+
+    # Always show Kimi raw response for the final generation if available
+    if st.session_state.get("kimi_last_raw"):
+        with st.expander("🔍 Kimi Raw API Response (Final Generation)", expanded=False):
+            st.json(st.session_state.kimi_last_raw)
     st.text_area("Story", st.session_state.final_story, height=600)
     st.sidebar.success(f"Final Cost: ${st.session_state.stats['cost']:.4f}")
     

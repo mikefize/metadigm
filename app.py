@@ -906,10 +906,15 @@ elif st.session_state.step == "casting":
 
 elif st.session_state.step == "writing":
     d = st.session_state.dossier
-    st.header(f"3. Filming: {d.get('Story')}")
+    st.header(f"3. Filming: {d.get('name', 'Story')}")
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
+
+    # Guard against re-entry / looping on Streamlit reruns
+    if st.session_state.get("story_generated", False):
+        st.session_state.step = "final"
+        st.rerun()
+
     if d['arc_name'] == "LLM Proposed Arc":
         # Parse the (possibly edited) proposal into chapter list
         proposal = d.get('arc_proposal', '')
@@ -1004,6 +1009,7 @@ elif st.session_state.step == "writing":
         st.session_state.final_story = clean_artifacts(raw_story)
 
     progress_bar.progress(1.0)
+    st.session_state.story_generated = True
     st.session_state.step = "final"
     st.rerun()
 
@@ -1117,4 +1123,6 @@ elif st.session_state.step == "final":
     st.download_button("Download", st.session_state.final_story, file_name=f"{safe_seed}.txt")
     if st.button("New Story"):
         st.session_state.step = "setup"
+        st.session_state.story_generated = False
+        st.session_state.kimi_last_raw = None
         st.rerun()

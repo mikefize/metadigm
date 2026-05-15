@@ -542,11 +542,31 @@ def generate_dossier(seed, attempt, config):
 # --- CYOA HELPERS ---
 def generate_cyoa_segment(d, history, state, choice_made, round_num, style_guide, model_key):
     premise = d.get('blurb') or d.get('raw_response', '')
+    
+    # === BUILD COMPLETE CHARACTER + IDEA CONTEXT (MUST NEVER BE LOST) ===
+    prots = d.get('protagonists', [])
+    if prots:
+        prot_lines = []
+        for p in prots:
+            info_part = f" | Additional Info: {p.get('info', '')}" if p.get('info') else ""
+            prot_lines.append(f"{p.get('name', 'Unnamed')} (Gender: {p.get('gender', 'Female')}{info_part})")
+        prot_details = "; ".join(prot_lines)
+    else:
+        prot_details = f"{d.get('name', 'Protagonist')} (Gender: {d.get('protagonist_gender', 'Female')})"
+    
+    antag_details = d.get('antagonist', 'None')
+    main_idea = d.get('main_idea', '').strip()
+    main_idea_line = f"**MAIN STORY IDEA (PARAMOUNT - MUST BE THE FOUNDATION OF ENTIRE PLOT):** {main_idea}" if main_idea else "**MAIN STORY IDEA:** (Use the generated premise below)"
+    
     guidance = d.get('dynamic_guidance', '') + " " + d.get('physical_guidance', '')
     bible = (
+        f"{main_idea_line}\n\n"
+        f"DETAILED CHARACTERS (ALL INFO MUST BE RESPECTED AND INCORPORATED):\n"
+        f"PROTAGONISTS: {prot_details}\n"
+        f"ANTAGONIST: {antag_details}\n\n"
         f"GENRE: {d.get('genre', 'Open')} | POV: {d.get('pov', 'Third Person')}\n"
         f"PROTAGONIST GENDER: {d.get('protagonist_gender', 'Female')} | ANTAGONIST GENDER: {d.get('antagonist_gender', 'Female')}\n"
-        f"ANTAGONIST: {d.get('antagonist', 'None')} | MC METHOD: {d.get('mc_method', 'Unknown')}\n"
+        f"MC METHOD: {d.get('mc_method', 'Unknown')}\n"
         f"THEMATIC GUIDANCE (incorporate naturally - never repeat raw motif names verbatim):\n{guidance}\n"
         f"PREMISE: {premise}\n"
         f"CONFLICT: {d.get('conflict', '')}\n"
@@ -996,11 +1016,32 @@ elif st.session_state.step == "writing":
     
     premise = d['blurb'] if d['blurb'] else d['raw_response']
     
+    # === BUILD COMPLETE CHARACTER + IDEA CONTEXT (MUST NEVER BE LOST) ===
+    prots = d.get('protagonists', [])
+    if prots:
+        prot_lines = []
+        for p in prots:
+            info_part = f" | Additional Info: {p.get('info', '')}" if p.get('info') else ""
+            prot_lines.append(f"{p.get('name', 'Unnamed')} (Gender: {p.get('gender', 'Female')}{info_part})")
+        prot_details = "; ".join(prot_lines)
+    else:
+        prot_details = f"{d.get('name', 'Protagonist')} (Gender: {d.get('protagonist_gender', 'Female')})"
+    
+    antag_details = d.get('antagonist', 'None')
+    main_idea = d.get('main_idea', '').strip()
+    main_idea_line = f"**MAIN STORY IDEA (PARAMOUNT - MUST BE THE FOUNDATION OF ENTIRE PLOT):** {main_idea}" if main_idea else "**MAIN STORY IDEA:** (Use the generated premise below)"
+    
     guidance = d.get('dynamic_guidance', '') + " " + d.get('physical_guidance', '')
     bible = f"""
+    {main_idea_line}
+    
+    DETAILED CHARACTERS (ALL INFO MUST BE RESPECTED AND INCORPORATED):
+    PROTAGONISTS: {prot_details}
+    ANTAGONIST: {antag_details}
+    
     GENRE: {d['genre']} | POV: {d['pov']}
     PROTAGONIST GENDER: {d.get('protagonist_gender', 'Female')} | ANTAGONIST GENDER: {d.get('antagonist_gender', 'Female')}
-    ANTAGONIST: {d['antagonist']} | MC METHOD: {d['mc_method']}
+    MC METHOD: {d['mc_method']}
     THEMATIC GUIDANCE (incorporate through behavior and sensation - never repeat raw motif names verbatim):
     {guidance}
     
@@ -1179,9 +1220,20 @@ elif st.session_state.step == "cyoa":
                 full_raw = f"# {d['name']}\n\n" + "\n\n---\n\n".join(st.session_state.cyoa_segments)
                 if do_editor:
                     with st.spinner("Editing..."):
+                        # Build full context for CYOA polish
+                        prots = d.get('protagonists', [])
+                        if prots:
+                            prot_lines = [f"{p.get('name','')} ({p.get('gender','')})" + (f" Info: {p.get('info','')}" if p.get('info') else "") for p in prots]
+                            prot_details = "; ".join(prot_lines)
+                        else:
+                            prot_details = d.get('name', 'Protagonist')
+                        main_idea = d.get('main_idea', '').strip()
                         bible_str = (
+                            f"**MAIN STORY IDEA:** {main_idea}\n"
+                            f"PROTAGONISTS: {prot_details}\n"
+                            f"ANTAGONIST: {d.get('antagonist', 'None')}\n"
                             f"GENRE: {d['genre']} | POV: {d['pov']}\n"
-                            f"ANTAGONIST: {d['antagonist']}\nPREMISE: {d.get('blurb', '')}"
+                            f"PREMISE: {d.get('blurb', '')}"
                         )
                         edit_p = (
                             f"{bible_str}\n\nTASK: Polish this manuscript. "

@@ -35,7 +35,7 @@ if "cyoa_choice_made" not in st.session_state: st.session_state.cyoa_choice_made
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
-    "Grok 4.30": {"name": "Grok 4.30", "id": "grok-4.3", "vendor": "xai", "price_in": 1.25, "price_out": 2.50},
+    "Grok 4.30": {"name": "Grok 4.20", "id": "grok-4.20", "vendor": "xai", "price_in": 1.25, "price_out": 2.50},
     "Grok 4.10 Fast": {"name": "Grok 4.20 Fast", "id": "grok-4-1-fast-reasoning", "vendor": "xai", "price_in": 0.2, "price_out": 0.50},
     "Claude 4.6 Sonnet": {"name": "Claude 4.5 Sonnet", "id": "claude-sonnet-4-6", "vendor": "anthropic", "price_in": 3.00, "price_out": 15.00},
     "Claude 4.6 Opus": {"name": "Claude 4.5 Opus", "id": "claude-opus-4-6", "vendor": "anthropic", "price_in": 5.00, "price_out": 25.00},

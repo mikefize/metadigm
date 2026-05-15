@@ -1095,36 +1095,6 @@ elif st.session_state.step == "writing":
         title = extract_tag(text, "title") or phase
         clean = clean_artifacts(text)
 
-        # --- NEW: CONTINUITY / LOGIC CHECK LOOP ---
-        status_text.write(f"Running Logic Check on Chapter {i+1}...")
-        logic_prompt = f"""
-        You are a strict Continuity Editor for an adult fiction novel. 
-        Review the newly drafted Chapter {i+1} against the STORY SO FAR.
-        
-        Look specifically for logical errors:
-        1. Characters knowing information they haven't explicitly learned yet.
-        2. Unexplained teleportation/location changes.
-        3. Premature transformations (if this is supposed to be a slow-burn context chapter).
-        4. Any glaring plot holes or character inconsistencies.
-        
-        STORY SO FAR: 
-        {full_narrative if full_narrative else "This is Chapter 1. Just check for internal consistency and premature plot rushing."}
-        
-        NEWLY DRAFTED CHAPTER {i+1}: 
-        {clean}
-        
-        If there are continuity errors, pacing violations, or logical leaps, REWRITE the flawed sections to fix them seamlessly, maintaining the length and explicit/erotic tone. If it is completely logically sound, output the chapter exactly as written. No commentary, just the final chapter text.
-        """
-        
-        # Using the editor model for the logic check
-        editor_max = 200000 if MODELS[st.session_state.editor_model]['vendor'] == 'kimi' else 65000
-        logic_checked_text = call_api(logic_prompt, st.session_state.editor_model, is_editor=True, max_tokens=editor_max)
-        
-        # If the logic check didn't fail, use its cleaned output
-        if logic_checked_text and not logic_checked_text.startswith("API ERROR"):
-             clean = clean_artifacts(logic_checked_text)
-        # ------------------------------------------
-
         full_narrative += f"\n\nCHAPTER {i+1}: {title}\n{clean}"
         raw_story += f"\n\n### {title}\n\n{clean}"
 

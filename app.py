@@ -1106,14 +1106,18 @@ elif st.session_state.step == "writing":
 
         progress_bar.progress((i + 1) / (len(arc) + 1))
             
+    # Always preserve the original raw version for comparison
+    st.session_state.original_story = clean_artifacts(raw_story)
+
     if do_editor:
         status_text.write("Final Polish Editing...")
         edit_p = f"{bible}\n\nTASK: Polish manuscript. Fix logic. No summaries. Remove tags.\n\nINPUT:\n{raw_story}"
         editor_max = 200000 if MODELS[st.session_state.editor_model]['vendor'] == 'kimi' else 65000
         final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=editor_max)
-        st.session_state.final_story = clean_artifacts(final) if final and len(final) > len(raw_story)*0.7 else clean_artifacts(raw_story)
+        edited = clean_artifacts(final) if final and len(final) > len(raw_story)*0.7 else clean_artifacts(raw_story)
+        st.session_state.final_story = edited
     else:
-        st.session_state.final_story = clean_artifacts(raw_story)
+        st.session_state.final_story = st.session_state.original_story
 
     progress_bar.progress(1.0)
 
@@ -1188,6 +1192,9 @@ elif st.session_state.step == "cyoa":
             else:
                 st.session_state.cyoa_segments.append(conclusion)
                 full_raw = f"# {d['name']}\n\n" + "\n\n---\n\n".join(st.session_state.cyoa_segments)
+                # Always preserve the original raw version for comparison
+                st.session_state.original_story = clean_artifacts(full_raw)
+
                 if do_editor:
                     with st.spinner("Editing..."):
                         # Build full context for CYOA polish
@@ -1211,13 +1218,14 @@ elif st.session_state.step == "cyoa":
                         )
                         editor_max = 200000 if MODELS[st.session_state.editor_model]['vendor'] == 'kimi' else 65000
                         final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=editor_max)
-                        st.session_state.final_story = (
+                        edited = (
                             clean_artifacts(final)
                             if final and len(final) > len(full_raw) * 0.7
                             else clean_artifacts(full_raw)
                         )
+                        st.session_state.final_story = edited
                 else:
-                    st.session_state.final_story = clean_artifacts(full_raw)
+                    st.session_state.final_story = st.session_state.original_story
                 st.session_state.step = "final"
                 st.rerun()
         if col_back.button("⬅️ Back to Setup", use_container_width=True):
@@ -1240,15 +1248,57 @@ elif st.session_state.step == "final":
     if st.session_state.get("kimi_last_raw"):
         with st.expander("🔍 Kimi Raw API Response (Final Generation)", expanded=False):
             st.json(st.session_state.kimi_last_raw)
-    st.text_area("Story", st.session_state.final_story, height=600)
+
+    # Comparison view: show Original vs Edited when both exist and editor was used
+    original = st.session_state.get("original_story", "")
+    final = st.session_state.get("final_story", "")
+    safe_seed = "".join([c for c in st.session_state.seed if c.isalnum()]).rstrip()
+    if original and final and original != final and do_editor:
+        tab_orig, tab_edit = st.tabs(["📜 Original (Raw)", "✨ Edited Version"])
+        with tab_orig:
+            st.text_area("Original Raw Story", original, height=600, key="orig_view")
+            st.download_button("Download Original", original, file_name=f"{safe_seed}_ORIGINAL.txt", key="dl_orig")
+        with tab_edit:
+            st.text_area("Edited Story", final, height=600, key="edit_view")
+            st.download_button("Download Edited", final, file_name=f"{safe_seed}_EDITED.txt", key="dl_edit")
+    else:
+        # No editor or identical — just show final
+        st.text_area("Story", final or original, height=600)
+        st.download_button("Download", final or original, file_name=f"{safe_seed}.txt")
+
     st.sidebar.success(f"Final Cost: ${st.session_state.stats['cost']:.4f}")
     
-    safe_seed = "".join([c for c in st.session_state.seed if c.isalnum()]).rstrip()
-    st.download_button("Download", st.session_state.final_story, file_name=f"{safe_seed}.txt")
-    if st.button("New Story"):
-        st.session_state.step = "setup"
-        st.session_state.story_generated = False
-        st.session_state.kimi_last_raw = None
-        for key in ["gen_full_narrative", "gen_raw_story", "gen_current_state", "gen_chapter_index"]:
-            st.session_state.pop(key, None)
-        st.rerun()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔄 Rewrite Entire Story (Same Parameters)", use_container_width=True):
+            st.session_state.attempt += 1
+            st.session_state.story_generated = False
+            st.session_state.kimi_last_raw = None
+
+            # Clear generation state
+            for key in ["gen_full_narrative", "gen_raw_story", "gen_current_state", "gen_chapter_index", "original_story"]:
+                st.session_state.pop(key, None)
+
+            # Reset CYOA state if needed
+            st.session_state.cyoa_segments = []
+            st.session_state.cyoa_choices = []
+            st.session_state.cyoa_history = ""
+            st.session_state.cyoa_state = "Normal state"
+            st.session_state.cyoa_round = 0
+            st.session_state.cyoa_choice_made = None
+
+            # Decide which generation mode to jump to
+            if st.session_state.manual_config.get('story_mode') == 'Choose Your Own Adventure':
+                st.session_state.step = "cyoa"
+            else:
+                st.session_state.step = "writing"
+            st.rerun()
+
+    with col2:
+        if st.button("New Story (Start Over)", use_container_width=True):
+            st.session_state.step = "setup"
+            st.session_state.story_generated = False
+            st.session_state.kimi_last_raw = None
+            for key in ["gen_full_narrative", "gen_raw_story", "gen_current_state", "gen_chapter_index", "original_story"]:
+                st.session_state.pop(key, None)
+            st.rerun()

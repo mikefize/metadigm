@@ -369,7 +369,7 @@ def generate_dossier(seed, attempt, config):
         if not mc_method or mc_method == "Random":
             all_methods = load_list('mc_methods.txt')
             if config.get('enable_physical', True):
-                valid_phys_methods = [m for m in all_methods if any(k in m for k in ['Chemical', 'Viral', 'Magical', 'High-Tech'])]
+                valid_phys_methods = [m for m in all_methods if any(k in m for k in ['Chemical', 'Viral', 'Magical'])]
                 if valid_phys_methods:
                     mc_method = random.choice(valid_phys_methods)
                 else:

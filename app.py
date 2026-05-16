@@ -973,7 +973,7 @@ elif st.session_state.step == "casting":
             "Edit the chapter-by-chapter arc as needed. The story will follow this structure.",
             value=d.get('arc_proposal', ''),
             height=250,
-            key="arc_edit"
+            key=f"arc_edit_{st.session_state.get('attempt', 0)}"
         )
         if edited_arc != d.get('arc_proposal'):
             d['arc_proposal'] = edited_arc

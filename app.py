@@ -1015,10 +1015,52 @@ if st.session_state.step == "setup":
                 st.rerun()
 
 elif st.session_state.step == "casting":
-    d = st.session_state.dossier
+    # Handle Sequel/Spin-off flow: build a minimal dossier from analysis if needed
+    if st.session_state.get("manual_config", {}).get("mode") == "Sequel/Spin-off":
+        analysis = st.session_state.manual_config.get("analysis", {})
+        chosen_seed = st.session_state.manual_config.get("chosen_seed", "")
+        style_file = st.session_state.manual_config.get("style_file", "style_gritty.txt")
+        style_guide = load_file_content(os.path.join(CONFIG_DIR, style_file)) or "Write normally."
+
+        # Create a lightweight dossier so the rest of the pipeline works
+        d = {
+            "name": "Sequel/Spin-off Story",
+            "job": "N/A",
+            "genre": "Sequel/Spin-off",
+            "fetish_str": analysis.get("themes", ""),
+            "body_parts": "",
+            "body_details": [],
+            "dynamic_guidance": analysis.get("dynamics", ""),
+            "physical_guidance": "",
+            "mc_method": "Sequel/Spin-off",
+            "pov": "Third Person (She)",
+            "protagonist_gender": "Female",
+            "antagonist_gender": "Female",
+            "antagonist": "See analysis",
+            "protagonists": [],
+            "trigger": analysis.get("core_idea", ""),
+            "conflict": "",
+            "blurb": chosen_seed,
+            "arc_name": "Sequel/Spin-off Arc",
+            "custom_arc_text": "",
+            "elements_string": f"**ORIGINAL STORY SUMMARY:**\n{analysis.get('core_idea','')}\n\n**CHARACTERS:**\n{analysis.get('characters','')}",
+            "raw_response": "",
+            "custom_note": "",
+            "style_guide": style_guide,
+            "num_chapters": 5,
+            "target_words": 8000,
+            "main_idea": chosen_seed,
+            "pacing": "Steady Build",
+            "transform_onset": "Mid-Story",
+            "sequel_source": st.session_state.manual_config.get("original_story", "")
+        }
+        st.session_state.dossier = d
+    else:
+        d = st.session_state.dossier
+
     st.header("2. Casting Call")
     
-    st.caption(f"**Arc:** {d['arc_name']}")
+    st.caption(f"**Arc:** {d.get('arc_name', 'Custom')}")
     
     colA, colB = st.columns(2)
     with colA:

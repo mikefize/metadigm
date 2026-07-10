@@ -761,18 +761,51 @@ CHAPTER 2: [Title]
     return clean_artifacts(res)
 
 
-# --- NEW FEATURE: SEQUEL / SPIN-OFF ANALYZER (added without modifying existing functions) ---
+# --- NEW FEATURE: SEQUEL / SPIN-OFF ANALYZER (2-PASS VERSION) ---
 def analyze_story_for_sequel_or_spinoff(story_text, mode, model_key, style_guide=""):
-    """Analyze an uploaded existing story to enable creating a sequel or spin-off.
-    Extracts core idea, themes/dynamics/fetishes, characters with relationships and plot importance.
-    Uses the proper system prompt for the selected model (same as all other calls).
-    Does NOT modify any existing functions.
+    """Two-pass analysis for stories of any length.
+    
+    Pass 1: Create a complete, detailed plot summary of the entire story.
+    Pass 2: Perform the structured literary analysis using the summary.
+    
+    This removes the previous 18k character hard limit.
+    Uses the proper system prompt via call_api (same as all other steps).
     """
     if not story_text or not story_text.strip():
         return {"error": "No story text provided."}
 
-    # Build a clean user prompt; the system prompt will be loaded automatically by call_api
-    user_prompt = f"""TASK: Perform a deep literary analysis of the uploaded erotic transformation story below.
+    # ========== PASS 1: Full-Story Summary ==========
+    summary_prompt = f"""TASK: Create a comprehensive, detailed plot summary of the following erotic transformation story.
+
+Your summary must capture:
+- The complete narrative arc from beginning to end
+- All major plot points, transformations, and turning points
+- Every important character and how they evolve
+- Key fetishes, power dynamics, and themes as they appear
+- The ending and final state of the protagonist(s)
+
+Be thorough and specific. Include all significant events and character developments so the summary can be used as a complete replacement for the original text in further analysis.
+
+STORY TEXT:
+{story_text}
+
+OUTPUT FORMAT — STRICT XML:
+<plot_summary>
+[Write a detailed, multi-paragraph plot summary here that covers the entire story]
+</plot_summary>
+"""
+
+    summary_res = call_api(summary_prompt, model_key, style_guide=style_guide, max_tokens=16384)
+    if summary_res.startswith("API ERROR") or not summary_res:
+        return {"error": summary_res or "Pass 1 (summary) failed."}
+
+    plot_summary = extract_tag(summary_res, "plot_summary")
+    if not plot_summary:
+        # Fallback: use raw response if tag extraction fails
+        plot_summary = clean_artifacts(summary_res)
+
+    # ========== PASS 2: Structured Analysis on the Summary ==========
+    analysis_prompt = f"""TASK: Perform a deep literary analysis of the story based on the detailed plot summary below.
 
 The user wants to create a **{mode.upper()}** based on this story.
 
@@ -783,8 +816,8 @@ Focus on extracting:
 - Central interpersonal/psychological dynamics
 - 4-6 strong continuation seeds for the chosen mode
 
-STORY TEXT:
-{story_text[:18000]}
+DETAILED PLOT SUMMARY (use this as the complete story source):
+{plot_summary}
 
 OUTPUT FORMAT — STRICT XML TAGS ONLY:
 <core_idea>One concise sentence that captures the central premise and emotional core.</core_idea>
@@ -797,18 +830,20 @@ Detailed bullet list of all important characters in this format:
 <continuation_seeds>Provide 4-6 concrete, high-potential ideas for {'a direct sequel that continues the protagonist\'s journey after the ending' if mode.lower() == 'sequel' else 'a spin-off story set in the same universe, focusing on side characters, new victims, or unexplored aspects of the mechanism/world'}.</continuation_seeds>
 """
 
-    res = call_api(user_prompt, model_key, style_guide=style_guide, max_tokens=8192)
-    if res.startswith("API ERROR") or not res:
-        return {"error": res or "Analysis failed."}
+    analysis_res = call_api(analysis_prompt, model_key, style_guide=style_guide, max_tokens=8192)
+    if analysis_res.startswith("API ERROR") or not analysis_res:
+        return {"error": analysis_res or "Pass 2 (analysis) failed."}
 
     return {
-        "core_idea": extract_tag(res, "core_idea"),
-        "themes": extract_tag(res, "themes"),
-        "characters": extract_tag(res, "characters"),
-        "dynamics": extract_tag(res, "dynamics"),
-        "continuation_seeds": extract_tag(res, "continuation_seeds"),
-        "raw_analysis": res,
-        "mode": mode
+        "core_idea": extract_tag(analysis_res, "core_idea"),
+        "themes": extract_tag(analysis_res, "themes"),
+        "characters": extract_tag(analysis_res, "characters"),
+        "dynamics": extract_tag(analysis_res, "dynamics"),
+        "continuation_seeds": extract_tag(analysis_res, "continuation_seeds"),
+        "raw_analysis": analysis_res,
+        "mode": mode,
+        "plot_summary": plot_summary,           # NEW: expose the summary for debugging / future use
+        "full_story_length": len(story_text)
     }
 
 

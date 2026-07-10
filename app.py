@@ -32,6 +32,10 @@ if "cyoa_history" not in st.session_state: st.session_state.cyoa_history = ""
 if "cyoa_state" not in st.session_state: st.session_state.cyoa_state = ""
 if "cyoa_round" not in st.session_state: st.session_state.cyoa_round = 0
 if "cyoa_choice_made" not in st.session_state: st.session_state.cyoa_choice_made = None
+if "sequel_mode" not in st.session_state: st.session_state.sequel_mode = None
+if "uploaded_story" not in st.session_state: st.session_state.uploaded_story = ""
+if "analysis_result" not in st.session_state: st.session_state.analysis_result = None
+if "selected_continuation" not in st.session_state: st.session_state.selected_continuation = None
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
@@ -930,6 +934,34 @@ if st.session_state.step == "setup":
                     st.session_state.step = "casting"
                     st.rerun()
 
+    # --- NEW: Sequel / Spin-off Entry Point ---
+    st.markdown("---")
+    st.subheader("📖 Continue an Existing Story")
+    sequel_mode_choice = st.radio("What would you like to create?", ["Sequel", "Spin-off"], horizontal=True, key="sequel_mode_radio")
+    
+    uploaded_file = st.file_uploader("Upload existing story (.txt)", type=["txt"], key="sequel_upload")
+    
+    if uploaded_file is not None:
+        story_content = uploaded_file.read().decode("utf-8", errors="ignore")
+        st.session_state.uploaded_story = story_content
+        st.success(f"Loaded story ({len(story_content)} characters)")
+        
+        if st.button("🔍 Analyze Story for " + sequel_mode_choice, key="analyze_btn"):
+            with st.spinner("Analyzing story with system prompt..."):
+                analysis = analyze_story_for_sequel_or_spinoff(
+                    story_content,
+                    sequel_mode_choice,
+                    st.session_state.writer_model,
+                    style_guide=load_file_content(os.path.join(CONFIG_DIR, style_choice)) or ""
+                )
+            if "error" in analysis:
+                st.error(analysis["error"])
+            else:
+                st.session_state.analysis_result = analysis
+                st.session_state.sequel_mode = sequel_mode_choice
+                st.session_state.step = "sequel_analysis"
+                st.rerun()
+
 elif st.session_state.step == "casting":
     d = st.session_state.dossier
     st.header("2. Casting Call")
@@ -1213,6 +1245,60 @@ elif st.session_state.step == "cyoa":
             st.session_state.step = "setup"
             st.rerun()
 
+elif st.session_state.step == "sequel_analysis":
+    st.header("📖 Story Analysis — " + st.session_state.sequel_mode)
+    analysis = st.session_state.analysis_result or {}
+    
+    if "error" in analysis:
+        st.error(analysis["error"])
+        if st.button("Back"):
+            st.session_state.step = "setup"
+            st.rerun()
+    else:
+        st.subheader("Core Idea")
+        st.info(analysis.get("core_idea", "N/A"))
+        
+        st.subheader("Themes, Dynamics & Fetishes")
+        st.markdown(analysis.get("themes", "N/A"))
+        
+        st.subheader("Characters & Relationships")
+        st.markdown(analysis.get("characters", "N/A"))
+        
+        st.subheader("Central Dynamics")
+        st.markdown(analysis.get("dynamics", "N/A"))
+        
+        st.subheader("Continuation Seeds")
+        seeds = analysis.get("continuation_seeds", "")
+        seed_lines = [s.strip() for s in seeds.split("\n") if s.strip()]
+        
+        selected_seed = st.radio(
+            "Choose a direction for the new story:",
+            seed_lines if seed_lines else ["(No seeds generated)"],
+            key="sequel_seed_choice"
+        )
+        
+        st.session_state.selected_continuation = selected_seed
+        
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("✅ Use This Seed & Generate New Story", use_container_width=True):
+                # Store the chosen seed into the manual config so the next generation can use it
+                st.session_state.manual_config = {
+                    "mode": "Sequel/Spin-off",
+                    "sequel_mode": st.session_state.sequel_mode,
+                    "original_story": st.session_state.uploaded_story,
+                    "analysis": analysis,
+                    "chosen_seed": selected_seed,
+                    "style_file": style_choice
+                }
+                st.session_state.seed = "Sequel_" + "".join([c for c in st.session_state.seed if c.isalnum()])[:20]
+                st.session_state.step = "casting"   # reuse the existing casting flow
+                st.rerun()
+        with col_b:
+            if st.button("⬅️ Back", use_container_width=True):
+                st.session_state.step = "setup"
+                st.rerun()
+
 elif st.session_state.step == "final":
     st.header("4. Final Cut")
     if st.session_state.get("show_prompt_debug", False) and st.session_state.get("last_user_prompt"):
@@ -1282,29 +1368,28 @@ elif st.session_state.step == "final":
 def analyze_story_for_sequel_or_spinoff(story_text, mode, model_key, style_guide=""):
     """Analyze an uploaded existing story to enable creating a sequel or spin-off.
     Extracts core idea, themes/dynamics/fetishes, characters with relationships and plot importance.
+    Uses the proper system prompt for the selected model (same as all other calls).
     Does NOT modify any existing functions.
     """
     if not story_text or not story_text.strip():
         return {"error": "No story text provided."}
 
-    analysis_prompt = f"""
-You are a master literary analyst specializing in erotic transformation and dark fetish fiction.
+    # Build a clean user prompt; the system prompt will be loaded automatically by call_api
+    user_prompt = f"""TASK: Perform a deep literary analysis of the uploaded erotic transformation story below.
 
-The user has uploaded an existing story and wants to create a **{mode.upper()}**.
+The user wants to create a **{mode.upper()}** based on this story.
 
-Your job is to deeply analyze the provided story text and extract structured intelligence so a new story can be written as a direct sequel or an independent spin-off.
+Focus on extracting:
+- The single unifying CORE IDEA
+- All major TOPICS, DYNAMICS, THEMES and FETISHES (with how they evolve)
+- Every significant CHARACTER (name, gender, personality, relationships, exact plot importance)
+- Central interpersonal/psychological dynamics
+- 4-6 strong continuation seeds for the chosen mode
 
-Focus especially on:
-- The single unifying CORE IDEA of the story.
-- All major TOPICS, DYNAMICS, THEMES and FETISHES (including how they evolve).
-- Every significant CHARACTER: name, personality, gender, role, relationships to others, and their precise importance to the plot (main driver, supporting, catalyst, victim, etc.).
-- Power dynamics, emotional bonds, conflicts and how they drive the narrative.
-- What makes the story unique so the continuation feels authentic.
-
-STORY TEXT TO ANALYZE:
+STORY TEXT:
 {story_text[:18000]}
 
-OUTPUT FORMAT — STRICT XML TAGS ONLY (no markdown, no extra commentary):
+OUTPUT FORMAT — STRICT XML TAGS ONLY:
 <core_idea>One concise sentence that captures the central premise and emotional core.</core_idea>
 <themes>List the key themes, fetishes, power dynamics and recurring motifs. Be specific and exhaustive.</themes>
 <characters>
@@ -1315,7 +1400,7 @@ Detailed bullet list of all important characters in this format:
 <continuation_seeds>Provide 4-6 concrete, high-potential ideas for {'a direct sequel that continues the protagonist\'s journey after the ending' if mode.lower() == 'sequel' else 'a spin-off story set in the same universe, focusing on side characters, new victims, or unexplored aspects of the mechanism/world'}.</continuation_seeds>
 """
 
-    res = call_api(analysis_prompt, model_key, style_guide=style_guide, max_tokens=8192)
+    res = call_api(user_prompt, model_key, style_guide=style_guide, max_tokens=8192)
     if res.startswith("API ERROR") or not res:
         return {"error": res or "Analysis failed."}
 

@@ -1276,3 +1276,55 @@ elif st.session_state.step == "final":
             for key in ["gen_full_narrative", "gen_raw_story", "gen_current_state", "gen_chapter_index", "original_story"]:
                 st.session_state.pop(key, None)
             st.rerun()
+
+
+# --- NEW FEATURE: SEQUEL / SPIN-OFF ANALYZER (added without modifying existing functions) ---
+def analyze_story_for_sequel_or_spinoff(story_text, mode, model_key, style_guide=""):
+    """Analyze an uploaded existing story to enable creating a sequel or spin-off.
+    Extracts core idea, themes/dynamics/fetishes, characters with relationships and plot importance.
+    Does NOT modify any existing functions.
+    """
+    if not story_text or not story_text.strip():
+        return {"error": "No story text provided."}
+
+    analysis_prompt = f"""
+You are a master literary analyst specializing in erotic transformation and dark fetish fiction.
+
+The user has uploaded an existing story and wants to create a **{mode.upper()}**.
+
+Your job is to deeply analyze the provided story text and extract structured intelligence so a new story can be written as a direct sequel or an independent spin-off.
+
+Focus especially on:
+- The single unifying CORE IDEA of the story.
+- All major TOPICS, DYNAMICS, THEMES and FETISHES (including how they evolve).
+- Every significant CHARACTER: name, personality, gender, role, relationships to others, and their precise importance to the plot (main driver, supporting, catalyst, victim, etc.).
+- Power dynamics, emotional bonds, conflicts and how they drive the narrative.
+- What makes the story unique so the continuation feels authentic.
+
+STORY TEXT TO ANALYZE:
+{story_text[:18000]}
+
+OUTPUT FORMAT — STRICT XML TAGS ONLY (no markdown, no extra commentary):
+<core_idea>One concise sentence that captures the central premise and emotional core.</core_idea>
+<themes>List the key themes, fetishes, power dynamics and recurring motifs. Be specific and exhaustive.</themes>
+<characters>
+Detailed bullet list of all important characters in this format:
+- NAME (Gender, Age/Role): Brief personality + relationship to other characters + plot importance (e.g. "Primary protagonist / victim of the mechanism", "Antagonist who controls the device", "Best friend who becomes suspicious", "Minor supporting character who enables key event")
+</characters>
+<dynamics>Describe the central interpersonal and psychological dynamics that drive the story and how the transformation affects relationships.</dynamics>
+<continuation_seeds>Provide 4-6 concrete, high-potential ideas for {'a direct sequel that continues the protagonist\'s journey after the ending' if mode.lower() == 'sequel' else 'a spin-off story set in the same universe, focusing on side characters, new victims, or unexplored aspects of the mechanism/world'}.</continuation_seeds>
+"""
+
+    res = call_api(analysis_prompt, model_key, style_guide=style_guide, max_tokens=8192)
+    if res.startswith("API ERROR") or not res:
+        return {"error": res or "Analysis failed."}
+
+    return {
+        "core_idea": extract_tag(res, "core_idea"),
+        "themes": extract_tag(res, "themes"),
+        "characters": extract_tag(res, "characters"),
+        "dynamics": extract_tag(res, "dynamics"),
+        "continuation_seeds": extract_tag(res, "continuation_seeds"),
+        "raw_analysis": res,
+        "mode": mode
+    }

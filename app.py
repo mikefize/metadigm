@@ -722,10 +722,13 @@ TASK: Write a satisfying conclusion (~400-600 words). Bring the narrative to a c
     return conclusion, None
 
 def generate_arc_proposal(d, model_key):
-    num_ch = d.get('num_chapters', 7)
+    base_ch = d.get('num_chapters', 7)
+    add_epilogue = d.get('add_epilogue', False)
+    num_ch = base_ch + 1 if add_epilogue else base_ch
     target = d.get('target_words', 10000)
     words_per = target // num_ch
     premise = d.get('blurb') or d.get('raw_response', '')
+    epilogue_note = " The final chapter MUST be an Epilogue that shows the contrast between the protagonist's original life and their transformed existence months later." if add_epilogue else ""
     prompt = f"""
 You are a master story architect for erotic transformation fiction.
 
@@ -742,7 +745,7 @@ Transformation Onset: {d.get('transform_onset', 'Mid-Story')}
 
 CRITICAL PACING RULES:
 - If Pacing is "Agonizing Slow Burn", the first 2-3 chapters MUST contain ZERO transformation or explicit content. They are purely for establishing the protagonist's normal life, job, relationships, and the subtle, looming threat.
-- If Transformation Onset is "Late", the physical/mental changes must not actively begin until the final third of the chapter list.
+- If Transformation Onset is "Late", the physical/mental changes must not actively begin until the final third of the chapter list.{epilogue_note}
 
 Create a compelling, detailed narrative arc with exactly {num_ch} chapters.
 For each chapter provide:
@@ -1160,9 +1163,11 @@ elif st.session_state.step == "casting":
         if edited_arc != d.get('arc_proposal'):
             d['arc_proposal'] = edited_arc
             st.session_state.dossier = d
-        st.caption(f"Target: {d.get('num_chapters', 7)} chapters | ~{d.get('target_words', 10000)} total words")
+        real_chapters = d.get('num_chapters', 7) + (1 if d.get('add_epilogue', False) else 0)
+        st.caption(f"Target: {real_chapters} chapters (incl. epilogue) | ~{d.get('target_words', 10000)} total words")
     else:
-        st.caption(f"Using fixed arc: {d['arc_name']}")
+        real_chapters = d.get('num_chapters', 7) + (1 if d.get('add_epilogue', False) else 0)
+        st.caption(f"Using fixed arc: {d['arc_name']} ({real_chapters} chapters total)")
 
     note = st.text_area("Director's Note (Optional)", placeholder="e.g. Make sure she begs at the end...")
     
@@ -1277,34 +1282,6 @@ elif st.session_state.step == "writing":
         st.session_state.gen_chapter_index = i + 1
 
         progress_bar.progress((i + 1) / (len(arc) + 1))
-
-    # Optional Epilogue Chapter
-    if d.get('add_epilogue', False):
-        status_text.write("Writing Epilogue Chapter...")
-        epilogue_phase = "Epilogue"
-        epilogue_instr = "Extensive 'Day in the Life' months later. Highlight the tragic/ironic contrast between who she was at the beginning of the story and the transformed version she has become. Show the new routine, social circle, mindset, and daily existence. Focus on the stark difference from the original life established in Chapter 1."
-
-        p = build_chapter_prompt(
-            d=d,
-            chapter_index=num_chapters,  # next index after last chapter
-            total_chapters=num_chapters + 1,
-            arc_phase=epilogue_phase,
-            arc_instr=epilogue_instr,
-            history=full_narrative,
-            current_state=current_state
-        )
-
-        chapter_max = 65000 if MODELS[st.session_state.writer_model]['vendor'] == 'kimi' else 16000
-        text = call_api(p, st.session_state.writer_model, style_guide=d['style_guide'], max_tokens=chapter_max)
-
-        if "API ERROR" not in text:
-            ep_title = extract_tag(text, "title") or "Epilogue"
-            ep_clean = clean_artifacts(text)
-            full_narrative += f"\n\nCHAPTER {num_chapters + 1}: {ep_title}\n{ep_clean}"
-            raw_story += f"\n\n### {ep_title}\n\n{ep_clean}"
-
-            st.session_state.gen_full_narrative = full_narrative
-            st.session_state.gen_raw_story = raw_story
 
     st.session_state.original_story = clean_artifacts(raw_story)
 

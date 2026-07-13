@@ -526,7 +526,8 @@ def generate_dossier(seed, attempt, config):
         "target_words": config.get('target_words', 10000),
         "main_idea": config.get('main_idea', ''),
         "pacing": pacing_setting,
-        "transform_onset": transform_onset
+        "transform_onset": transform_onset,
+        "add_epilogue": config.get('add_epilogue', False)
     }
 
 # --- PROMPT BUILDERS ---
@@ -566,7 +567,7 @@ def build_chapter_prompt(d, chapter_index, total_chapters, arc_phase, arc_instr,
     onset = d.get('transform_onset', 'Mid-Story')
     pacing = d.get('pacing', 'Steady Build')
     
-    onset_threshold = 0.0
+    onset_threshold = 0.15
     if onset == 'Mid-Story': onset_threshold = 0.35
     elif onset == 'Late (Heavy Context)': onset_threshold = 0.60
 
@@ -896,6 +897,12 @@ if st.session_state.step == "setup":
         st.subheader("Story Parameters")
         manual_config['num_chapters'] = st.number_input("Number of Chapters", min_value=3, max_value=15, value=7, step=1)
         manual_config['target_words'] = st.number_input("Target Total Word Count", min_value=3000, max_value=30000, value=10000, step=500)
+
+        manual_config['add_epilogue'] = st.checkbox(
+            "Add Epilogue Chapter", 
+            value=False,
+            help="Append an optional epilogue after the final chapter to show the contrast between the protagonist's original life and their new existence."
+        )
 
         enable_phys = st.checkbox("Physical Changes?", value=True)
         manual_config['enable_physical'] = enable_phys
@@ -1270,7 +1277,35 @@ elif st.session_state.step == "writing":
         st.session_state.gen_chapter_index = i + 1
 
         progress_bar.progress((i + 1) / (len(arc) + 1))
-            
+
+    # Optional Epilogue Chapter
+    if d.get('add_epilogue', False):
+        status_text.write("Writing Epilogue Chapter...")
+        epilogue_phase = "Epilogue"
+        epilogue_instr = "Extensive 'Day in the Life' months later. Highlight the tragic/ironic contrast between who she was at the beginning of the story and the transformed version she has become. Show the new routine, social circle, mindset, and daily existence. Focus on the stark difference from the original life established in Chapter 1."
+
+        p = build_chapter_prompt(
+            d=d,
+            chapter_index=num_chapters,  # next index after last chapter
+            total_chapters=num_chapters + 1,
+            arc_phase=epilogue_phase,
+            arc_instr=epilogue_instr,
+            history=full_narrative,
+            current_state=current_state
+        )
+
+        chapter_max = 65000 if MODELS[st.session_state.writer_model]['vendor'] == 'kimi' else 16000
+        text = call_api(p, st.session_state.writer_model, style_guide=d['style_guide'], max_tokens=chapter_max)
+
+        if "API ERROR" not in text:
+            ep_title = extract_tag(text, "title") or "Epilogue"
+            ep_clean = clean_artifacts(text)
+            full_narrative += f"\n\nCHAPTER {num_chapters + 1}: {ep_title}\n{ep_clean}"
+            raw_story += f"\n\n### {ep_title}\n\n{ep_clean}"
+
+            st.session_state.gen_full_narrative = full_narrative
+            st.session_state.gen_raw_story = raw_story
+
     st.session_state.original_story = clean_artifacts(raw_story)
 
     if do_editor:

@@ -47,7 +47,7 @@ MODELS = {
     "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.5, "price_out": 3.00},
     "Gemini 3.1 Flash": {"name": "Gemini 3.1 Flash", "id": "gemini-3.1-flash-lite-preview", "vendor": "google", "price_in": 0.25, "price_out": 1.50},
     "Mistral Large": {"id": "mistral-large-latest", "vendor": "mistral", "price_in": 0.5, "price_out": 1.5},
-    "Kimi K2.6": {"name": "Kimi K2.6", "id": "kimi-k2.6", "vendor": "kimi", "price_in": 0.95, "price_out": 4} # Moonshot Kimi
+    "Kimi K3": {"name": "Kimi K3", "id": "kimi-k3", "vendor": "kimi", "price_in": 3.00, "price_out": 15.00} # Moonshot Kimi
 }
 
 CONFIG_DIR = 'config'
@@ -314,7 +314,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                     {"role": "user", "content": prompt}
                 ],
                 "max_completion_tokens": kimi_max_tokens,
-                "thinking": {"type": "disabled"}
+                "reasoning_effort": "high",
             }
 
             response = requests.post("https://api.moonshot.ai/v1/chat/completions", headers=headers, json=payload)

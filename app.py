@@ -93,7 +93,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
     sys_prompt_path = os.path.join('prompts', f'system_{vendor}.txt')
     base_sys_prompt = load_file_content(sys_prompt_path) or "You are a creative writer."
 
-    editor_prompt = "You are a Senior Editor specializing in adult transformation fiction. Polish text while preserving length. Make dialogue sharp and subtextual, enhance erotic detail, remove AI cliches, and remove author remarks."
+    editor_prompt = "You are a Senior Editor specializing in adult transformation fiction. Polish text while preserving length. Make dialogue sharp and subtextual, enhance erotic detail naturally, remove AI cliches, and remove author remarks."
 
     if is_editor:
         sys_prompt = editor_prompt
@@ -215,7 +215,7 @@ def generate_dossier(seed, attempt, config):
     main_idea = config.get('main_idea', '').strip()
 
     prompt = f"""
-    TASK: Synthesize a bespoke, highly organic premise dossier for an erotic transformation story.
+    TASK: Synthesize a bespoke premise dossier for an erotic transformation story.
 
     INPUT DATA:
     - Genre: {genre}
@@ -228,18 +228,17 @@ def generate_dossier(seed, attempt, config):
     - Story Concept Hook: {main_idea if main_idea else "None provided."}
     - Pacing: {config.get('pacing', 'Steady Build')} | Onset: {config.get('transform_onset', 'Mid-Story')}
 
-    DYNAMIC PSYCHOLOGICAL ANALYSIS DIRECTIVE:
-    Analyze all the inputs above—specifically the protagonist's unique details, role, concept hook, mechanism, and selected kinks.
-    Do NOT use standard tropes or generic character archetypes. Instead, dynamically deduce:
-    1. What is this specific character's organic "Core Pride" or primary psychological armor? What fundamental belief, personal boundary, or self-image do they rely on to maintain their sense of self?
-    2. Why does the combination of the chosen mechanism and kinks directly target and erode this specific piece of their identity?
-    3. How does their baseline mindset make them fight the transformation in a way that uniquely accelerates their downfall?
+    CHARACTER & ATMOSPHERE DIRECTIVE:
+    Analyze the inputs above to establish a believable protagonist and conflict.
+    1. Describe their baseline life and 1-2 subtle personality nuances (e.g., a quiet preference, personal boundary, mild insecurity, or habit) that ground them as a realistic person.
+    2. Define the catalyst event that brings them into contact with the mechanism.
+    3. Describe the internal friction in subtle terms: how the initial changes subtly clash with their personal boundaries or self-perception without making it an overbearing drama.
 
     OUTPUT FORMAT (STRICT XML - NO OTHER TEXT):
-    <protagonist_baseline>Describe their baseline life, status, and dynamically deduced Core Pride / psychological armor.</protagonist_baseline>
-    <catalyst>The specific situation, trap, or trigger that forces them into contact with the transformation mechanism.</catalyst>
-    <psychological_conflict>The specific internal contradiction: why their organic Core Pride makes this transformation deeply agonizing yet psychologically irresistible.</psychological_conflict>
-    <blurb>A sharp 3-sentence narrative hook highlighting the unique dilemma and stakes.</blurb>
+    <protagonist_baseline>Describe their baseline life, status, and subtle personality nuances/boundaries.</protagonist_baseline>
+    <catalyst>The situation or event that triggers the transformation process.</catalyst>
+    <psychological_conflict>The subtle internal friction as the changes interact with their personal boundaries.</psychological_conflict>
+    <blurb>A 3-sentence narrative hook outlining the story premise.</blurb>
     <antagonist>{antag_instr}</antagonist>
     """
     
@@ -276,33 +275,33 @@ def generate_arc_proposal(d, model_key):
     words_per = target // num_ch
 
     prompt = f"""
-You are a story architect. Construct a unique chapter-by-chapter outline.
+You are a story architect. Construct a natural, balanced chapter-by-chapter outline.
 
 FULL DOSSIER CONTEXT:
 - Premise Hook: {d.get('blurb')}
-- Protagonist Baseline & Derived Core Pride: {d.get('protagonist_baseline')}
+- Protagonist Baseline & Subtle Nuances: {d.get('protagonist_baseline')}
 - Catalyst Event: {d.get('catalyst')}
-- Derived Psychological Conflict: {d.get('psychological_conflict')}
+- Internal Friction: {d.get('psychological_conflict')}
 - Genre: {d.get('genre')} | Motifs: {d.get('fetish_str')}
 - Total Chapters: {num_ch} (~{words_per} words/chapter)
 - Pacing: {d.get('pacing')} | Transformation Onset: {d.get('transform_onset')}
 
-CRITICAL PACING DIRECTIVES:
-1. If Onset is 'Late', early chapters MUST focus entirely on the catalyst, baseline life, and external tensions with ZERO physical changes.
-2. Every chapter must feature a clear, distinct scene objective where the protagonist tries to preserve their derived Core Pride while the situation slips.
+NARRATIVE FLOW DIRECTIVES:
+1. Ensure natural scene progression. Balance daily life, personal interactions, situational pressure, and the gradual evolution of physical/mental changes.
+2. If Onset is 'Late', early chapters MUST focus on baseline life and interactions with ZERO transformation.
 
 OUTPUT FORMAT STRICTLY:
 CHAPTER 1: [Evocative Chapter Title]
-- Scene Objective: ...
-- Internal Struggle / Escalation: ...
+- Scene Focus: ...
+- Narrative Beat: ...
 CHAPTER 2: [Evocative Chapter Title]
-- Scene Objective: ...
-- Internal Struggle / Escalation: ...
+- Scene Focus: ...
+- Narrative Beat: ...
 ...
 """
     res = call_api(prompt, model_key, max_tokens=2048)
     if res.startswith("API ERROR") or not res:
-        return "\n".join([f"CHAPTER {i+1}: Chapter {i+1}\nDevelop the narrative and transformation step-by-step." for i in range(num_ch)])
+        return "\n".join([f"CHAPTER {i+1}: Chapter {i+1}\nDevelop the story organically." for i in range(num_ch)])
     return clean_artifacts(res)
 
 def build_chapter_prompt(d, chapter_index, total_chapters, arc_phase, arc_instr, full_outline, last_chapter_text, current_state):
@@ -312,8 +311,8 @@ def build_chapter_prompt(d, chapter_index, total_chapters, arc_phase, arc_instr,
     global_bible = f"""
 # GLOBAL STORY BIBLE
 **PREMISE:** {d.get('blurb')}
-**PROTAGONIST BASELINE & CORE PRIDE:** {d.get('protagonist_baseline')}
-**DERIVED PSYCHOLOGICAL CONFLICT:** {d.get('psychological_conflict')}
+**CHARACTER PROFILE & SUBTLE NUANCES:** {d.get('protagonist_baseline')}
+**INTERNAL FRICTION:** {d.get('psychological_conflict')}
 **GENRE:** {d.get('genre')} | **POV:** {d.get('pov')}
 **CHARACTERS:** {prot_details} | **ANTAGONIST:** {d.get('antagonist')}
 **MECHANISM:** {d.get('mc_method')} | **TARGETS:** {d.get('body_parts')}
@@ -331,19 +330,19 @@ def build_chapter_prompt(d, chapter_index, total_chapters, arc_phase, arc_instr,
 
     pacing_rules = "## PACING & CONSTRAINTS\n"
     if progress_ratio <= onset_threshold:
-        pacing_rules += "🛑 SETUP PHASE: Focus entirely on normal baseline life, work/social pressures, and character pride. NO physical or mental transformation yet.\n"
+        pacing_rules += "🛑 SETUP PHASE: Focus on baseline daily life, normal interactions, and setting the scene. NO physical or mental transformation yet.\n"
     elif progress_ratio >= 0.85:
-        pacing_rules += "🔥 METAMORPHOSIS PHASE: Transformation reaches its absolute peak. Complete psychological surrender.\n"
+        pacing_rules += "🔥 METAMORPHOSIS PHASE: Transformation reaches its peak. Full acceptance/surrender.\n"
     else:
         if pacing == "Agonizing Slow Burn":
-            pacing_rules += "⚠️ SLOW BURN: Advance changes at a painfully slow crawl. Focus on internal denial and subtle behavioral slips.\n"
+            pacing_rules += "⚠️ SLOW BURN: Advance changes at a subtle crawl. Focus on quiet internal shifts and subtle physical reactions.\n"
         elif pacing == "Fast & Explicit":
             pacing_rules += "⚠️ FAST PACING: Accelerate changes dramatically and explicitly.\n"
         else:
-            pacing_rules += "⚠️ STEADY BUILD: Progress changes steadily. Balance internal struggle with noticeable physical/mental leaps.\n"
+            pacing_rules += "⚠️ STEADY BUILD: Progress changes steadily. Balance natural character interactions with noticeable transformation leaps.\n"
 
     if chapter_index < total_chapters - 1:
-        pacing_rules += f"🚫 ANTI-RUSH DIRECTIVE: This is Chapter {chapter_index + 1} of {total_chapters}. DO NOT resolve the overarching conflict yet.\n"
+        pacing_rules += f"🚫 ANTI-RUSH DIRECTIVE: Chapter {chapter_index + 1} of {total_chapters}. Keep narrative tension alive. Do not finish the overarching arc yet.\n"
 
     if d.get('custom_note'):
         pacing_rules += f"🎬 DIRECTOR NOTE: {d['custom_note']}\n"
@@ -354,15 +353,15 @@ def build_chapter_prompt(d, chapter_index, total_chapters, arc_phase, arc_instr,
 # CURRENT STATUS
 **PROTAGONIST PHYSICAL/MENTAL STATE AT START OF CHAPTER:** {current_state}
 
-**PRECEDING CHAPTER TEXT (FOR CONTINUITY & VOICE):**
-{last_chapter_text[-3500:] if last_chapter_text else "(This is Chapter 1. Establish baseline world and character pride.)"}
+**PRECEDING CHAPTER TEXT (FOR VOICE & CONTINUITY):**
+{last_chapter_text[-3500:] if last_chapter_text else "(This is Chapter 1. Ground the reader in normal daily life and authentic character dynamics.)"}
 
 # YOUR TASK
 Write Chapter {chapter_index + 1}: {arc_phase}.
 **CHAPTER BEATS TO FULFILL:**
 {arc_instr}
 
-Write the complete chapter (~{target_words} words). Focus on dialogue subtext, sensory details, and internal monologue. Avoid repetitive phrasing.
+Write the complete chapter (~{target_words} words). Write natural dialogue, sensory descriptions, and realistic character reactions. Keep the prose engaging and unforced.
 
 OUTPUT AT THE VERY END ON NEW LINES:
 <state>Updated Physical & Mental State</state>
@@ -503,9 +502,9 @@ elif st.session_state.step == "casting":
         st.markdown(f"- **Pacing:** {d.get('pacing')} | **Onset:** {d.get('transform_onset')}")
 
     st.markdown("---")
-    st.info(f"**Derived Baseline & Core Pride:**\n{d.get('protagonist_baseline')}")
-    st.info(f"**Catalyst Event / Trap:**\n{d.get('catalyst')}")
-    st.warning(f"**Derived Psychological Conflict:**\n{d.get('psychological_conflict')}")
+    st.info(f"**Character Baseline & Subtle Traits:**\n{d.get('protagonist_baseline')}")
+    st.info(f"**Catalyst Event:**\n{d.get('catalyst')}")
+    st.warning(f"**Subtle Internal Friction:**\n{d.get('psychological_conflict')}")
     st.success(f"**Narrative Premise Hook:**\n{d.get('blurb')}")
 
     if 'arc_proposal' not in d or not d['arc_proposal']:

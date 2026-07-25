@@ -65,7 +65,6 @@ SUBTEXT_CONSTRAINTS = [
     "Every major transformation beat must occur in a semi-public setting",
     "Dialogue must remain calm and mundane while internal panic builds",
     "The protagonist must pretend the changes are intentional personal choices",
-    "Key developments must be communicated through subtext and coded language"
 ]
 
 NARRATIVE_FORMATS = [

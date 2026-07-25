@@ -35,40 +35,35 @@ CONFIG_DIR = 'config'
 
 # --- COMBINATORIAL MATRIX FOR PROCEDURAL VARIANCE ---
 PRESSURE_DOMAINS = [
-    "High-stakes corporate audit / hostile takeover bid",
-    "Undercover investigation with strict surveillance",
-    "Exclusive high-society weekend retreat / gala",
-    "Crucial academic / scientific grant defense deadline",
-    "Isolated travel / delayed long-distance voyage",
-    "High-pressure political campaign or legal trial",
-    "Prestigious artistic / architectural showcase competition"
+    "Time Constraint",
+    "Peer Pressure",
+    "Financial trouble",
+    "Ambition",
+    "External pressure"
 ]
 
 TICKING_CLOCKS = [
-    "A strict 48-hour deadline before a public presentation",
-    "An upcoming mandatory medical or security evaluation",
-    "A closing window of opportunity before an opponent takes action",
-    "An unannounced surprise inspection arriving at any moment",
-    "A decaying environment or limited supply of a key resource"
+    "Deadline",
+    "Certain date",
+    "Window of opportunity",
+    "NO TIME LIMIT",
 ]
 
 RELATIONAL_DYNAMICS = [
-    "Forced collaboration with a hyper-observant professional rival",
-    "Tense interactions with an estranged mentor or family member",
-    "Maintaining authority over skeptical subordinates who suspect something",
-    "Cat-and-mouse tension with a persistent outside investigator",
-    "A fragile alliance where neither party fully trusts the other"
+    "Forced collaboration with a rival or nemesis",
+    "Loving relationship with partner/friend/family",
+    "Losing touch with peers due to transformation",
+    "Cat-and-mouse tension",
+    "A fragile alliance"
 ]
 
 SUBTEXT_CONSTRAINTS = [
-    "Must conceal all physical/mental alterations under strict professional decorum",
-    "Every major transformation beat must occur in a semi-public setting",
-    "Dialogue must remain calm and mundane while internal panic builds",
-    "The protagonist must pretend the changes are intentional personal choices",
+    "Tries to hide the transformation from others, but fails",
+    "Tries to find help from others to stop the transformation",
 ]
 
 NARRATIVE_FORMATS = [
-    "Linear Escalation (Chronological build)",
+    "Linear Escalation (Chronological, steadily increasing tension)",
     "In Media Res (Opening at a late-stage crisis, then flashing back)",
     "Dual Perspective (Alternating between protagonist and an observer/antagonist)",
     "Epistolary Hybrid (Interspersed with medical logs, surveillance notes, or private memos)",

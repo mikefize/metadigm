@@ -45,6 +45,8 @@ if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "outpu
 if "show_prompt_debug" not in st.session_state: st.session_state.show_prompt_debug = False
 if "last_sys_prompt" not in st.session_state: st.session_state.last_sys_prompt = ""
 if "last_user_prompt" not in st.session_state: st.session_state.last_user_prompt = ""
+if "last_raw_response" not in st.session_state: st.session_state.last_raw_response = ""
+if "last_api_payload" not in st.session_state: st.session_state.last_api_payload = ""
 
 # --- UTILS ---
 def load_list(filename):
@@ -104,11 +106,16 @@ def track_cost(in_tok, out_tok, model_config):
 def render_prompt_debug():
     if not st.session_state.get("show_prompt_debug", False):
         return
-    with st.sidebar.expander("Prompt Debug", expanded=False):
-        st.caption("Last System Prompt")
+    with st.expander("Prompt Debug", expanded=False):
+        st.caption("System Prompt")
         st.code(st.session_state.get("last_sys_prompt", ""))
-        st.caption("Last User Prompt")
+        st.caption("User Prompt")
         st.code(st.session_state.get("last_user_prompt", ""))
+        if st.session_state.get("last_api_payload"):
+            st.caption("API Payload")
+            st.code(st.session_state.get("last_api_payload", ""))
+        st.caption("Raw LLM Response")
+        st.code(st.session_state.get("last_raw_response", ""))
 
 # --- API HANDLER ---
 def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192):
@@ -131,6 +138,8 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
 
     st.session_state.last_sys_prompt = sys_prompt
     st.session_state.last_user_prompt = prompt
+    st.session_state.last_raw_response = ""
+    st.session_state.last_api_payload = ""
 
     try:
         if vendor == 'anthropic':
@@ -140,6 +149,11 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                 messages=[{"role": "user", "content": prompt}]
             )
             track_cost(resp.usage.input_tokens, resp.usage.output_tokens, m_cfg)
+            try:
+                st.session_state.last_raw_response = json.dumps(resp.__dict__, default=str, indent=2)
+            except Exception:
+                st.session_state.last_raw_response = str(resp)
+            st.session_state.last_api_payload = json.dumps({"model": m_cfg['id'], "system": sys_prompt, "messages": [{"role": "user", "content": prompt}]}, indent=2)
             return resp.content[0].text
 
         elif vendor == 'google':
@@ -152,8 +166,18 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
             resp = model.generate_content(prompt, generation_config={"temperature": 1.0, "max_output_tokens": max_tokens}, safety_settings=safe)
             if hasattr(resp, 'prompt_feedback') and resp.prompt_feedback.block_reason:
                 return f"API ERROR: Blocked by Google Safety Filter ({resp.prompt_feedback.block_reason})."
-            try: text = resp.text
-            except ValueError: return "API ERROR: Generation halted mid-stream."
+            try:
+                text = resp.text
+            except ValueError:
+                return "API ERROR: Generation halted mid-stream."
+            raw = getattr(resp, 'text', None)
+            if raw is None:
+                try:
+                    raw = json.dumps(resp.to_dict(), default=str, indent=2)
+                except Exception:
+                    raw = str(resp)
+            st.session_state.last_raw_response = raw
+            st.session_state.last_api_payload = json.dumps({"model": m_cfg['id'], "system_instruction": sys_prompt, "prompt": prompt, "generation_config": {"temperature": 1.0, "max_output_tokens": max_tokens}}, indent=2)
             if resp.usage_metadata: track_cost(resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count, m_cfg)
             return text
 
@@ -181,6 +205,8 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                 del payload["max_tokens"]
 
             response = requests.post(endpoints[vendor], headers=headers, json=payload, timeout=600)
+            st.session_state.last_api_payload = json.dumps(payload, indent=2)
+            st.session_state.last_raw_response = response.text
             if response.status_code != 200:
                 return f"API ERROR: HTTP {response.status_code} - {response.text}"
             data = response.json()
@@ -407,12 +433,13 @@ st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
 st.session_state.show_prompt_debug = st.sidebar.checkbox("Show Prompt Debug", value=st.session_state.get("show_prompt_debug", False))
-render_prompt_debug()
 
 style_files = [f for f in os.listdir(CONFIG_DIR) if f.startswith('style_') and f.endswith('.txt')] if os.path.exists(CONFIG_DIR) else []
 style_choice = st.sidebar.selectbox("Style Profile", style_files if style_files else ["style_gritty.txt"])
 
 st.sidebar.metric("Budget Spent", f"${st.session_state.stats['cost']:.4f}")
+
+render_prompt_debug()
 
 # --- UI STEP 1: SETUP ---
 if st.session_state.step == "setup":

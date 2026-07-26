@@ -43,6 +43,8 @@ if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
 if "manual_config" not in st.session_state: st.session_state.manual_config = {}
 if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
 if "show_prompt_debug" not in st.session_state: st.session_state.show_prompt_debug = False
+if "last_sys_prompt" not in st.session_state: st.session_state.last_sys_prompt = ""
+if "last_user_prompt" not in st.session_state: st.session_state.last_user_prompt = ""
 
 # --- UTILS ---
 def load_list(filename):
@@ -78,12 +80,35 @@ def get_secret(key_name):
     try: return st.secrets[key_name]
     except: return ""
 
+
+def save_setup_snapshot(manual_config, seed, pov, style_file):
+    snapshot = dict(manual_config or {})
+    snapshot.update({
+        "seed": seed,
+        "pov": pov,
+        "style_file": style_file,
+    })
+    st.session_state.manual_config = snapshot
+    st.session_state.setup_snapshot = snapshot
+    st.session_state.seed = seed
+
+
 def track_cost(in_tok, out_tok, model_config):
     st.session_state.stats['input'] += in_tok
     st.session_state.stats['output'] += out_tok
     c_in = (in_tok / 1_000_000) * model_config['price_in']
     c_out = (out_tok / 1_000_000) * model_config['price_out']
     st.session_state.stats['cost'] += (c_in + c_out)
+
+
+def render_prompt_debug():
+    if not st.session_state.get("show_prompt_debug", False):
+        return
+    with st.sidebar.expander("Prompt Debug", expanded=False):
+        st.caption("Last System Prompt")
+        st.code(st.session_state.get("last_sys_prompt", ""))
+        st.caption("Last User Prompt")
+        st.code(st.session_state.get("last_user_prompt", ""))
 
 # --- API HANDLER ---
 def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192):
@@ -259,7 +284,7 @@ def generate_dossier(seed, attempt, config):
         "blurb": extract_tag(res, "blurb"),
         "raw_response": res,
         "style_guide": style_guide,
-        "num_chapters": config.get('num_chapters', 7),
+        "num_chapters": config.get('num_chapters', 7) + (1 if config.get('add_epilogue', False) else 0),
         "target_words": config.get('target_words', 10000),
         "main_idea": main_idea,
         "pacing": config.get('pacing', 'Steady Build'),
@@ -268,9 +293,7 @@ def generate_dossier(seed, attempt, config):
     }
 
 def generate_arc_proposal(d, model_key):
-    base_ch = d.get('num_chapters', 7)
-    add_epilogue = d.get('add_epilogue', False)
-    num_ch = base_ch + 1 if add_epilogue else base_ch
+    num_ch = d.get('num_chapters', 7)
     target = d.get('target_words', 10000)
     words_per = target // num_ch
 
@@ -325,11 +348,14 @@ def build_chapter_prompt(d, chapter_index, total_chapters, arc_phase, arc_instr,
     progress_ratio = (chapter_index + 1) / total_chapters
     onset = d.get('transform_onset', 'Mid-Story')
     pacing = d.get('pacing', 'Steady Build')
+    is_epilogue = bool(d.get('add_epilogue', False) and chapter_index == total_chapters - 1)
     
     onset_threshold = 0.15 if onset == 'Chapter 1' else (0.35 if onset == 'Mid-Story' else 0.60)
 
     pacing_rules = "## PACING & CONSTRAINTS\n"
-    if progress_ratio <= onset_threshold:
+    if is_epilogue:
+        pacing_rules += "🌙 EPILOGUE PHASE: This is the closing aftermath chapter. Focus on emotional resolution, lingering change, and quiet closure rather than introducing a new major transformation.\n"
+    elif progress_ratio <= onset_threshold:
         pacing_rules += "🛑 SETUP PHASE: Focus on baseline daily life, normal interactions, and setting the scene. NO physical or mental transformation yet.\n"
     elif progress_ratio >= 0.85:
         pacing_rules += "🔥 METAMORPHOSIS PHASE: Transformation reaches its peak. Full acceptance/surrender.\n"
@@ -381,6 +407,7 @@ st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
 st.session_state.show_prompt_debug = st.sidebar.checkbox("Show Prompt Debug", value=st.session_state.get("show_prompt_debug", False))
+render_prompt_debug()
 
 style_files = [f for f in os.listdir(CONFIG_DIR) if f.startswith('style_') and f.endswith('.txt')] if os.path.exists(CONFIG_DIR) else []
 style_choice = st.sidebar.selectbox("Style Profile", style_files if style_files else ["style_gritty.txt"])
@@ -391,58 +418,77 @@ st.sidebar.metric("Budget Spent", f"${st.session_state.stats['cost']:.4f}")
 if st.session_state.step == "setup":
     st.title("🎬 The Metamorphosis Engine: Custom Setup")
 
+    snapshot = st.session_state.get("setup_snapshot") or st.session_state.get("manual_config", {})
+    saved_protagonists = snapshot.get("protagonists", [])
+    saved_body_details = snapshot.get("body_details", [])
+    saved_weighted_fetishes = snapshot.get("weighted_fetishes", {})
+    saved_antag = snapshot.get("antagonist", {"include": True})
+
     col1, col2, col3 = st.columns(3)
     manual_config = {'style_file': style_choice}
 
     with col1:
         st.subheader("1. Core Setup")
-        seed = st.text_input("Story Seed", "Entropy")
-        pov = st.selectbox("Point of View", ["Third Person (She/He)", "First Person (I)", "Second Person (You)", "Antagonist Perspective"])
+        seed = st.text_input("Story Seed", value=snapshot.get("seed", st.session_state.get("seed", "Entropy")))
+        pov_options = ["Third Person (She/He)", "First Person (I)", "Second Person (You)", "Antagonist Perspective"]
+        saved_pov = snapshot.get("pov", pov_options[0])
+        pov = st.selectbox("Point of View", pov_options, index=pov_options.index(saved_pov) if saved_pov in pov_options else 0)
         manual_config['pov'] = pov
 
     with col2:
         st.subheader("2. Length & Pacing")
-        manual_config['num_chapters'] = st.number_input("Number of Chapters", 3, 15, 7)
-        manual_config['target_words'] = st.number_input("Target Total Word Count", 3000, 30000, 10000, step=500)
-        manual_config['add_epilogue'] = st.checkbox("Add Post-Transformation Epilogue", value=False)
+        manual_config['num_chapters'] = st.number_input("Number of Chapters", 3, 15, value=int(snapshot.get('num_chapters', 7)))
+        manual_config['target_words'] = st.number_input("Target Total Word Count", 3000, 30000, value=int(snapshot.get('target_words', 10000)), step=500)
+        manual_config['add_epilogue'] = st.checkbox("Add Post-Transformation Epilogue", value=bool(snapshot.get('add_epilogue', False)))
 
-        enable_phys = st.checkbox("Physical Transformation?", value=True)
+        enable_phys = st.checkbox("Physical Transformation?", value=bool(snapshot.get('enable_physical', True)))
         manual_config['enable_physical'] = enable_phys
         if enable_phys and os.path.exists(CONFIG_DIR):
             b_list = load_list('body_parts.txt')
-            selected_b = st.multiselect("Body Focus Target Areas (Max 3)", b_list, max_selections=3)
+            selected_b = st.multiselect("Body Focus Target Areas (Max 3)", b_list, max_selections=3, default=[d['part'] for d in saved_body_details if d.get('part') in b_list])
             body_details = []
+            detail_map = {d.get('part'): d for d in saved_body_details if d.get('part')}
             for idx, bp in enumerate(selected_b):
+                saved_detail = detail_map.get(bp, {})
                 with st.expander(f"Focus: {bp}", expanded=True):
-                    intensity = st.select_slider("Intensity", options=["Subtle", "Pronounced", "Extreme"], value="Pronounced", key=f"phys_int_{idx}")
-                    remark = st.text_input("Quality Remark (e.g. natural, surgical, fake)", key=f"phys_rem_{idx}")
+                    intensity = st.select_slider("Intensity", options=["Subtle", "Pronounced", "Extreme"], value=saved_detail.get('intensity', 'Pronounced'), key=f"phys_int_{idx}")
+                    remark = st.text_input("Quality Remark (e.g. natural, surgical, fake)", value=saved_detail.get('remark', ''), key=f"phys_rem_{idx}")
                     body_details.append({"part": bp, "intensity": intensity, "remark": remark.strip()})
             manual_config['body_details'] = body_details
 
         st.markdown("---")
-        manual_config['pacing'] = st.select_slider("Overall Story Pacing", options=["Fast & Explicit", "Steady Build", "Agonizing Slow Burn"], value="Steady Build")
-        manual_config['transform_onset'] = st.select_slider("Transformation Onset", options=["Chapter 1", "Mid-Story", "Late (Heavy Context)"], value="Mid-Story")
+        pacing_options = ["Fast & Explicit", "Steady Build", "Agonizing Slow Burn"]
+        pacing_value = snapshot.get('pacing', 'Steady Build')
+        transform_options = ["Chapter 1", "Mid-Story", "Late (Heavy Context)"]
+        transform_value = snapshot.get('transform_onset', 'Mid-Story')
+        manual_config['pacing'] = st.select_slider("Overall Story Pacing", options=pacing_options, value=pacing_value if pacing_value in pacing_options else 'Steady Build')
+        manual_config['transform_onset'] = st.select_slider("Transformation Onset", options=transform_options, value=transform_value if transform_value in transform_options else 'Mid-Story')
 
     with col3:
         st.subheader("3. Cast & Setting")
         st.caption("Protagonist(s)")
-        num_prot = st.number_input("Number of Protagonists", 1, 3, 1)
+        num_prot = st.number_input("Number of Protagonists", 1, 3, value=max(1, min(3, len(saved_protagonists) if saved_protagonists else 1)))
         prots = []
         for i in range(int(num_prot)):
+            saved_p = saved_protagonists[i] if i < len(saved_protagonists) else {}
             with st.expander(f"Protagonist {i+1}", expanded=(i==0)):
-                p_name = st.text_input(f"Name #{i+1} (blank = random)", key=f"pname_{i}")
-                p_gender = st.selectbox(f"Gender #{i+1}", ["Female", "Male", "Non-binary"], index=0, key=f"pgender_{i}")
-                p_info = st.text_input(f"Info #{i+1} (age/job/personality)", key=f"pinfo_{i}")
+                p_name = st.text_input(f"Name #{i+1} (blank = random)", value=saved_p.get('name',''), key=f"pname_{i}")
+                p_gender_options = ["Female", "Male", "Non-binary"]
+                p_gender_value = saved_p.get('gender', 'Female')
+                p_gender = st.selectbox(f"Gender #{i+1}", p_gender_options, index=p_gender_options.index(p_gender_value) if p_gender_value in p_gender_options else 0, key=f"pgender_{i}")
+                p_info = st.text_input(f"Info #{i+1} (age/job/personality)", value=saved_p.get('info',''), key=f"pinfo_{i}")
                 prots.append({"name": p_name.strip(), "gender": p_gender, "info": p_info.strip()})
         manual_config['protagonists'] = prots
 
         st.caption("Antagonist")
-        include_antag = st.checkbox("Include Antagonist", value=True)
+        include_antag = st.checkbox("Include Antagonist", value=bool(saved_antag.get('include', True)))
         if include_antag:
             with st.expander("Antagonist Details", expanded=True):
-                a_name = st.text_input("Antagonist Name")
-                a_gender = st.selectbox("Antagonist Gender", ["Female", "Male", "Non-binary"], index=0)
-                a_info = st.text_input("Additional Info")
+                a_name = st.text_input("Antagonist Name", value=saved_antag.get('name',''))
+                a_gender_options = ["Female", "Male", "Non-binary"]
+                a_gender_value = saved_antag.get('gender', 'Female')
+                a_gender = st.selectbox("Antagonist Gender", a_gender_options, index=a_gender_options.index(a_gender_value) if a_gender_value in a_gender_options else 0)
+                a_info = st.text_input("Additional Info", value=saved_antag.get('info',''))
                 manual_config['antagonist'] = {"name": a_name.strip(), "gender": a_gender, "info": a_info.strip(), "include": True}
         else:
             manual_config['antagonist'] = {"include": False}
@@ -450,28 +496,29 @@ if st.session_state.step == "setup":
         if os.path.exists(CONFIG_DIR):
             g_list = [None] + load_list('genres.txt')
             m_list = [None] + load_list('mc_methods.txt')
-            manual_config['genre'] = st.selectbox("Genre", g_list, format_func=lambda x: "Random" if x is None else x)
-            manual_config['mc_method'] = st.selectbox("Transformation Mechanism", m_list, format_func=lambda x: "Random" if x is None else x)
+            saved_genre = snapshot.get('genre')
+            saved_mc = snapshot.get('mc_method')
+            manual_config['genre'] = st.selectbox("Genre", g_list, index=g_list.index(saved_genre) if saved_genre in g_list else 0, format_func=lambda x: "Random" if x is None else x)
+            manual_config['mc_method'] = st.selectbox("Transformation Mechanism", m_list, index=m_list.index(saved_mc) if saved_mc in m_list else 0, format_func=lambda x: "Random" if x is None else x)
 
     st.markdown("---")
     st.subheader("4. Main Story Concept & Kinks")
-    manual_config['main_idea'] = st.text_area("Main Story Idea / High-Level Concept", height=100, placeholder="Describe the premise, specific plot hook, or character dynamics...")
+    manual_config['main_idea'] = st.text_area("Main Story Idea / High-Level Concept", value=snapshot.get('main_idea', ''), height=100, placeholder="Describe the premise, specific plot hook, or character dynamics...")
 
     if os.path.exists(CONFIG_DIR):
         f_list = load_list('fetishes.txt')
-        selected_f = st.multiselect("Select Kinks/Motifs (Max 4)", f_list, max_selections=4)
+        selected_f = st.multiselect("Select Kinks/Motifs (Max 4)", f_list, max_selections=4, default=list(saved_weighted_fetishes.keys()))
         weighted_fetishes = {}
         if selected_f:
             cols = st.columns(len(selected_f))
             for idx, f in enumerate(selected_f):
                 with cols[idx]:
-                    weight = st.slider(f"'{f}' Priority", 1, 3, 2, key=f"w_{f}")
+                    weight = st.slider(f"'{f}' Priority", 1, 3, value=int(saved_weighted_fetishes.get(f, 2)), key=f"w_{f}")
                     weighted_fetishes[f] = weight
         manual_config['weighted_fetishes'] = weighted_fetishes
 
     if st.button("🚀 Draft Premise & Dossier", use_container_width=True):
-        st.session_state.manual_config = manual_config
-        st.session_state.seed = seed
+        save_setup_snapshot(manual_config, seed, pov, style_choice)
         with st.spinner("Synthesizing Dossier..."):
             d = generate_dossier(seed, st.session_state.attempt, manual_config)
             if d and "error" in d:
@@ -518,8 +565,9 @@ elif st.session_state.step == "casting":
     edited_arc = st.text_area("Review and edit the chapter-by-chapter outline as needed:", value=d.get('arc_proposal', ''), height=240)
     d['arc_proposal'] = edited_arc
 
-    note = st.text_area("Director's Note (Optional specific constraints)", placeholder="e.g. Ensure protagonist resists until Chapter 5.")
+    note = st.text_area("Director's Note (Optional specific constraints)", value=d.get('custom_note', ''), placeholder="e.g. Ensure protagonist resists until Chapter 5.")
     d['custom_note'] = note
+    st.session_state.dossier = d
 
     b1, b2, b3 = st.columns(3)
     if b1.button("✅ Action! Begin Writing", use_container_width=True):

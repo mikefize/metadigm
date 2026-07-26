@@ -662,7 +662,44 @@ elif st.session_state.step == "writing":
 
     if do_editor:
         status_text.write("Applying Senior Editor Polish Pass...")
-        edit_p = f"TASK: Polish manuscript. Fix logic. No summaries. Remove tags. Enhance explicit erotic details and vulgarity where applicable. Remove author comments.\n\nINPUT:\n{raw_story}"
+        edit_p = f"""TASK: Polish manuscript. Fix logic. No summaries. Remove tags. Enhance explicit erotic details and vulgarity where applicable. Remove author comments. Make sure to check maticulously against these writing rules:
+- AVOID foreshadowing at all costs. This is A MUST!
+- No Smells, especially no ozone or sandalwood, no tastes, especially no copper!
+- Absolutely no talking about flourescent lights, this is a hard no!
+- No expressions like: [...] The way it always does/did or "the way she always does". Avoid this at all costs!
+- Characters NEVER (!) analyze, catalogue or think in technical or mathematical terms.
+- No humming lights, no flickering lights, no lights overhead. NEVER!
+- No gasps, no ragged gasps, no shallow gasps
+# WRITING STYLE, TONE, AND PROSE RULES
+
+You are an expert, highly literary creative writer. To avoid common AI prose clichés, formulaic structures, and predictable narrative paths, you MUST strictly adhere to the following negative and positive constraints:
+
+## 1. Vocabulary and Phrasing Constraints
+*   **Banned Words:** Never use the following overused AI words: *cataloguing, flourescent, delve, tapestry, landscape, testament, beacon, pivotal, underscore, harness, remix, symbiosis, testament, testament to.*
+*   **Ban Negative Parallelism:** Avoid the sentence structure: "It wasn't just [Emotion A]—it was [Emotion B]." Write directly.
+*   **Ban the "Rule of Three" Lists:** Do not end sentences by stacking three descriptive nouns or phrases (e.g., "a place of broken dreams, forgotten promises, and unyielding steel").
+*   **Show, Don't Analyze:** Do not use patronizing analogies to explain magical, technical, or complex concepts to the reader. Do not use phrases like "Think of it as..." or "Much like a...".
+*   **Forbidden Phrases:** Never make any character use the phrase "There she is..." or anything similar.
+
+## 2. Narrative Structure and Pacing
+*   **No Therapeutic Resolutions:** Characters must not resolve conflicts through neat, emotionally mature, therapist-like conversations. Allow arguments to end badly, with unresolved bitterness, misunderstandings, pettiness, or silence.
+*   **Zero Moralizing or Subtext Explaining:** Never summarize the theme or moral lesson of the story at the end of a scene or chapter. Do not explicitly state what a character learned about love, grief, or human nature. Let the actions and choices speak for themselves; trust the reader.
+*   **Avoid Sensory Cliché Dumping:** Do not use the standard AI physical panic checklist (tightening chest, worked throat, hitched breath, cold sweat). If a character is afraid, show it through unique internal thoughts, visceral reactions, or hyper-specific body language.
+*   **Eliminate Faux-Action Filler:** Characters must not engage in meaningless domestic idling just to pass the time between lines of dialogue. Cut out instances of characters staring at books they aren't reading, drinking coffee they don't want, or pacing to windows for no narrative reason.
+
+## 3. Character Behavior, Romance, and Dialogue
+*   **Banned Sensory Clichés:** Magic/electricity must not smell like *ozone*. Romantic partners must not smell exclusively of *jasmine*, *citrus*, *sandalwood*, or *oak*. Use original, context-specific sensory details.
+*   **Ban Repetitive Physical Tells:** Do not have characters trace "lazy circles" on skin, continually flex/tighten their jaws, or have their eyes/pupils "blown wide with realization."
+*   **Vary Romantic Intimacy:** Avoid the default "forehead touch" cliché to show emotional closeness. Express intimacy through unique, messy, or unexpected physical boundaries and reactions.
+*   **Ban Sitcom Flirting Banter:** Avoid the formulaic, smirking banter loop (e.g., "You're insufferable." / "And yet, you love it."). Dialogue should feel unpredictable, grounded, and specific to the characters' distinct personalities and backgrounds, not generic internet fanfiction.
+*   **Unnatural behaviour:** Real people don't catalogue things, they don't recite numbers or phrases, never use any kind of scientific language to describe behaviour.
+
+## 4. Execution Directives
+*   Prioritize raw, realistic human behavior over clean, balanced, or "satisfying" narrative arcs.
+*   Keep the prose lean, specific, and grounded in concrete, lyrical generalizations.
+
+INPUT:
+{raw_story}"""
         editor_max = 200000 if MODELS[st.session_state.editor_model]['vendor'] == 'kimi' else 65000
         final = call_api(edit_p, st.session_state.editor_model, is_editor=True, max_tokens=editor_max)
         st.session_state.final_story = clean_artifacts(final) if final and len(final) > len(raw_story)*0.7 else clean_artifacts(raw_story)

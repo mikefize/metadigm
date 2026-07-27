@@ -83,6 +83,26 @@ def get_secret(key_name):
     except: return ""
 
 
+def extract_anthropic_message_text(resp):
+    blocks = getattr(resp, "content", None)
+    if not blocks:
+        return ""
+    if isinstance(blocks, str):
+        return blocks.strip()
+    text_pieces = []
+    for block in blocks:
+        if block is None:
+            continue
+        block_type = getattr(block, "type", "")
+        if block_type == "thinking":
+            continue
+        if hasattr(block, "text"):
+            text_pieces.append(block.text)
+        elif isinstance(block, str):
+            text_pieces.append(block)
+    return "".join(text_pieces).strip()
+
+
 def save_setup_snapshot(manual_config, seed, pov, style_file):
     snapshot = dict(manual_config or {})
     snapshot.update({
@@ -154,7 +174,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
             except Exception:
                 st.session_state.last_raw_response = str(resp)
             st.session_state.last_api_payload = json.dumps({"model": m_cfg['id'], "system": sys_prompt, "messages": [{"role": "user", "content": prompt}]}, indent=2)
-            return resp.content[0].text
+            return extract_anthropic_message_text(resp)
 
         elif vendor == 'google':
             genai.configure(api_key=st.session_state.google_key)

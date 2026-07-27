@@ -143,6 +143,26 @@ def debug_print_prompt(system_prompt, user_prompt, model_key):
     print(user_prompt)
     print("======================================\n")
 
+
+def extract_anthropic_message_text(resp):
+    blocks = getattr(resp, "content", None)
+    if not blocks:
+        return ""
+    if isinstance(blocks, str):
+        return blocks.strip()
+    text_pieces = []
+    for block in blocks:
+        if block is None:
+            continue
+        block_type = getattr(block, "type", "")
+        if block_type == "thinking":
+            continue
+        if hasattr(block, "text"):
+            text_pieces.append(block.text)
+        elif isinstance(block, str):
+            text_pieces.append(block)
+    return "".join(text_pieces).strip()
+
 # --- API HANDLERS ---
 def track_cost(in_tok, out_tok, model_config):
     st.session_state.stats['input'] += in_tok
@@ -209,7 +229,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
                 messages=[{"role": "user", "content": prompt}]
             )
             track_cost(resp.usage.input_tokens, resp.usage.output_tokens, m_cfg)
-            return resp.content[0].text
+            return extract_anthropic_message_text(resp)
             
         # GOOGLE
         elif m_cfg['vendor'] == 'google':

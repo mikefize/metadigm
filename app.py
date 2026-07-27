@@ -709,8 +709,9 @@ elif st.session_state.step == "writing":
 
     if do_editor:
         status_text.write("Applying Senior Editor Polish Pass...")
-        edit_p = f"""TASK: Polish manuscript. Fix logic. No summaries. Remove tags. Enhance explicit erotic details and vulgarity where applicable. Remove author comments. Make sure to check maticulously against these writing rules:
-- AVOID foreshadowing at all costs. This is A MUST!
+        edit_p = f"""TASK: Polish manuscript. Fix logic. No summaries. Remove tags. Don't be afraid to change the manuscript, don't hold back. Keep its essence but fix the writing. Enhance explicit erotic details and vulgarity where applicable. Remove author comments. Make sure to check maticulously against these writing rules:
+        - No Metaphors!
+        - AVOID foreshadowing at all costs. This is A MUST!
 - No Smells, especially no ozone or sandalwood, no tastes, especially no copper!
 - Absolutely no talking about flourescent lights, this is a hard no!
 - No expressions like: [...] The way it always does/did or "the way she always does". Avoid this at all costs!
@@ -718,8 +719,6 @@ elif st.session_state.step == "writing":
 - No humming lights, no flickering lights, no lights overhead. NEVER!
 - No gasps, no ragged gasps, no shallow gasps
 # WRITING STYLE, TONE, AND PROSE RULES
-
-You are an expert, highly literary creative writer. To avoid common AI prose clichés, formulaic structures, and predictable narrative paths, you MUST strictly adhere to the following negative and positive constraints:
 
 ## 1. Vocabulary and Phrasing Constraints
 *   **Banned Words:** Never use the following overused AI words: *cataloguing, flourescent, delve, tapestry, landscape, testament, beacon, pivotal, underscore, harness, remix, symbiosis, testament, testament to.*
@@ -744,6 +743,11 @@ You are an expert, highly literary creative writer. To avoid common AI prose cli
 ## 4. Execution Directives
 *   Prioritize raw, realistic human behavior over clean, balanced, or "satisfying" narrative arcs.
 *   Keep the prose lean, specific, and grounded in concrete, lyrical generalizations.
+
+Example for writing:
+Bad Style (Do NOT write like this): "A cold shiver ran down his spine, a testament to the lingering darkness that danced in the room like a silent watcher."
+
+Good Style (Write like this): "He felt cold. The room was dark and silent."
 
 INPUT:
 {raw_story}"""

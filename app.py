@@ -24,7 +24,7 @@ MODELS = {
     "Grok 4.50": {"name": "Grok 4.50", "id": "grok-4.5", "vendor": "xai", "price_in": 2.00, "price_out": 6.00},
     "Grok 4.20": {"name": "Grok 4.20", "id": "grok-4.20-0309-reasoning", "vendor": "xai", "price_in": 1.25, "price_out": 2.50},
     "Claude 4.6 Sonnet": {"name": "Claude 4.5 Sonnet", "id": "claude-sonnet-4-6", "vendor": "anthropic", "price_in": 3.00, "price_out": 15.00},
-    "Claude 4.6 Opus": {"name": "Claude 4.5 Opus", "id": "claude-opus-4-6", "vendor": "anthropic", "price_in": 5.00, "price_out": 25.00},
+    "Claude 5 Opus": {"name": "Claude 5 Opus", "id": "claude-opus-5", "vendor": "anthropic", "price_in": 5.00, "price_out": 25.00},
     "Gemini 3.1 Pro": {"name": "Gemini 3 Pro", "id": "gemini-3.1-pro-preview", "vendor": "google", "price_in": 2.00, "price_out": 12.00},
     "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.50, "price_out": 3.00},
     "Gemini 3.1 Flash": {"name": "Gemini 3.1 Flash", "id": "gemini-3.1-flash-lite-preview", "vendor": "google", "price_in": 0.25, "price_out": 1.50},

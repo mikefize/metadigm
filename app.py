@@ -145,7 +145,7 @@ def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192
     sys_prompt_path = os.path.join('prompts', f'system_{vendor}.txt')
     base_sys_prompt = load_file_content(sys_prompt_path) or "You are a creative writer."
 
-    editor_prompt = "You are a Senior Editor specializing in adult transformation fiction. Polish text while preserving length. Make dialogue sharp and subtextual, enhance erotic detail naturally, remove AI cliches, and remove author remarks."
+    editor_prompt = "You are a Senior Editor specializing in adult transformation fiction and making AI text sound more natural. Polish text while preserving length. Make dialogue sharp and subtextual, enhance erotic detail naturally, remove AI cliches, and remove author remarks."
 
     if is_editor:
         sys_prompt = editor_prompt
@@ -284,6 +284,10 @@ def generate_dossier(seed, attempt, config):
         body_string = "NONE. MENTAL CHANGE ONLY."
 
     main_idea = config.get('main_idea', '').strip()
+    user_baseline = config.get('protagonist_baseline', '').strip()
+    user_catalyst = config.get('catalyst', '').strip()
+    user_conflict = config.get('psychological_conflict', '').strip()
+    user_blurb = config.get('blurb', '').strip()
 
     prompt = f"""
     TASK: Synthesize a bespoke premise dossier for an erotic transformation story.
@@ -304,14 +308,32 @@ def generate_dossier(seed, attempt, config):
     1. Describe their baseline life and 1-2 subtle personality nuances (e.g., a quiet preference, personal boundary, mild insecurity, or habit) that ground them as a realistic person.
     2. Define the catalyst event that brings them into contact with the mechanism.
     3. Describe the internal friction in subtle terms: how the initial changes subtly clash with their personal boundaries or self-perception without making it an overbearing drama.
-
-    OUTPUT FORMAT (STRICT XML - NO OTHER TEXT):
-    <protagonist_baseline>Describe their baseline life, status, and subtle personality nuances/boundaries.</protagonist_baseline>
-    <catalyst>The situation or event that triggers the transformation process.</catalyst>
-    <psychological_conflict>The subtle internal friction as the changes interact with their personal boundaries.</psychological_conflict>
-    <blurb>A 3-sentence narrative hook outlining the story premise.</blurb>
-    <antagonist>{antag_instr}</antagonist>
     """
+
+    if user_baseline or user_catalyst or user_conflict or user_blurb:
+        prompt += "\nUSER-PROVIDED PREMISE COMPONENTS:\n"
+        if user_baseline:
+            prompt += f"- Protagonist Baseline: {user_baseline}\n"
+        if user_catalyst:
+            prompt += f"- Catalyst Event: {user_catalyst}\n"
+        if user_conflict:
+            prompt += f"- Subtle Internal Friction: {user_conflict}\n"
+        if user_blurb:
+            prompt += f"- Narrative Premise Hook: {user_blurb}\n"
+        prompt += (
+            "\nIMPORTANT: Use the user-provided premise components above exactly in the corresponding XML tags. "
+            "Do not alter them except for formatting, and only generate missing components. "
+            "If a component is empty, generate it based on the other story inputs.\n"
+        )
+
+    prompt += f"\nOUTPUT FORMAT (STRICT XML - NO OTHER TEXT):\n"
+    prompt += (
+        "<protagonist_baseline>Describe their baseline life, status, and subtle personality nuances/boundaries.</protagonist_baseline>\n"
+        "<catalyst>The situation or event that triggers the transformation process.</catalyst>\n"
+        "<psychological_conflict>The subtle internal friction as the changes interact with their personal boundaries.</psychological_conflict>\n"
+        "<blurb>A 3-sentence narrative hook outlining the story premise.</blurb>\n"
+        f"<antagonist>{antag_instr}</antagonist>\n"
+    )
     
     res = call_api(prompt, st.session_state.writer_model, style_guide)
     if not res or res.startswith("API ERROR"):
@@ -324,10 +346,10 @@ def generate_dossier(seed, attempt, config):
         "protagonist_gender": prots[0].get('gender', 'Female'),
         "antagonist": extract_tag(res, "antagonist") or antag_instr,
         "protagonists": prots,
-        "protagonist_baseline": extract_tag(res, "protagonist_baseline"),
-        "catalyst": extract_tag(res, "catalyst"),
-        "psychological_conflict": extract_tag(res, "psychological_conflict"),
-        "blurb": extract_tag(res, "blurb"),
+        "protagonist_baseline": config.get('protagonist_baseline') or extract_tag(res, "protagonist_baseline"),
+        "catalyst": config.get('catalyst') or extract_tag(res, "catalyst"),
+        "psychological_conflict": config.get('psychological_conflict') or extract_tag(res, "psychological_conflict"),
+        "blurb": config.get('blurb') or extract_tag(res, "blurb"),
         "raw_response": res,
         "style_guide": style_guide,
         "num_chapters": config.get('num_chapters', 7) + (1 if config.get('add_epilogue', False) else 0),
@@ -552,6 +574,33 @@ if st.session_state.step == "setup":
     st.subheader("4. Main Story Concept & Kinks")
     manual_config['main_idea'] = st.text_area("Main Story Idea / High-Level Concept", value=snapshot.get('main_idea', ''), height=100, placeholder="Describe the premise, specific plot hook, or character dynamics...")
 
+    st.markdown("---")
+    st.subheader("5. Editable Premise Components")
+    manual_config['protagonist_baseline'] = st.text_area(
+        "Character Baseline",
+        value=snapshot.get('protagonist_baseline', ''),
+        height=100,
+        placeholder="Leave blank for the AI to generate a baseline life and subtle character details..."
+    )
+    manual_config['catalyst'] = st.text_area(
+        "Catalyst Event",
+        value=snapshot.get('catalyst', ''),
+        height=100,
+        placeholder="Leave blank for the AI to generate the trigger event..."
+    )
+    manual_config['psychological_conflict'] = st.text_area(
+        "Subtle Internal Friction",
+        value=snapshot.get('psychological_conflict', ''),
+        height=100,
+        placeholder="Leave blank for the AI to generate the subtle internal conflict..."
+    )
+    manual_config['blurb'] = st.text_area(
+        "Narrative Premise Hook",
+        value=snapshot.get('blurb', ''),
+        height=140,
+        placeholder="Leave blank for the AI to generate the story hook; edit it afterward if desired."
+    )
+
     if os.path.exists(CONFIG_DIR):
         f_list = load_list('fetishes.txt')
         selected_f = st.multiselect("Select Kinks/Motifs (Max 4)", f_list, max_selections=4, default=list(saved_weighted_fetishes.keys()))
@@ -596,10 +645,32 @@ elif st.session_state.step == "casting":
         st.markdown(f"- **Pacing:** {d.get('pacing')} | **Onset:** {d.get('transform_onset')}")
 
     st.markdown("---")
-    st.info(f"**Character Baseline & Subtle Traits:**\n{d.get('protagonist_baseline')}")
-    st.info(f"**Catalyst Event:**\n{d.get('catalyst')}")
-    st.warning(f"**Subtle Internal Friction:**\n{d.get('psychological_conflict')}")
-    st.success(f"**Narrative Premise Hook:**\n{d.get('blurb')}")
+    st.subheader("📝 Editable Premise Components")
+    d['protagonist_baseline'] = st.text_area(
+        "Character Baseline (generated by AI)",
+        value=d.get('protagonist_baseline', ''),
+        height=120,
+        placeholder="Edit the generated baseline description here."
+    )
+    d['catalyst'] = st.text_area(
+        "Catalyst Event (generated by AI)",
+        value=d.get('catalyst', ''),
+        height=120,
+        placeholder="Edit the generated catalyst event here."
+    )
+    d['psychological_conflict'] = st.text_area(
+        "Subtle Internal Friction (generated by AI)",
+        value=d.get('psychological_conflict', ''),
+        height=120,
+        placeholder="Edit the generated internal friction here."
+    )
+    d['blurb'] = st.text_area(
+        "Narrative Premise Hook (generated by AI)",
+        value=d.get('blurb', ''),
+        height=140,
+        placeholder="Edit the generated premise hook here."
+    )
+    st.session_state.dossier = d
 
     if 'arc_proposal' not in d or not d['arc_proposal']:
         with st.spinner("Building Tailored Chapter Arc..."):
@@ -709,7 +780,7 @@ elif st.session_state.step == "writing":
 
     if do_editor:
         status_text.write("Applying Senior Editor Polish Pass...")
-        edit_p = f"""TASK: Polish manuscript. Fix logic. No summaries. Remove tags. Don't be afraid to change the manuscript, don't hold back. Keep its essence but fix the writing. Enhance explicit erotic details and vulgarity where applicable. Remove author comments. Make sure to check maticulously against these writing rules:
+        edit_p = f"""TASK: Polish manuscript. Fix logic. No summaries. Remove tags. Don't be afraid to change the manuscript, don't hold back. Keep its essence but fix the writing, especially lengthy metaphors. Enhance explicit erotic details and vulgarity where applicable. Remove author comments. Make sure to check maticulously against these writing rules:
         - No Metaphors!
         - AVOID foreshadowing at all costs. This is A MUST!
 - No Smells, especially no ozone or sandalwood, no tastes, especially no copper!

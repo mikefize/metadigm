@@ -368,7 +368,7 @@ CHAPTER 2: [Evocative Chapter Title]
 - Narrative Beat: ...
 ...
 """
-    res = call_api(prompt, model_key, max_tokens=2048)
+    res = call_api(prompt, model_key, max_tokens=8192)
     if res.startswith("API ERROR") or not res:
         return "\n".join([f"CHAPTER {i+1}: Chapter {i+1}\nDevelop the story organically." for i in range(num_ch)])
     return clean_artifacts(res)

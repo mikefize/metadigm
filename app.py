@@ -304,9 +304,13 @@ def generate_dossier(seed, attempt, config):
     genre = config.get('genre') or random.choice(load_list('genres.txt'))
     mc_method = config.get('mc_method') or random.choice(load_list('mc_methods.txt'))
 
-    weighted_fetishes = config.get('weighted_fetishes', {})
-    f_lines = [f"- {f_name} (Priority Level: {'Essential' if w==3 else ('Important' if w==2 else 'Minor')})" for f_name, w in weighted_fetishes.items()]
-    f_string = "\n".join(f_lines) if f_lines else "None specified."
+    protagonist_kink_lines = []
+    for idx, p in enumerate(prots, 1):
+        name = p.get('name') or f"Protagonist {idx}"
+        kinks = p.get('kinks', []) or []
+        kink_str = ", ".join(kinks) if kinks else "None"
+        protagonist_kink_lines.append(f"{idx}. {name}: {kink_str}")
+    f_string = "\n".join(protagonist_kink_lines) if protagonist_kink_lines else "None specified."
 
     if config.get('enable_physical', True):
         details = config.get('body_details', [])
@@ -346,7 +350,7 @@ def generate_dossier(seed, attempt, config):
     - Antagonist: {antag_instr}
     - Transformation Mechanism: {mc_method}
     - Physical Target Areas: {body_string}
-    - Kinks & Priorities:\n{f_string}
+    - Protagonist Kinks:\n{f_string}
     - Story Concept Hook: {main_idea if main_idea else "None provided."}
     - Pacing: {config.get('pacing', 'Steady Build')} | Onset: {config.get('transform_onset', 'Mid-Story')}
 
@@ -537,7 +541,6 @@ if st.session_state.step == "setup":
     snapshot = st.session_state.get("setup_snapshot") or st.session_state.get("manual_config", {})
     saved_protagonists = snapshot.get("protagonists", [])
     saved_body_details = snapshot.get("body_details", [])
-    saved_weighted_fetishes = snapshot.get("weighted_fetishes", {})
     saved_antag = snapshot.get("antagonist", {"include": True})
 
     col1, col2, col3 = st.columns(3)
@@ -639,7 +642,7 @@ if st.session_state.step == "setup":
             manual_config['mc_method'] = st.selectbox("Transformation Mechanism", m_list, index=m_list.index(saved_mc) if saved_mc in m_list else 0, format_func=lambda x: "Random" if x is None else x)
 
     st.markdown("---")
-    st.subheader("4. Main Story Concept & Kinks")
+    st.subheader("4. Main Story Concept")
     manual_config['main_idea'] = st.text_area("Main Story Idea / High-Level Concept", value=snapshot.get('main_idea', ''), height=100, placeholder="Describe the premise, specific plot hook, or character dynamics...")
 
     st.markdown("---")
@@ -668,18 +671,6 @@ if st.session_state.step == "setup":
         height=140,
         placeholder="Leave blank for the AI to generate the story hook; edit it afterward if desired."
     )
-
-    if os.path.exists(CONFIG_DIR):
-        f_list = load_list('fetishes.txt')
-        selected_f = st.multiselect("Select Kinks/Motifs (Max 4)", f_list, max_selections=4, default=list(saved_weighted_fetishes.keys()))
-        weighted_fetishes = {}
-        if selected_f:
-            cols = st.columns(len(selected_f))
-            for idx, f in enumerate(selected_f):
-                with cols[idx]:
-                    weight = st.slider(f"'{f}' Priority", 1, 3, value=int(saved_weighted_fetishes.get(f, 2)), key=f"w_{f}")
-                    weighted_fetishes[f] = weight
-        manual_config['weighted_fetishes'] = weighted_fetishes
 
     if st.button("🚀 Draft Premise & Dossier", use_container_width=True):
         save_setup_snapshot(manual_config, seed, pov, style_choice)

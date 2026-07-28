@@ -137,6 +137,40 @@ def render_prompt_debug():
         st.caption("Raw LLM Response")
         st.code(st.session_state.get("last_raw_response", ""))
 
+
+def resolve_transform_onset_value(num_chapters, current_value):
+    if num_chapters < 1:
+        num_chapters = 1
+    options = [f"Chapter {i}" for i in range(1, num_chapters + 1)]
+
+    if current_value in options:
+        return current_value
+
+    if current_value == "Chapter 1":
+        return "Chapter 1"
+    if current_value in ["Mid-Story", "Late (Heavy Context)"]:
+        if current_value == "Late (Heavy Context)":
+            return f"Chapter {num_chapters}"
+        return f"Chapter {max(1, min(num_chapters, (num_chapters + 1) // 2))}"
+
+    return f"Chapter {max(1, min(num_chapters, (num_chapters + 1) // 2))}"
+
+
+def get_onset_threshold(onset_value, total_chapters):
+    if total_chapters < 1:
+        total_chapters = 1
+
+    if isinstance(onset_value, str):
+        match = re.search(r'(\d+)', onset_value)
+        if match:
+            return min(1.0, int(match.group(1)) / total_chapters)
+        if "late" in onset_value.lower():
+            return 0.60
+        if "mid" in onset_value.lower():
+            return 0.35
+
+    return 0.15
+
 # --- API HANDLER ---
 def call_api(prompt, model_key, style_guide="", is_editor=False, max_tokens=8192):
     m_cfg = MODELS[model_key]
@@ -379,7 +413,7 @@ FULL DOSSIER CONTEXT:
 
 NARRATIVE FLOW DIRECTIVES:
 1. Ensure natural scene progression. Balance daily life, personal interactions, situational pressure, and the gradual evolution of physical/mental changes.
-2. If Onset is 'Late', early chapters MUST focus on baseline life and interactions with ZERO transformation.
+2. If the selected onset chapter is late in the story, early chapters MUST focus on baseline life and interactions with ZERO transformation.
 
 OUTPUT FORMAT STRICTLY:
 CHAPTER 1: [Evocative Chapter Title]
@@ -418,7 +452,7 @@ def build_chapter_prompt(d, chapter_index, total_chapters, arc_phase, arc_instr,
     pacing = d.get('pacing', 'Steady Build')
     is_epilogue = bool(d.get('add_epilogue', False) and chapter_index == total_chapters - 1)
     
-    onset_threshold = 0.15 if onset == 'Chapter 1' else (0.35 if onset == 'Mid-Story' else 0.60)
+    onset_threshold = get_onset_threshold(onset, total_chapters)
 
     pacing_rules = "## PACING & CONSTRAINTS\n"
     if is_epilogue:
@@ -506,7 +540,8 @@ if st.session_state.step == "setup":
 
     with col2:
         st.subheader("2. Length & Pacing")
-        manual_config['num_chapters'] = st.number_input("Number of Chapters", 3, 15, value=int(snapshot.get('num_chapters', 7)))
+        num_chapters = int(st.number_input("Number of Chapters", 3, 15, value=int(snapshot.get('num_chapters', 7))))
+        manual_config['num_chapters'] = num_chapters
         manual_config['target_words'] = st.number_input("Target Total Word Count", 3000, 30000, value=int(snapshot.get('target_words', 10000)), step=500)
         manual_config['add_epilogue'] = st.checkbox("Add Post-Transformation Epilogue", value=bool(snapshot.get('add_epilogue', False)))
 
@@ -528,10 +563,14 @@ if st.session_state.step == "setup":
         st.markdown("---")
         pacing_options = ["Fast & Explicit", "Steady Build", "Agonizing Slow Burn"]
         pacing_value = snapshot.get('pacing', 'Steady Build')
-        transform_options = ["Chapter 1", "Mid-Story", "Late (Heavy Context)"]
-        transform_value = snapshot.get('transform_onset', 'Mid-Story')
+        transform_options = [f"Chapter {i}" for i in range(1, num_chapters + 1)]
+        transform_value = resolve_transform_onset_value(num_chapters, snapshot.get('transform_onset', 'Mid-Story'))
         manual_config['pacing'] = st.select_slider("Overall Story Pacing", options=pacing_options, value=pacing_value if pacing_value in pacing_options else 'Steady Build')
-        manual_config['transform_onset'] = st.select_slider("Transformation Onset", options=transform_options, value=transform_value if transform_value in transform_options else 'Mid-Story')
+        manual_config['transform_onset'] = st.selectbox(
+            "Transformation Onset",
+            options=transform_options,
+            index=transform_options.index(transform_value) if transform_value in transform_options else max(0, (num_chapters + 1) // 2 - 1)
+        )
 
     with col3:
         st.subheader("3. Cast & Setting")

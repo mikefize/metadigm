@@ -323,6 +323,17 @@ def generate_dossier(seed, attempt, config):
     user_conflict = config.get('psychological_conflict', '').strip()
     user_blurb = config.get('blurb', '').strip()
 
+    protagonist_profiles = []
+    for idx, p in enumerate(prots, 1):
+        name = p.get('name') or f"Protagonist {idx}"
+        change_type = p.get('change_type', 'Both')
+        kinks = p.get('kinks', []) or []
+        kink_str = ", ".join(kinks) if kinks else "None specified."
+        protagonist_profiles.append(
+            f"{idx}. {name} (Gender: {p.get('gender', 'Female')}) | Info: {p.get('info', '')} | Change Type: {change_type} | Kinks: {kink_str}"
+        )
+    protagonist_profile_str = "\n".join(protagonist_profiles)
+
     prompt = f"""
     TASK: Synthesize a bespoke premise dossier for an erotic transformation story.
 
@@ -330,6 +341,8 @@ def generate_dossier(seed, attempt, config):
     - Genre: {genre}
     - POV: {config.get('pov', 'Third Person')}
     - Protagonist(s): {char_str}
+    - Character Profiles:
+{protagonist_profile_str}
     - Antagonist: {antag_instr}
     - Transformation Mechanism: {mc_method}
     - Physical Target Areas: {body_string}
@@ -575,8 +588,12 @@ if st.session_state.step == "setup":
     with col3:
         st.subheader("3. Cast & Setting")
         st.caption("Protagonist(s)")
-        num_prot = st.number_input("Number of Protagonists", 1, 3, value=max(1, min(3, len(saved_protagonists) if saved_protagonists else 1)))
+        num_prot = st.number_input("Number of Protagonists", 1, 4, value=max(1, min(4, len(saved_protagonists) if saved_protagonists else 1)))
         prots = []
+        if os.path.exists(CONFIG_DIR):
+            f_list = load_list('fetishes.txt')
+        else:
+            f_list = []
         for i in range(int(num_prot)):
             saved_p = saved_protagonists[i] if i < len(saved_protagonists) else {}
             with st.expander(f"Protagonist {i+1}", expanded=(i==0)):
@@ -585,7 +602,19 @@ if st.session_state.step == "setup":
                 p_gender_value = saved_p.get('gender', 'Female')
                 p_gender = st.selectbox(f"Gender #{i+1}", p_gender_options, index=p_gender_options.index(p_gender_value) if p_gender_value in p_gender_options else 0, key=f"pgender_{i}")
                 p_info = st.text_input(f"Info #{i+1} (age/job/personality)", value=saved_p.get('info',''), key=f"pinfo_{i}")
-                prots.append({"name": p_name.strip(), "gender": p_gender, "info": p_info.strip()})
+                change_type_options = ["Physical", "Mental", "Both", "None"]
+                p_change_value = saved_p.get('change_type', 'Both')
+                p_change = st.selectbox(f"Changes #{i+1}", change_type_options, index=change_type_options.index(p_change_value) if p_change_value in change_type_options else 1, key=f"pchange_{i}")
+                p_kinks = []
+                if f_list:
+                    p_kinks = st.multiselect(
+                        f"Kinks for {p_name.strip() or f'Protagonist {i+1}'}",
+                        f_list,
+                        max_selections=4,
+                        default=[k for k in saved_p.get('kinks', []) if k in f_list],
+                        key=f"pkinks_{i}"
+                    )
+                prots.append({"name": p_name.strip(), "gender": p_gender, "info": p_info.strip(), "change_type": p_change, "kinks": p_kinks})
         manual_config['protagonists'] = prots
 
         st.caption("Antagonist")

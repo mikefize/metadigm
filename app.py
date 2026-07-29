@@ -112,6 +112,38 @@ def format_kink_list(kinks):
     return ", ".join([f"{k['name']} (strength {k['strength']})" for k in normalized])
 
 
+def build_body_target_summary(protagonists):
+    physical_targets = []
+    for idx, p in enumerate(protagonists, 1):
+        if p.get('change_type', 'Both') not in ['Physical', 'Both']:
+            continue
+        details = p.get('body_details', []) or []
+        name = p.get('name') or f"Protagonist {idx}"
+        if details:
+            parts = []
+            for detail in details:
+                part = detail.get('part', '')
+                if not part:
+                    continue
+                intensity = detail.get('intensity', 'Pronounced')
+                remark = detail.get('remark', '').strip()
+                item = f"{part} [{intensity}"
+                if remark:
+                    item += f" ({remark})"
+                item += "]"
+                parts.append(item)
+            if parts:
+                physical_targets.append(f"{name}: {'; '.join(parts)}")
+            else:
+                physical_targets.append(f"{name}: no body focus selected")
+        else:
+            fallback = ", ".join(random.sample(load_list('body_parts.txt'), 2))
+            physical_targets.append(f"{name}: {fallback}")
+    if not physical_targets:
+        return "NONE. MENTAL CHANGE ONLY."
+    return " | ".join(physical_targets)
+
+
 def extract_anthropic_message_text(resp):
     blocks = getattr(resp, "content", None)
     if not blocks:
@@ -341,15 +373,7 @@ def generate_dossier(seed, attempt, config):
         protagonist_kink_lines.append(f"{idx}. {name}: {kink_str}")
     f_string = "\n".join(protagonist_kink_lines) if protagonist_kink_lines else "None specified."
 
-    physical_change = any(p.get('change_type', 'Both') in ['Physical', 'Both'] for p in prots)
-    if physical_change:
-        details = config.get('body_details', [])
-        if details:
-            body_string = "; ".join([f"{d['part']} [{d['intensity']}" + (f" ({d['remark']})" if d.get('remark') else "") + "]" for d in details])
-        else:
-            body_string = ", ".join(random.sample(load_list('body_parts.txt'), 2))
-    else:
-        body_string = "NONE. MENTAL CHANGE ONLY."
+    body_string = build_body_target_summary(prots)
 
     main_idea = config.get('main_idea', '').strip()
     user_baseline = config.get('protagonist_baseline', '').strip()
@@ -422,7 +446,11 @@ def generate_dossier(seed, attempt, config):
 
     return {
         "name": name, "job": "Inferred", "genre": genre, 
-        "fetish_str": f_string, "body_parts": body_string, "body_details": config.get('body_details', []),
+        "fetish_str": f_string, "body_parts": body_string, "body_details": [
+            {"protagonist": p.get('name') or f"Protagonist {idx}", "body_details": p.get('body_details', [])}
+            for idx, p in enumerate(prots, 1)
+            if p.get('change_type', 'Both') in ['Physical', 'Both']
+        ],
         "mc_method": mc_method, "pov": config.get('pov', 'Third Person'),
         "protagonist_gender": prots[0].get('gender', 'Female'),
         "antagonist": extract_tag(res, "antagonist") or antag_instr,
@@ -570,7 +598,6 @@ if st.session_state.step == "setup":
 
     snapshot = st.session_state.get("setup_snapshot") or st.session_state.get("manual_config", {})
     saved_protagonists = snapshot.get("protagonists", [])
-    saved_body_details = snapshot.get("body_details", [])
     saved_antag = snapshot.get("antagonist", {"include": True})
 
     col1, col2, col3 = st.columns(3)
@@ -590,19 +617,6 @@ if st.session_state.step == "setup":
         manual_config['num_chapters'] = num_chapters
         manual_config['target_words'] = st.number_input("Target Total Word Count", 3000, 30000, value=int(snapshot.get('target_words', 10000)), step=500)
         manual_config['add_epilogue'] = st.checkbox("Add Post-Transformation Epilogue", value=bool(snapshot.get('add_epilogue', False)))
-
-        if os.path.exists(CONFIG_DIR):
-            b_list = load_list('body_parts.txt')
-            selected_b = st.multiselect("Body Focus Target Areas (Max 3)", b_list, max_selections=3, default=[d['part'] for d in saved_body_details if d.get('part') in b_list])
-            body_details = []
-            detail_map = {d.get('part'): d for d in saved_body_details if d.get('part')}
-            for idx, bp in enumerate(selected_b):
-                saved_detail = detail_map.get(bp, {})
-                with st.expander(f"Focus: {bp}", expanded=True):
-                    intensity = st.select_slider("Intensity", options=["Subtle", "Pronounced", "Extreme"], value=saved_detail.get('intensity', 'Pronounced'), key=f"phys_int_{idx}")
-                    remark = st.text_input("Quality Remark (e.g. natural, surgical, fake)", value=saved_detail.get('remark', ''), key=f"phys_rem_{idx}")
-                    body_details.append({"part": bp, "intensity": intensity, "remark": remark.strip()})
-            manual_config['body_details'] = body_details
 
         st.markdown("---")
         pacing_options = ["Fast & Explicit", "Steady Build", "Agonizing Slow Burn"]
@@ -636,6 +650,36 @@ if st.session_state.step == "setup":
                 change_type_options = ["Physical", "Mental", "Both", "None"]
                 p_change_value = saved_p.get('change_type', 'Both')
                 p_change = st.selectbox(f"Changes #{i+1}", change_type_options, index=change_type_options.index(p_change_value) if p_change_value in change_type_options else 1, key=f"pchange_{i}")
+                p_body_details = []
+                if p_change in ["Physical", "Both"]:
+                    saved_body_details = saved_p.get('body_details', [])
+                    if os.path.exists(CONFIG_DIR):
+                        b_list = load_list('body_parts.txt')
+                        selected_b = st.multiselect(
+                            f"Body Focus for {p_name.strip() or f'Protagonist {i+1}'}",
+                            b_list,
+                            max_selections=3,
+                            default=[d['part'] for d in saved_body_details if d.get('part') in b_list],
+                            key=f"pbody_{i}"
+                        )
+                        body_details = []
+                        detail_map = {d.get('part'): d for d in saved_body_details if d.get('part')}
+                        for idx_body, bp in enumerate(selected_b):
+                            saved_detail = detail_map.get(bp, {})
+                            with st.expander(f"Focus: {bp}", expanded=True):
+                                intensity = st.select_slider(
+                                    f"Intensity for {bp}",
+                                    options=["Subtle", "Pronounced", "Extreme"],
+                                    value=saved_detail.get('intensity', 'Pronounced'),
+                                    key=f"pbody_int_{i}_{idx_body}"
+                                )
+                                remark = st.text_input(
+                                    f"Quality Remark for {bp}",
+                                    value=saved_detail.get('remark', ''),
+                                    key=f"pbody_rem_{i}_{idx_body}"
+                                )
+                                body_details.append({"part": bp, "intensity": intensity, "remark": remark.strip()})
+                        p_body_details = body_details
                 p_kinks = []
                 if f_list:
                     saved_kink_data = normalize_kinks(saved_p.get('kinks', []))
@@ -660,7 +704,7 @@ if st.session_state.step == "setup":
                         )
                         kink_details.append({"name": kink_name, "strength": strength})
                     p_kinks = kink_details
-                prots.append({"name": p_name.strip(), "gender": p_gender, "info": p_info.strip(), "change_type": p_change, "kinks": p_kinks})
+                prots.append({"name": p_name.strip(), "gender": p_gender, "info": p_info.strip(), "change_type": p_change, "kinks": p_kinks, "body_details": p_body_details})
         manual_config['protagonists'] = prots
 
         st.caption("Antagonist")

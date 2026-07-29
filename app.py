@@ -83,6 +83,35 @@ def get_secret(key_name):
     except: return ""
 
 
+def normalize_kinks(kinks):
+    if not kinks:
+        return []
+    normalized = []
+    for item in kinks:
+        if isinstance(item, dict):
+            name = (item.get('name') or item.get('kink') or '').strip()
+            strength = item.get('strength', 1)
+            if not name:
+                continue
+            if isinstance(strength, str):
+                strength = strength.strip()
+                strength = int(strength) if strength.isdigit() else 1
+            strength = max(1, min(3, int(strength)))
+            normalized.append({'name': name, 'strength': strength})
+        elif isinstance(item, str):
+            name = item.strip()
+            if name:
+                normalized.append({'name': name, 'strength': 1})
+    return normalized
+
+
+def format_kink_list(kinks):
+    normalized = normalize_kinks(kinks)
+    if not normalized:
+        return "None"
+    return ", ".join([f"{k['name']} (strength {k['strength']})" for k in normalized])
+
+
 def extract_anthropic_message_text(resp):
     blocks = getattr(resp, "content", None)
     if not blocks:
@@ -307,12 +336,13 @@ def generate_dossier(seed, attempt, config):
     protagonist_kink_lines = []
     for idx, p in enumerate(prots, 1):
         name = p.get('name') or f"Protagonist {idx}"
-        kinks = p.get('kinks', []) or []
-        kink_str = ", ".join(kinks) if kinks else "None"
+        kinks = normalize_kinks(p.get('kinks', []) or [])
+        kink_str = format_kink_list(kinks)
         protagonist_kink_lines.append(f"{idx}. {name}: {kink_str}")
     f_string = "\n".join(protagonist_kink_lines) if protagonist_kink_lines else "None specified."
 
-    if config.get('enable_physical', True):
+    physical_change = any(p.get('change_type', 'Both') in ['Physical', 'Both'] for p in prots)
+    if physical_change:
         details = config.get('body_details', [])
         if details:
             body_string = "; ".join([f"{d['part']} [{d['intensity']}" + (f" ({d['remark']})" if d.get('remark') else "") + "]" for d in details])
@@ -331,8 +361,8 @@ def generate_dossier(seed, attempt, config):
     for idx, p in enumerate(prots, 1):
         name = p.get('name') or f"Protagonist {idx}"
         change_type = p.get('change_type', 'Both')
-        kinks = p.get('kinks', []) or []
-        kink_str = ", ".join(kinks) if kinks else "None specified."
+        kinks = normalize_kinks(p.get('kinks', []) or [])
+        kink_str = format_kink_list(kinks) if kinks else "None specified."
         protagonist_profiles.append(
             f"{idx}. {name} (Gender: {p.get('gender', 'Female')}) | Info: {p.get('info', '')} | Change Type: {change_type} | Kinks: {kink_str}"
         )
@@ -561,9 +591,7 @@ if st.session_state.step == "setup":
         manual_config['target_words'] = st.number_input("Target Total Word Count", 3000, 30000, value=int(snapshot.get('target_words', 10000)), step=500)
         manual_config['add_epilogue'] = st.checkbox("Add Post-Transformation Epilogue", value=bool(snapshot.get('add_epilogue', False)))
 
-        enable_phys = st.checkbox("Physical Transformation?", value=bool(snapshot.get('enable_physical', True)))
-        manual_config['enable_physical'] = enable_phys
-        if enable_phys and os.path.exists(CONFIG_DIR):
+        if os.path.exists(CONFIG_DIR):
             b_list = load_list('body_parts.txt')
             selected_b = st.multiselect("Body Focus Target Areas (Max 3)", b_list, max_selections=3, default=[d['part'] for d in saved_body_details if d.get('part') in b_list])
             body_details = []
@@ -610,13 +638,28 @@ if st.session_state.step == "setup":
                 p_change = st.selectbox(f"Changes #{i+1}", change_type_options, index=change_type_options.index(p_change_value) if p_change_value in change_type_options else 1, key=f"pchange_{i}")
                 p_kinks = []
                 if f_list:
-                    p_kinks = st.multiselect(
+                    saved_kink_data = normalize_kinks(saved_p.get('kinks', []))
+                    saved_kink_names = [k['name'] for k in saved_kink_data if k.get('name') in f_list]
+                    selected_kinks = st.multiselect(
                         f"Kinks for {p_name.strip() or f'Protagonist {i+1}'}",
                         f_list,
                         max_selections=4,
-                        default=[k for k in saved_p.get('kinks', []) if k in f_list],
+                        default=saved_kink_names,
                         key=f"pkinks_{i}"
                     )
+                    kink_details = []
+                    saved_kink_map = {k['name']: k for k in saved_kink_data if k.get('name')}
+                    for idx, kink_name in enumerate(selected_kinks):
+                        saved_kink = saved_kink_map.get(kink_name, {})
+                        strength_value = int(saved_kink.get('strength', 2))
+                        strength = st.select_slider(
+                            f"Strength for {kink_name}",
+                            options=[1, 2, 3],
+                            value=strength_value if strength_value in [1, 2, 3] else 2,
+                            key=f"pkink_strength_{i}_{idx}"
+                        )
+                        kink_details.append({"name": kink_name, "strength": strength})
+                    p_kinks = kink_details
                 prots.append({"name": p_name.strip(), "gender": p_gender, "info": p_info.strip(), "change_type": p_change, "kinks": p_kinks})
         manual_config['protagonists'] = prots
 
@@ -646,31 +689,6 @@ if st.session_state.step == "setup":
     manual_config['main_idea'] = st.text_area("Main Story Idea / High-Level Concept", value=snapshot.get('main_idea', ''), height=100, placeholder="Describe the premise, specific plot hook, or character dynamics...")
 
     st.markdown("---")
-    st.subheader("5. Editable Premise Components")
-    manual_config['protagonist_baseline'] = st.text_area(
-        "Character Baseline",
-        value=snapshot.get('protagonist_baseline', ''),
-        height=100,
-        placeholder="Leave blank for the AI to generate a baseline life and subtle character details..."
-    )
-    manual_config['catalyst'] = st.text_area(
-        "Catalyst Event",
-        value=snapshot.get('catalyst', ''),
-        height=100,
-        placeholder="Leave blank for the AI to generate the trigger event..."
-    )
-    manual_config['psychological_conflict'] = st.text_area(
-        "Subtle Internal Friction",
-        value=snapshot.get('psychological_conflict', ''),
-        height=100,
-        placeholder="Leave blank for the AI to generate the subtle internal conflict..."
-    )
-    manual_config['blurb'] = st.text_area(
-        "Narrative Premise Hook",
-        value=snapshot.get('blurb', ''),
-        height=140,
-        placeholder="Leave blank for the AI to generate the story hook; edit it afterward if desired."
-    )
 
     if st.button("🚀 Draft Premise & Dossier", use_container_width=True):
         save_setup_snapshot(manual_config, seed, pov, style_choice)

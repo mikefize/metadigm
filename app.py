@@ -903,6 +903,7 @@ elif st.session_state.step == "writing":
         status_text.write("Applying Senior Editor Polish Pass...")
         edit_p = f"""TASK: Polish manuscript. Fix logic. No summaries. Remove tags. Don't be afraid to change the manuscript, don't hold back. Keep its essence but fix the writing, especially lengthy metaphors. Enhance explicit erotic details and vulgarity where applicable. Remove author comments. Make sure to check maticulously against these writing rules:
         - No Metaphors!
+        - Characters NEVER (!) analyze, catalogue or think in technical or mathematical terms. They don't think in terms of "percentages" or "ratios" or "statistics" or "probabilities" or "likelihoods". They don't think in terms of "the way it always does/did" or "the way she always does". Avoid this at all costs! They don't recite numbers or phrases, never use any kind of scientific language to describe behaviour. They don't think in terms of "the way it always does/did" or "the way she always does". Avoid this at all costs!.
         - AVOID foreshadowing at all costs. This is A MUST!
 - No Smells, especially no ozone or sandalwood, no tastes, especially no copper!
 - Absolutely no talking about flourescent lights, this is a hard no!
@@ -938,8 +939,13 @@ elif st.session_state.step == "writing":
 
 Example for writing:
 Bad Style (Do NOT write like this): "A cold shiver ran down his spine, a testament to the lingering darkness that danced in the room like a silent watcher."
-
 Good Style (Write like this): "He felt cold. The room was dark and silent."
+
+Bad Style (Do NOT write like this): "She was a beacon of hope, her presence underscoring the pivotal moment in his life."
+Good Style (Write like this): "She was there. He noticed her, and it mattered."
+
+Bad Style (Do NOT write like this): "She recited the rules of the company."
+Good Style (Write like this): "She repeated the rules. She didn't care if he remembered them."
 
 INPUT:
 {raw_story}"""

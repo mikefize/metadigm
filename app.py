@@ -261,6 +261,64 @@ STRICT RULES — THIS IS PARAMOUNT:
 END OF STYLE REFERENCE. Its content is now irrelevant — only its prose mechanics matter. Resume the actual task below.
 """
 
+EDITOR_RULES_BLOCK = """        - No Metaphors!
+        - Characters NEVER (!) analyze, catalogue or think in technical or mathematical terms. They don't think in terms of "percentages" or "ratios" or "statistics" or "probabilities" or "likelihoods". They don't think in terms of "the way it always does/did" or "the way she always does". Avoid this at all costs! They don't recite numbers or phrases, never use any kind of scientific language to describe behaviour. They don't think in terms of "the way it always does/did" or "the way she always does". Avoid this at all costs!.
+        - AVOID foreshadowing at all costs. This is A MUST!
+- No Smells, especially no ozone or sandalwood, no tastes, especially no copper!
+- Absolutely no talking about flourescent lights, this is a hard no!
+- No expressions like: [...] The way it always does/did or "the way she always does". Avoid this at all costs!
+- Characters NEVER (!) analyze, catalogue or think in technical or mathematical terms.
+- No humming lights, no flickering lights, no lights overhead. NEVER!
+- No gasps, no ragged gasps, no shallow gasps
+# WRITING STYLE, TONE, AND PROSE RULES
+
+## 1. Vocabulary and Phrasing Constraints
+*   **Banned Words:** Never use the following overused AI words: *cataloguing, flourescent, delve, tapestry, landscape, testament, beacon, pivotal, underscore, harness, remix, symbiosis, testament, testament to.*
+*   **Ban Negative Parallelism:** Avoid the sentence structure: "It wasn't just [Emotion A]—it was [Emotion B]." Write directly.
+*   **Ban the "Rule of Three" Lists:** Do not end sentences by stacking three descriptive nouns or phrases (e.g., "a place of broken dreams, forgotten promises, and unyielding steel").
+*   **Show, Don't Analyze:** Do not use patronizing analogies to explain magical, technical, or complex concepts to the reader. Do not use phrases like "Think of it as..." or "Much like a...".
+*   **Forbidden Phrases:** Never make any character use the phrase "There she is..." or anything similar.
+
+## 2. Narrative Structure and Pacing
+*   **No Therapeutic Resolutions:** Characters must not resolve conflicts through neat, emotionally mature, therapist-like conversations. Allow arguments to end badly, with unresolved bitterness, misunderstandings, pettiness, or silence.
+*   **Zero Moralizing or Subtext Explaining:** Never summarize the theme or moral lesson of the story at the end of a scene or chapter. Do not explicitly state what a character learned about love, grief, or human nature. Let the actions and choices speak for themselves; trust the reader.
+*   **Avoid Sensory Cliché Dumping:** Do not use the standard AI physical panic checklist (tightening chest, worked throat, hitched breath, cold sweat). If a character is afraid, show it through unique internal thoughts, visceral reactions, or hyper-specific body language.
+*   **Eliminate Faux-Action Filler:** Characters must not engage in meaningless domestic idling just to pass the time between lines of dialogue. Cut out instances of characters staring at books they aren't reading, drinking coffee they don't want, or pacing to windows for no narrative reason.
+
+## 3. Character Behavior, Romance, and Dialogue
+*   **Banned Sensory Clichés:** Magic/electricity must not smell like *ozone*. Romantic partners must not smell exclusively of *jasmine*, *citrus*, *sandalwood*, or *oak*. Use original, context-specific sensory details.
+*   **Ban Repetitive Physical Tells:** Do not have characters trace "lazy circles" on skin, continually flex/tighten their jaws, or have their eyes/pupils "blown wide with realization."
+*   **Vary Romantic Intimacy:** Avoid the default "forehead touch" cliché to show emotional closeness. Express intimacy through unique, messy, or unexpected physical boundaries and reactions.
+*   **Ban Sitcom Flirting Banter:** Avoid the formulaic, smirking banter loop (e.g., "You're insufferable." / "And yet, you love it."). Dialogue should feel unpredictable, grounded, and specific to the characters' distinct personalities and backgrounds, not generic internet fanfiction.
+*   **Unnatural behaviour:** Real people don't catalogue things, they don't recite numbers or phrases, never use any kind of scientific language to describe behaviour.
+
+## 4. Execution Directives
+*   Prioritize raw, realistic human behavior over clean, balanced, or "satisfying" narrative arcs.
+*   Keep the prose lean, specific, and grounded in concrete, lyrical generalizations.
+
+Example for writing:
+Bad Style (Do NOT write like this): "A cold shiver ran down his spine, a testament to the lingering darkness that danced in the room like a silent watcher."
+Good Style (Write like this): "He felt cold. The room was dark and silent."
+
+Bad Style (Do NOT write like this): "She was a beacon of hope, her presence underscoring the pivotal moment in his life."
+Good Style (Write like this): "She was there. He noticed her, and it mattered."
+
+Bad Style (Do NOT write like this): "She recited the rules of the company."
+Good Style (Write like this): "She repeated the rules. She didn't care if he remembered them."
+"""
+
+def build_editor_prompt(task_intro, content):
+    return f"""{task_intro} Make sure to check meticulously against these writing rules:
+{EDITOR_RULES_BLOCK}
+INPUT:
+{content}"""
+
+DOSSIER_EDITOR_TASK = (
+    "TASK: Polish the language of this story premise dossier. It is short scene-setting prose, not a full manuscript. "
+    "Do NOT invent, add, or remove any plot points, characters, names, or details, and do NOT change what happens or shorten/expand the content. "
+    "Only rewrite the phrasing inside each tag to fix AI-sounding prose. Keep every tag exactly as given, in the same order, with no commentary outside the tags."
+)
+
 def call_api(prompt, model_key, style_guide="", style_example="", is_editor=False, max_tokens=8192):
     m_cfg = MODELS[model_key]
     vendor = m_cfg['vendor']
@@ -479,8 +537,31 @@ def generate_dossier(seed, attempt, config):
     if not res or res.startswith("API ERROR"):
         return {"error": res or "Empty API response."}
 
+    user_overrides = {
+        "protagonist_baseline": config.get('protagonist_baseline'),
+        "catalyst": config.get('catalyst'),
+        "psychological_conflict": config.get('psychological_conflict'),
+        "blurb": config.get('blurb'),
+    }
+    dossier_fields = {tag: val or extract_tag(res, tag) for tag, val in user_overrides.items()}
+
+    if do_editor:
+        ai_tags = [tag for tag, val in user_overrides.items() if not val and dossier_fields[tag]]
+        if ai_tags:
+            dossier_blob = "\n".join(f"<{tag}>{dossier_fields[tag]}</{tag}>" for tag in ai_tags)
+            edited = call_api(
+                build_editor_prompt(DOSSIER_EDITOR_TASK, dossier_blob),
+                st.session_state.editor_model, style_example=style_example,
+                is_editor=True, max_tokens=2048
+            )
+            if edited and not edited.startswith("API ERROR"):
+                for tag in ai_tags:
+                    polished = extract_tag(edited, tag)
+                    if polished:
+                        dossier_fields[tag] = polished
+
     return {
-        "name": name, "job": "Inferred", "genre": genre, 
+        "name": name, "job": "Inferred", "genre": genre,
         "fetish_str": f_string, "body_parts": body_string, "body_details": [
             {"protagonist": p.get('name') or f"Protagonist {idx}", "body_details": p.get('body_details', [])}
             for idx, p in enumerate(prots, 1)
@@ -490,10 +571,10 @@ def generate_dossier(seed, attempt, config):
         "protagonist_gender": prots[0].get('gender', 'Female'),
         "antagonist": extract_tag(res, "antagonist") or antag_instr,
         "protagonists": prots,
-        "protagonist_baseline": config.get('protagonist_baseline') or extract_tag(res, "protagonist_baseline"),
-        "catalyst": config.get('catalyst') or extract_tag(res, "catalyst"),
-        "psychological_conflict": config.get('psychological_conflict') or extract_tag(res, "psychological_conflict"),
-        "blurb": config.get('blurb') or extract_tag(res, "blurb"),
+        "protagonist_baseline": dossier_fields["protagonist_baseline"],
+        "catalyst": dossier_fields["catalyst"],
+        "psychological_conflict": dossier_fields["psychological_conflict"],
+        "blurb": dossier_fields["blurb"],
         "raw_response": res,
         "style_guide": style_guide,
         "style_example": style_example,
@@ -943,54 +1024,12 @@ elif st.session_state.step == "writing":
 
     if do_editor:
         status_text.write("Applying Senior Editor Polish Pass...")
-        edit_p = f"""TASK: Polish manuscript. Fix logic. No summaries. Remove tags. Don't be afraid to change the manuscript, don't hold back. Keep its essence but fix the writing, especially lengthy metaphors. Enhance explicit erotic details and vulgarity where applicable. Remove author comments. Make sure to check maticulously against these writing rules:
-        - No Metaphors!
-        - Characters NEVER (!) analyze, catalogue or think in technical or mathematical terms. They don't think in terms of "percentages" or "ratios" or "statistics" or "probabilities" or "likelihoods". They don't think in terms of "the way it always does/did" or "the way she always does". Avoid this at all costs! They don't recite numbers or phrases, never use any kind of scientific language to describe behaviour. They don't think in terms of "the way it always does/did" or "the way she always does". Avoid this at all costs!.
-        - AVOID foreshadowing at all costs. This is A MUST!
-- No Smells, especially no ozone or sandalwood, no tastes, especially no copper!
-- Absolutely no talking about flourescent lights, this is a hard no!
-- No expressions like: [...] The way it always does/did or "the way she always does". Avoid this at all costs!
-- Characters NEVER (!) analyze, catalogue or think in technical or mathematical terms.
-- No humming lights, no flickering lights, no lights overhead. NEVER!
-- No gasps, no ragged gasps, no shallow gasps
-# WRITING STYLE, TONE, AND PROSE RULES
-
-## 1. Vocabulary and Phrasing Constraints
-*   **Banned Words:** Never use the following overused AI words: *cataloguing, flourescent, delve, tapestry, landscape, testament, beacon, pivotal, underscore, harness, remix, symbiosis, testament, testament to.*
-*   **Ban Negative Parallelism:** Avoid the sentence structure: "It wasn't just [Emotion A]—it was [Emotion B]." Write directly.
-*   **Ban the "Rule of Three" Lists:** Do not end sentences by stacking three descriptive nouns or phrases (e.g., "a place of broken dreams, forgotten promises, and unyielding steel").
-*   **Show, Don't Analyze:** Do not use patronizing analogies to explain magical, technical, or complex concepts to the reader. Do not use phrases like "Think of it as..." or "Much like a...".
-*   **Forbidden Phrases:** Never make any character use the phrase "There she is..." or anything similar.
-
-## 2. Narrative Structure and Pacing
-*   **No Therapeutic Resolutions:** Characters must not resolve conflicts through neat, emotionally mature, therapist-like conversations. Allow arguments to end badly, with unresolved bitterness, misunderstandings, pettiness, or silence.
-*   **Zero Moralizing or Subtext Explaining:** Never summarize the theme or moral lesson of the story at the end of a scene or chapter. Do not explicitly state what a character learned about love, grief, or human nature. Let the actions and choices speak for themselves; trust the reader.
-*   **Avoid Sensory Cliché Dumping:** Do not use the standard AI physical panic checklist (tightening chest, worked throat, hitched breath, cold sweat). If a character is afraid, show it through unique internal thoughts, visceral reactions, or hyper-specific body language.
-*   **Eliminate Faux-Action Filler:** Characters must not engage in meaningless domestic idling just to pass the time between lines of dialogue. Cut out instances of characters staring at books they aren't reading, drinking coffee they don't want, or pacing to windows for no narrative reason.
-
-## 3. Character Behavior, Romance, and Dialogue
-*   **Banned Sensory Clichés:** Magic/electricity must not smell like *ozone*. Romantic partners must not smell exclusively of *jasmine*, *citrus*, *sandalwood*, or *oak*. Use original, context-specific sensory details.
-*   **Ban Repetitive Physical Tells:** Do not have characters trace "lazy circles" on skin, continually flex/tighten their jaws, or have their eyes/pupils "blown wide with realization."
-*   **Vary Romantic Intimacy:** Avoid the default "forehead touch" cliché to show emotional closeness. Express intimacy through unique, messy, or unexpected physical boundaries and reactions.
-*   **Ban Sitcom Flirting Banter:** Avoid the formulaic, smirking banter loop (e.g., "You're insufferable." / "And yet, you love it."). Dialogue should feel unpredictable, grounded, and specific to the characters' distinct personalities and backgrounds, not generic internet fanfiction.
-*   **Unnatural behaviour:** Real people don't catalogue things, they don't recite numbers or phrases, never use any kind of scientific language to describe behaviour.
-
-## 4. Execution Directives
-*   Prioritize raw, realistic human behavior over clean, balanced, or "satisfying" narrative arcs.
-*   Keep the prose lean, specific, and grounded in concrete, lyrical generalizations.
-
-Example for writing:
-Bad Style (Do NOT write like this): "A cold shiver ran down his spine, a testament to the lingering darkness that danced in the room like a silent watcher."
-Good Style (Write like this): "He felt cold. The room was dark and silent."
-
-Bad Style (Do NOT write like this): "She was a beacon of hope, her presence underscoring the pivotal moment in his life."
-Good Style (Write like this): "She was there. He noticed her, and it mattered."
-
-Bad Style (Do NOT write like this): "She recited the rules of the company."
-Good Style (Write like this): "She repeated the rules. She didn't care if he remembered them."
-
-INPUT:
-{raw_story}"""
+        manuscript_task = (
+            "TASK: Polish manuscript. Fix logic. No summaries. Remove tags. Don't be afraid to change the manuscript, don't hold back. "
+            "Keep its essence but fix the writing, especially lengthy metaphors. Enhance explicit erotic details and vulgarity where applicable. "
+            "Remove author comments."
+        )
+        edit_p = build_editor_prompt(manuscript_task, raw_story)
         editor_max = 200000 if MODELS[st.session_state.editor_model]['vendor'] == 'kimi' else 65000
         final = call_api(edit_p, st.session_state.editor_model, style_example=d.get('style_example', ''), is_editor=True, max_tokens=editor_max)
         st.session_state.final_story = clean_artifacts(final) if final and len(final) > len(raw_story)*0.7 else clean_artifacts(raw_story)

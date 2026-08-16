@@ -36,7 +36,7 @@ MODELS = {
     "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.50, "price_out": 3.00, "max_out": 65536},
     "Gemini 3.1 Flash": {"name": "Gemini 3.1 Flash", "id": "gemini-3.1-flash-lite-preview", "vendor": "google", "price_in": 0.25, "price_out": 1.50, "max_out": 65536},
     "Mistral Large": {"id": "mistral-large-latest", "vendor": "mistral", "price_in": 0.50, "price_out": 1.50},
-    "Kimi K3": {"name": "Kimi K3", "id": "kimi-k3", "vendor": "kimi", "price_in": 3.00, "price_out": 15.00}
+    "Kimi K3": {"name": "Kimi K3", "id": "kimi-k3", "vendor": "kimi", "price_in": 3.00, "price_out": 15.00, "max_out": 200000}
 }
 
 # --- INITIALIZE SESSION STATE ---
@@ -852,7 +852,8 @@ def build_rewrite_prompt(cfg, block_text, label, issues_raw="", prev_tail="", he
     ]
     return "\n".join(parts)
 
-def call_api(prompt, model_key, style_guide="", style_example="", is_editor=False, max_tokens=8192, editor_system=None):
+def call_api(prompt, model_key, style_guide="", style_example="", is_editor=False, max_tokens=8192,
+             editor_system=None, warn_truncated=True):
     m_cfg = MODELS[model_key]
     vendor = m_cfg['vendor']
 
@@ -882,6 +883,14 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
     st.session_state.last_user_prompt = prompt
     st.session_state.last_raw_response = ""
     st.session_state.last_api_payload = ""
+    st.session_state.last_truncated = False
+
+    def flag_truncation(was_cut):
+        """Record a max_tokens cut-off so the caller can retry instead of shipping half a chapter."""
+        st.session_state.last_truncated = bool(was_cut)
+        if was_cut and warn_truncated:
+            st.warning(f"{model_key} hit its {max_tokens:,}-token output limit and was cut off mid-text.")
+        return was_cut
 
     try:
         if vendor == 'anthropic':
@@ -898,10 +907,7 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
             else:
                 resp = client.messages.create(**req)
             track_cost(resp.usage.input_tokens, resp.usage.output_tokens, m_cfg)
-            if getattr(resp, "stop_reason", None) == "max_tokens":
-                st.warning(
-                    f"{model_key} hit its {max_tokens:,}-token output limit and was cut off mid-text."
-                )
+            flag_truncation(getattr(resp, "stop_reason", None) == "max_tokens")
             try:
                 st.session_state.last_raw_response = json.dumps(resp.__dict__, default=str, indent=2)
             except Exception:
@@ -932,6 +938,11 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
             st.session_state.last_raw_response = raw
             st.session_state.last_api_payload = json.dumps({"model": m_cfg['id'], "system_instruction": sys_prompt, "prompt": prompt, "generation_config": {"temperature": 1.0, "max_output_tokens": max_tokens}}, indent=2)
             if resp.usage_metadata: track_cost(resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count, m_cfg)
+            try:
+                finish = str(getattr(resp.candidates[0], 'finish_reason', '')).upper()
+            except Exception:
+                finish = ''
+            flag_truncation('MAX_TOKENS' in finish or finish.endswith('2'))
             return text
 
         elif vendor in ['mistral', 'xai', 'kimi']:
@@ -965,10 +976,66 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
             data = response.json()
             if 'usage' in data:
                 track_cost(data['usage'].get('prompt_tokens', 0), data['usage'].get('completion_tokens', 0), m_cfg)
-            return data['choices'][0]['message']['content']
+            choice = data['choices'][0]
+            flag_truncation(choice.get('finish_reason') == 'length')
+            return choice['message']['content']
 
     except Exception as e:
         return f"API ERROR: {str(e)}"
+
+
+# --- OUTPUT BUDGETS ---
+# max_tokens is a ceiling, not a reservation: you are billed for what the model actually
+# writes, so the only cost of a generous ceiling is the risk of a runaway response. A
+# ceiling that is too LOW silently truncates a chapter mid-sentence, which is far worse.
+DEFAULT_OUTPUT_CAP = 65000
+THINKING_ALLOWANCE = 12000   # thinking shares the max_tokens budget on current Claude models
+
+
+def model_output_cap(model_key):
+    return MODELS[model_key].get('max_out') or DEFAULT_OUTPUT_CAP
+
+
+def _tokens_from_chars(chars):
+    """Rough output-token estimate, deliberately pessimistic - newer tokenizers emit
+    noticeably more tokens for the same prose than the ones they replaced."""
+    return int(max(0, chars) / 2.8) + 1
+
+
+def _reserves_thinking_tokens(cfg):
+    """Models that reason before answering spend part of the same max_tokens budget on it."""
+    return cfg['vendor'] == 'anthropic' or 'reasoning' in str(cfg.get('id', '')).lower()
+
+
+def output_budget(model_key, expected_chars, floor=16000):
+    """Size max_tokens from how much text the call actually has to produce."""
+    cfg = MODELS[model_key]
+    needed = int(_tokens_from_chars(expected_chars) * 1.35) + 2000
+    if _reserves_thinking_tokens(cfg):
+        needed += THINKING_ALLOWANCE
+    return max(floor, min(model_output_cap(model_key), needed))
+
+
+def call_api_complete(prompt, model_key, max_tokens, retries=1, status_cb=None, **kwargs):
+    """call_api, retried with a doubled ceiling when the response is cut off by max_tokens.
+
+    Returns (text, was_truncated, budget_used).
+    """
+    budget = min(max_tokens, model_output_cap(model_key))
+    cap = model_output_cap(model_key)
+    text, truncated = "", False
+    for attempt in range(retries + 1):
+        text = call_api(prompt, model_key, max_tokens=budget, warn_truncated=False, **kwargs)
+        truncated = bool(st.session_state.get("last_truncated"))
+        if not truncated or (text or "").startswith("API ERROR"):
+            break
+        bigger = min(cap, budget * 2)
+        if bigger <= budget or attempt == retries:
+            break
+        budget = bigger
+        if status_cb:
+            status_cb(f"output was cut off, retrying with a {budget:,}-token ceiling")
+    return text, truncated, budget
 
 
 def split_manuscript_chapters(raw_story):
@@ -988,7 +1055,7 @@ def split_manuscript_chapters(raw_story):
 
 
 def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pass=True,
-                     prev_tail="", rewrite_max=16000, diagnose_max=8000, heading_rule="",
+                     prev_tail="", rewrite_max=None, diagnose_max=None, heading_rule="",
                      min_ratio=0.6, status_cb=None):
     """Edit one block (chapter or whole manuscript).
 
@@ -1000,12 +1067,19 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
             "ratio": 0.0, "rejected": ""}
     issues_raw = ""
 
+    # The rewrite has to reproduce the whole block, so its ceiling is sized from the block
+    # itself; the diagnostic pass only emits a list, so it needs far less.
+    if rewrite_max is None:
+        rewrite_max = output_budget(model_key, len(block_text))
+    if diagnose_max is None:
+        diagnose_max = output_budget(model_key, len(block_text) // 3, floor=12000)
+
     if two_pass:
         if status_cb:
             status_cb("diagnosing")
-        diagnosis = call_api(
-            build_diagnose_prompt(cfg, block_text, label), model_key,
-            is_editor=True, editor_system=DIAGNOSTIC_SYSTEM, max_tokens=diagnose_max,
+        diagnosis, _, _ = call_api_complete(
+            build_diagnose_prompt(cfg, block_text, label), model_key, diagnose_max,
+            retries=0, is_editor=True, editor_system=DIAGNOSTIC_SYSTEM,
         )
         if diagnosis and not diagnosis.startswith("API ERROR"):
             issues_raw = diagnosis.strip()
@@ -1016,17 +1090,29 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
 
     if status_cb:
         status_cb("rewriting")
-    response = call_api(
+    response, truncated, used_budget = call_api_complete(
         build_rewrite_prompt(cfg, block_text, label, issues_raw, prev_tail, heading_rule),
-        model_key, style_example=style_example, is_editor=True,
-        editor_system=build_editor_system(cfg), max_tokens=rewrite_max,
+        model_key, rewrite_max, retries=1,
+        status_cb=(lambda msg: status_cb(msg)) if status_cb else None,
+        style_example=style_example, is_editor=True, editor_system=build_editor_system(cfg),
     )
+    info["budget"] = used_budget
 
     if not response or not response.strip():
         info.update(status="error", message=info["message"] + "The editor returned an empty response.")
         return None, info
     if response.startswith("API ERROR"):
         info.update(status="error", message=info["message"] + response.strip())
+        return None, info
+    if truncated:
+        # Half a rewritten chapter is worse than an unedited one - it would splice a
+        # sentence that stops mid-air into the manuscript.
+        info.update(
+            status="truncated",
+            message=info["message"] + f"The rewrite was still cut off at a {used_budget:,}-token "
+                                      "ceiling after a retry, so the raw text was kept.",
+            rejected=clean_artifacts(extract_edited(response)),
+        )
         return None, info
 
     edited = clean_artifacts(extract_edited(response))
@@ -1066,7 +1152,6 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
             progress_cb(min(1.0, max(0.0, fraction)))
 
     cfg = EDITOR_INTENSITY[intensity]
-    vendor = MODELS[model_key]['vendor']
     report = {
         "used": True, "status": "skipped", "message": "", "model": model_key,
         "mode": mode, "intensity": intensity, "two_pass": bool(two_pass),
@@ -1092,9 +1177,7 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
             _status("starting")
             edited_body, info = run_editor_block(
                 body, "chapter", cfg, model_key, style_example=style_example,
-                two_pass=two_pass, prev_tail=prev_tail,
-                rewrite_max=65000 if vendor == 'kimi' else 16000,
-                diagnose_max=8000, min_ratio=0.6, status_cb=_status,
+                two_pass=two_pass, prev_tail=prev_tail, min_ratio=0.6, status_cb=_status,
             )
             info["chapter"], info["title"] = idx, label_name
             chapter_infos.append(info)
@@ -1114,7 +1197,7 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
             assembled = f"{preamble}\n\n{assembled}"
         assembled = clean_artifacts(assembled)
 
-        failed = [c for c in chapter_infos if c["status"] in ("error", "too_short")]
+        failed = [c for c in chapter_infos if c["status"] in ("error", "too_short", "truncated")]
         rejected = "\n\n".join(
             f"### {c['title']}\n\n{c['rejected']}" for c in chapter_infos if c.get("rejected")
         )
@@ -1144,8 +1227,7 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
     _status("starting")
     edited, info = run_editor_block(
         raw_story, "manuscript", cfg, model_key, style_example=style_example,
-        two_pass=two_pass, rewrite_max=200000 if vendor == 'kimi' else 65000,
-        diagnose_max=16000, min_ratio=0.7,
+        two_pass=two_pass, min_ratio=0.7,
         heading_rule="Reproduce every chapter heading line (### ...) exactly as given.",
         status_cb=_status,
     )
@@ -1883,12 +1965,25 @@ elif st.session_state.step == "writing":
             state_log=state_log
         )
 
-        chapter_max = 65000 if MODELS[st.session_state.writer_model]['vendor'] == 'kimi' else 16000
-        text = call_api(p, st.session_state.writer_model, style_guide=d['style_guide'], style_example=d.get('style_example', ''), max_tokens=chapter_max)
+        # Size the ceiling from the chapter this call is supposed to produce (~6 chars a word)
+        # rather than a flat constant, so a long chapter is not cut off mid-sentence.
+        target_chars = (d.get('target_words', 10000) // max(num_chapters, 1)) * 6
+        chapter_max = output_budget(st.session_state.writer_model, target_chars)
+        text, chapter_truncated, used_budget = call_api_complete(
+            p, st.session_state.writer_model, chapter_max,
+            status_cb=lambda msg, _i=i: status_text.write(f"Writing Chapter {_i+1}: {msg}..."),
+            style_guide=d['style_guide'], style_example=d.get('style_example', ''),
+        )
 
         if "API ERROR" in text:
             st.error(text)
             break
+        if chapter_truncated:
+            st.warning(
+                f"Chapter {i+1} was cut off at the {used_budget:,}-token ceiling even after a retry. "
+                "It is kept as written, but the ending is incomplete - lower the target word count "
+                "per chapter, or re-roll this chapter."
+            )
 
         title = extract_tag(text, "title") or phase
         clean = clean_artifacts(text)
@@ -1979,7 +2074,7 @@ elif st.session_state.step == "final":
     elif status == "partial":
         st.warning(f"**Editor pass partially failed.** {report.get('message', '')} "
                    "Per-chapter detail is in the *Editor Notes* tab.")
-    elif status == "too_short":
+    elif status in ("too_short", "truncated"):
         st.warning(f"**Editor output rejected** ({editor_label}). {report.get('message', '')} "
                    "It is still available in the *Rejected Edit* tab below.")
     elif status == "identical":
@@ -2032,7 +2127,7 @@ elif st.session_state.step == "final":
             chapter_rows = report.get("chapters", [])
             if chapter_rows:
                 st.markdown("**Per-chapter result**")
-                icons = {"ok": "✅", "identical": "➖", "error": "❌", "too_short": "⚠️"}
+                icons = {"ok": "✅", "identical": "➖", "error": "❌", "too_short": "⚠️", "truncated": "✂️"}
                 for row in chapter_rows:
                     line = (f"{icons.get(row['status'], '•')} **Ch {row['chapter']} — {row['title']}** "
                             f"· {row['status']}")

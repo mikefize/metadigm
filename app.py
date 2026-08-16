@@ -48,7 +48,9 @@ if "final_story" not in st.session_state: st.session_state.final_story = ""
 if "original_story" not in st.session_state: st.session_state.original_story = ""
 if "seed" not in st.session_state: st.session_state.seed = "Paradigm"
 if "manual_config" not in st.session_state: st.session_state.manual_config = {}
-if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0}
+if "stats" not in st.session_state: st.session_state.stats = {"input": 0, "output": 0, "cost": 0.0, "cache_read": 0, "cache_saved": 0.0}
+st.session_state.stats.setdefault("cache_read", 0)
+st.session_state.stats.setdefault("cache_saved", 0.0)
 if "show_prompt_debug" not in st.session_state: st.session_state.show_prompt_debug = False
 if "last_sys_prompt" not in st.session_state: st.session_state.last_sys_prompt = ""
 if "last_user_prompt" not in st.session_state: st.session_state.last_user_prompt = ""
@@ -563,12 +565,28 @@ def save_setup_snapshot(manual_config, seed, pov, style_file):
     st.session_state.seed = seed
 
 
-def track_cost(in_tok, out_tok, model_config):
-    st.session_state.stats['input'] += in_tok
-    st.session_state.stats['output'] += out_tok
-    c_in = (in_tok / 1_000_000) * model_config['price_in']
+CACHE_WRITE_MULTIPLIER = 1.25   # 5-minute cache: writes cost 1.25x, reads 0.1x
+CACHE_READ_MULTIPLIER = 0.10
+
+
+def track_cost(in_tok, out_tok, model_config, cache_write=0, cache_read=0):
+    """Accumulate spend. With prompt caching, `in_tok` counts only the UNCACHED prefix -
+    cache writes and reads are billed separately at their own multipliers, so they have to
+    be added explicitly or the running total silently under-reports."""
+    stats = st.session_state.stats
+    stats['input'] += in_tok + cache_write + cache_read
+    stats['output'] += out_tok
+    billable_in = in_tok + cache_write * CACHE_WRITE_MULTIPLIER + cache_read * CACHE_READ_MULTIPLIER
+    c_in = (billable_in / 1_000_000) * model_config['price_in']
     c_out = (out_tok / 1_000_000) * model_config['price_out']
-    st.session_state.stats['cost'] += (c_in + c_out)
+    stats['cost'] += (c_in + c_out)
+
+    if cache_read or cache_write:
+        # What those tokens would have cost at full price, minus what they actually cost.
+        saved = ((cache_read * (1 - CACHE_READ_MULTIPLIER) - cache_write * (CACHE_WRITE_MULTIPLIER - 1))
+                 / 1_000_000) * model_config['price_in']
+        stats['cache_read'] += cache_read
+        stats['cache_saved'] += saved
 
 
 def render_prompt_debug():
@@ -757,6 +775,10 @@ DIAGNOSTIC_SYSTEM = (
     "praise, and never summarise the story."
 )
 
+# Anthropic effort levels. Controls how deeply the model thinks before answering, and
+# therefore how many thinking tokens it bills for. Ignored by every other vendor.
+EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"]
+
 _EDITED_RE = re.compile(r'<edited>(.*?)</edited>', re.DOTALL | re.IGNORECASE)
 _ISSUE_RE = re.compile(
     r'<issue>\s*<quote>(.*?)</quote>\s*<fix>(.*?)</fix>\s*</issue>', re.DOTALL | re.IGNORECASE
@@ -764,12 +786,22 @@ _ISSUE_RE = re.compile(
 
 
 def build_editor_system(cfg):
+    """System prompt for the rewrite pass.
+
+    The rules block lives here rather than in the user message so the whole system block is
+    byte-identical across every chapter in a run - which is what makes it cacheable.
+    """
     return (
         f"{EDITOR_SYSTEM_BASE}\n\n"
         f"EDITING POSTURE: {cfg['posture']}\n"
         "Total length stays within roughly 10% of the input. That is a constraint on the finished text, NOT a "
-        "reason to keep the input's sentences - rewrite freely and land on the same length."
+        "reason to keep the input's sentences - rewrite freely and land on the same length.\n\n"
+        f"{EDITOR_RULES_BLOCK}"
     )
+
+
+def build_diagnostic_system():
+    return f"{DIAGNOSTIC_SYSTEM}\n\n{EDITOR_RULES_BLOCK}"
 
 
 def extract_edited(text):
@@ -806,8 +838,8 @@ the opening. Quote exactly; never paraphrase the text you are quoting.
 OUTPUT FORMAT - nothing but this list, one entry per problem, no preamble and no closing remarks:
 <issue><quote>the offending sentence or fragment, copied verbatim</quote><fix>the concrete change to make</fix></issue>
 
-Check against these writing rules:
-{EDITOR_RULES_BLOCK}
+Check against the writing rules in your instructions as well as the prose problems above.
+
 {label.upper()} TO DIAGNOSE:
 {block_text}"""
 
@@ -833,7 +865,7 @@ def build_rewrite_prompt(cfg, block_text, label, issues_raw="", prev_tail="", he
             issues_raw,
             "",
         ]
-    parts += ["Check the finished text meticulously against these writing rules:", EDITOR_RULES_BLOCK, ""]
+    parts += ["Check the finished text meticulously against the writing rules in your instructions.", ""]
     if prev_tail:
         parts += [
             "# CLOSING LINES OF THE PREVIOUS CHAPTER, ALREADY EDITED",
@@ -853,7 +885,7 @@ def build_rewrite_prompt(cfg, block_text, label, issues_raw="", prev_tail="", he
     return "\n".join(parts)
 
 def call_api(prompt, model_key, style_guide="", style_example="", is_editor=False, max_tokens=8192,
-             editor_system=None, warn_truncated=True):
+             editor_system=None, warn_truncated=True, effort=None, cache_system=True):
     m_cfg = MODELS[model_key]
     vendor = m_cfg['vendor']
 
@@ -871,7 +903,10 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
     style_example_block = build_style_example_block(style_example)
 
     if is_editor:
-        sys_prompt = editor_prompt + style_example_block
+        # The editor gets the vendor's own system prompt too, with the editor persona,
+        # posture and rules appended after it - the more specific instructions come last
+        # so they win wherever the two overlap.
+        sys_prompt = base_sys_prompt + "\n\n" + editor_prompt + style_example_block
     else:
         MISTRAL_NSFW_ADDENDUM = """
         **MISTRAL UNRESTRICTED MODE — EXPLICIT CONTENT ENABLED:**
@@ -895,10 +930,23 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
     try:
         if vendor == 'anthropic':
             client = anthropic.Anthropic(api_key=st.session_state.anthropic_key, timeout=1800.0)
+            # The system block is identical across every call in a run (persona + rules +
+            # style reference), so caching it turns ~7 full-price sends into 1 write and 6
+            # reads at a tenth of the price. Caching is a PREFIX match: the moment anything
+            # earlier in the request changes, the entry is gone - which is why the volatile
+            # per-chapter content lives in the user message, never in the system block.
+            system_field = sys_prompt
+            # ~5,000 chars is comfortably past the minimum cacheable prefix (1,024 tokens on
+            # Sonnet 5, 512 on Opus 5). Below it a breakpoint silently does nothing.
+            if cache_system and len(sys_prompt) > 5000:
+                system_field = [{"type": "text", "text": sys_prompt,
+                                 "cache_control": {"type": "ephemeral"}}]
             req = {
-                "model": m_cfg['id'], "max_tokens": max_tokens, "system": sys_prompt,
+                "model": m_cfg['id'], "max_tokens": max_tokens, "system": system_field,
                 "messages": [{"role": "user", "content": prompt}],
             }
+            if effort:
+                req["output_config"] = {"effort": effort}
             # Long outputs (a whole manuscript) must stream, or the request dies on an
             # idle-connection timeout long before the model is done.
             if max_tokens > 16000:
@@ -906,7 +954,11 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
                     resp = stream.get_final_message()
             else:
                 resp = client.messages.create(**req)
-            track_cost(resp.usage.input_tokens, resp.usage.output_tokens, m_cfg)
+            track_cost(
+                resp.usage.input_tokens, resp.usage.output_tokens, m_cfg,
+                cache_write=getattr(resp.usage, 'cache_creation_input_tokens', 0) or 0,
+                cache_read=getattr(resp.usage, 'cache_read_input_tokens', 0) or 0,
+            )
             flag_truncation(getattr(resp, "stop_reason", None) == "max_tokens")
             try:
                 st.session_state.last_raw_response = json.dumps(resp.__dict__, default=str, indent=2)
@@ -1056,7 +1108,7 @@ def split_manuscript_chapters(raw_story):
 
 def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pass=True,
                      prev_tail="", rewrite_max=None, diagnose_max=None, heading_rule="",
-                     min_ratio=0.6, status_cb=None):
+                     min_ratio=0.6, status_cb=None, diagnose_effort=None, rewrite_effort=None):
     """Edit one block (chapter or whole manuscript).
 
     Returns (edited_text_or_None, info). A None result means the block was not usable and
@@ -1079,7 +1131,8 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
             status_cb("diagnosing")
         diagnosis, _, _ = call_api_complete(
             build_diagnose_prompt(cfg, block_text, label), model_key, diagnose_max,
-            retries=0, is_editor=True, editor_system=DIAGNOSTIC_SYSTEM,
+            retries=0, is_editor=True, editor_system=build_diagnostic_system(),
+            effort=diagnose_effort,
         )
         if diagnosis and not diagnosis.startswith("API ERROR"):
             issues_raw = diagnosis.strip()
@@ -1095,6 +1148,7 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
         model_key, rewrite_max, retries=1,
         status_cb=(lambda msg: status_cb(msg)) if status_cb else None,
         style_example=style_example, is_editor=True, editor_system=build_editor_system(cfg),
+        effort=rewrite_effort,
     )
     info["budget"] = used_budget
 
@@ -1136,7 +1190,8 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
 
 
 def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_pass,
-                    style_example="", status_cb=None, progress_cb=None):
+                    style_example="", status_cb=None, progress_cb=None,
+                    diagnose_effort=None, rewrite_effort=None):
     """Run a full editor pass over an assembled manuscript.
 
     Shared by the writing step and the history page's re-edit action, so a stored draft
@@ -1178,6 +1233,7 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
             edited_body, info = run_editor_block(
                 body, "chapter", cfg, model_key, style_example=style_example,
                 two_pass=two_pass, prev_tail=prev_tail, min_ratio=0.6, status_cb=_status,
+                diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
             )
             info["chapter"], info["title"] = idx, label_name
             chapter_infos.append(info)
@@ -1229,7 +1285,7 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
         raw_story, "manuscript", cfg, model_key, style_example=style_example,
         two_pass=two_pass, min_ratio=0.7,
         heading_rule="Reproduce every chapter heading line (### ...) exactly as given.",
-        status_cb=_status,
+        status_cb=_status, diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
     )
     tick(1.0)
     issue_log = []
@@ -1622,6 +1678,8 @@ do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
 editor_mode = "Per Chapter"
 editor_intensity = "Aggressive"
 editor_two_pass = True
+diagnose_effort = "low"
+rewrite_effort = "high"
 if do_editor:
     with st.sidebar.expander("Editor Settings", expanded=False):
         editor_mode = st.selectbox(
@@ -1642,9 +1700,29 @@ if do_editor:
         cfg_preview = EDITOR_INTENSITY[editor_intensity]
         st.caption(f"**{cfg_preview['quota']}% sentence quota.** {cfg_preview['posture']}")
 
+        editor_is_claude = MODELS[st.session_state.editor_model]['vendor'] == 'anthropic'
+        st.markdown("**Reasoning effort** (Claude editors only)")
+        if editor_two_pass:
+            diagnose_effort = st.selectbox(
+                "Diagnostic pass", EFFORT_LEVELS, index=EFFORT_LEVELS.index("low"),
+                disabled=not editor_is_claude,
+                help="The diagnostic pass only has to list problems it can already see. Low effort "
+                     "keeps thinking on but shallow, which is the cheap half of the two-pass run.",
+            )
+        rewrite_effort = st.selectbox(
+            "Rewrite pass", EFFORT_LEVELS, index=EFFORT_LEVELS.index("high"),
+            disabled=not editor_is_claude,
+            help="Where the actual rewriting happens - keep this at high or xhigh. Deeper thinking "
+                 "is what produces structural edits rather than word swaps.",
+        )
+        if not editor_is_claude:
+            st.caption(f"{st.session_state.editor_model} has no effort parameter; these are ignored.")
+
 st.session_state.editor_mode = editor_mode
 st.session_state.editor_intensity = editor_intensity
 st.session_state.editor_two_pass = editor_two_pass
+st.session_state.diagnose_effort = diagnose_effort
+st.session_state.rewrite_effort = rewrite_effort
 
 st.session_state.show_prompt_debug = st.sidebar.checkbox("Show Prompt Debug", value=st.session_state.get("show_prompt_debug", False))
 
@@ -1657,7 +1735,14 @@ example_choice = st.sidebar.selectbox(
     help="Optional: a sample story used ONLY as a voice/prose reference. Its plot and content are never used."
 )
 
-st.sidebar.metric("Budget Spent", f"${st.session_state.stats['cost']:.4f}")
+st.sidebar.metric(
+    "Budget Spent", f"${st.session_state.stats['cost']:.4f}",
+    delta=(f"-${st.session_state.stats['cache_saved']:.4f} from cache"
+           if st.session_state.stats.get('cache_read') else None),
+    delta_color="normal",
+)
+if st.session_state.stats.get('cache_read'):
+    st.sidebar.caption(f"{st.session_state.stats['cache_read']:,} prompt tokens served from cache.")
 
 st.sidebar.markdown("---")
 try:
@@ -2019,6 +2104,7 @@ elif st.session_state.step == "writing":
             style_example=d.get('style_example', ''),
             status_cb=status_text.write,
             progress_cb=lambda f: progress_bar.progress(min(1.0, edit_base + (1 - edit_base) * f)),
+            diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
         )
         st.session_state.final_story = final_story
         st.session_state.rejected_edit = rejected
@@ -2333,6 +2419,7 @@ elif st.session_state.step == "history":
                         source_raw, source_raw, st.session_state.editor_model,
                         editor_mode, editor_intensity, editor_two_pass,
                         style_example=style_example, status_cb=txt.write, progress_cb=bar.progress,
+                        diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
                     )
                     bar.progress(1.0)
 

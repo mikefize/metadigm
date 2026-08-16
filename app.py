@@ -12,6 +12,8 @@ import random
 import re
 import html
 import difflib
+import sqlite3
+import datetime
 import warnings
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -21,12 +23,14 @@ st.set_page_config(page_title="The Paradigm: Director's Cut", page_icon="🎬", 
 
 CONFIG_DIR = 'config'
 EXAMPLES_DIR = os.path.join(CONFIG_DIR, 'style_examples')
+DATA_DIR = 'data'
+DB_PATH = os.path.join(DATA_DIR, 'history.db')
 
 # --- MODEL DEFINITIONS ---
 MODELS = {
     "Grok 4.50": {"name": "Grok 4.50", "id": "grok-4.5", "vendor": "xai", "price_in": 2.00, "price_out": 6.00},
     "Grok 4.20": {"name": "Grok 4.20", "id": "grok-4.20-0309-reasoning", "vendor": "xai", "price_in": 1.25, "price_out": 2.50},
-    "Claude 4.6 Sonnet": {"name": "Claude 4.5 Sonnet", "id": "claude-sonnet-4-6", "vendor": "anthropic", "price_in": 3.00, "price_out": 15.00, "max_out": 128000},
+    "Claude 5 Sonnet": {"name": "Claude 5 Sonnet", "id": "claude-sonnet-5", "vendor": "anthropic", "price_in": 2.00, "price_out": 10.00, "max_out": 128000},
     "Claude 5 Opus": {"name": "Claude 5 Opus", "id": "claude-opus-5", "vendor": "anthropic", "price_in": 5.00, "price_out": 25.00, "max_out": 128000},
     "Gemini 3.1 Pro": {"name": "Gemini 3 Pro", "id": "gemini-3.1-pro-preview", "vendor": "google", "price_in": 2.00, "price_out": 12.00, "max_out": 65536},
     "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.50, "price_out": 3.00, "max_out": 65536},
@@ -84,6 +88,246 @@ def clean_artifacts(text):
 def get_secret(key_name):
     try: return st.secrets[key_name]
     except: return ""
+
+
+# --- STORY HISTORY (SQLite) ---
+# Every finished run is written to data/history.db so a draft can be reopened, re-edited
+# with a different model, or used as the starting point for a fresh generation.
+
+HISTORY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS stories (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL,
+    origin             TEXT NOT NULL DEFAULT 'generated',
+    parent_id          INTEGER,
+    title              TEXT,
+    seed               TEXT,
+    attempt            INTEGER DEFAULT 0,
+    genre              TEXT,
+    writer_model       TEXT,
+    editor_model       TEXT,
+    editor_enabled     INTEGER DEFAULT 0,
+    editor_mode        TEXT,
+    editor_intensity   TEXT,
+    editor_two_pass    INTEGER DEFAULT 0,
+    editor_status      TEXT,
+    style_file         TEXT,
+    style_example_file TEXT,
+    num_chapters       INTEGER DEFAULT 0,
+    raw_words          INTEGER DEFAULT 0,
+    final_words        INTEGER DEFAULT 0,
+    tokens_in          INTEGER DEFAULT 0,
+    tokens_out         INTEGER DEFAULT 0,
+    cost               REAL DEFAULT 0.0,
+    raw_story          TEXT,
+    final_story        TEXT,
+    rejected_edit      TEXT,
+    dossier_json       TEXT,
+    config_json        TEXT,
+    editor_report_json TEXT,
+    editor_issues_json TEXT,
+    notes              TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_stories_created ON stories(created_at DESC);
+"""
+
+LIST_COLUMNS = (
+    "id, created_at, origin, parent_id, title, seed, genre, writer_model, editor_model, "
+    "editor_enabled, editor_intensity, editor_status, num_chapters, raw_words, final_words, "
+    "cost, notes"
+)
+
+
+@st.cache_resource(show_spinner=False)
+def init_history_db():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.executescript(HISTORY_SCHEMA)
+        # Tolerate an older file created before a column was added.
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(stories)")}
+        for line in HISTORY_SCHEMA.splitlines():
+            line = line.strip().rstrip(',')
+            if not line or line.upper().startswith(('CREATE', ');', 'ID ')):
+                continue
+            name = line.split()[0]
+            if name.isidentifier() and name not in existing and name != 'id':
+                conn.execute(f"ALTER TABLE stories ADD COLUMN {line}")
+        conn.commit()
+    finally:
+        conn.close()
+    return DB_PATH
+
+
+def _db(sql, params=(), fetch=None):
+    init_history_db()
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.execute(sql, params)
+        result = cur.fetchone() if fetch == 'one' else cur.fetchall() if fetch == 'all' else cur.lastrowid
+        conn.commit()
+        return result
+    finally:
+        conn.close()
+
+
+def save_story(record):
+    columns = ", ".join(record)
+    marks = ", ".join("?" * len(record))
+    return _db(f"INSERT INTO stories ({columns}) VALUES ({marks})", tuple(record.values()))
+
+
+def update_story(story_id, **fields):
+    fields["updated_at"] = datetime.datetime.now().isoformat(timespec='seconds')
+    assignments = ", ".join(f"{k} = ?" for k in fields)
+    _db(f"UPDATE stories SET {assignments} WHERE id = ?", tuple(fields.values()) + (story_id,))
+
+
+def list_stories(search=""):
+    if search.strip():
+        like = f"%{search.strip()}%"
+        return _db(
+            f"SELECT {LIST_COLUMNS} FROM stories WHERE title LIKE ? OR seed LIKE ? OR genre LIKE ? "
+            "OR notes LIKE ? ORDER BY id DESC",
+            (like, like, like, like), fetch='all',
+        )
+    return _db(f"SELECT {LIST_COLUMNS} FROM stories ORDER BY id DESC", fetch='all')
+
+
+def get_story(story_id):
+    return _db("SELECT * FROM stories WHERE id = ?", (story_id,), fetch='one')
+
+
+def delete_story(story_id):
+    _db("DELETE FROM stories WHERE id = ?", (story_id,))
+
+
+def history_totals():
+    row = _db("SELECT COUNT(*) AS runs, COALESCE(SUM(cost), 0) AS cost, "
+              "COALESCE(SUM(final_words), 0) AS words FROM stories", fetch='one')
+    return (row["runs"], row["cost"], row["words"]) if row else (0, 0.0, 0)
+
+
+def _dossier_for_storage(dossier):
+    """Drop the bulky fields that can be rebuilt from the config on restore."""
+    slim = dict(dossier or {})
+    slim.pop('style_example', None)   # up to 8k chars, reloaded from style_example_file
+    slim.pop('raw_response', None)
+    return slim
+
+
+def persist_current_run(origin="generated", parent_id=None, stats_delta=None):
+    d = st.session_state.get('dossier') or {}
+    cfg = st.session_state.get('setup_snapshot') or st.session_state.get('manual_config') or {}
+    report = st.session_state.get('editor_report') or {}
+    raw = st.session_state.get('original_story', '') or ''
+    final = st.session_state.get('final_story', '') or ''
+    spend = stats_delta or st.session_state.get('stats', {})
+    now = datetime.datetime.now().isoformat(timespec='seconds')
+
+    record = {
+        "created_at": now, "updated_at": now, "origin": origin, "parent_id": parent_id,
+        "title": d.get('name') or st.session_state.get('seed', '') or "Untitled",
+        "seed": st.session_state.get('seed', ''),
+        "attempt": int(st.session_state.get('attempt', 0) or 0),
+        "genre": d.get('genre', ''),
+        "writer_model": st.session_state.get('writer_model', ''),
+        "editor_model": report.get('model', ''),
+        "editor_enabled": int(bool(report.get('used'))),
+        "editor_mode": report.get('mode', ''),
+        "editor_intensity": report.get('intensity', ''),
+        "editor_two_pass": int(bool(report.get('two_pass'))),
+        "editor_status": report.get('status', 'skipped'),
+        "style_file": cfg.get('style_file', ''),
+        "style_example_file": cfg.get('style_example_file', 'None'),
+        "num_chapters": len(split_manuscript_chapters(raw)[1]),
+        "raw_words": len(raw.split()),
+        "final_words": len(final.split()),
+        "tokens_in": int(spend.get('input', 0)),
+        "tokens_out": int(spend.get('output', 0)),
+        "cost": float(spend.get('cost', 0.0)),
+        "raw_story": raw, "final_story": final,
+        "rejected_edit": st.session_state.get('rejected_edit', '') or '',
+        "dossier_json": json.dumps(_dossier_for_storage(d), default=str),
+        "config_json": json.dumps(cfg, default=str),
+        "editor_report_json": json.dumps(report, default=str),
+        "editor_issues_json": json.dumps(st.session_state.get('editor_issues', []), default=str),
+        "notes": "",
+    }
+    return save_story(record)
+
+
+def stats_since(baseline):
+    """Spend accumulated since a snapshot of st.session_state.stats."""
+    now = st.session_state.get('stats', {})
+    base = baseline or {}
+    return {k: now.get(k, 0) - base.get(k, 0) for k in ("input", "output", "cost")}
+
+
+# A restored row may predate a schema or UI change, so every field the setup and casting
+# screens index into gets a default, and every value feeding a bounded widget gets clamped.
+# Without this, one old row crashes the page it is restored into with no way back.
+DOSSIER_DEFAULTS = {
+    "name": "Protagonist", "job": "Inferred", "genre": "Unspecified",
+    "fetish_str": "None specified.", "body_parts": "NONE. MENTAL CHANGE ONLY.", "body_details": [],
+    "mc_method": "Unspecified", "pov": "Third Person", "protagonist_gender": "Female",
+    "antagonist": "NONE", "protagonists": [], "protagonist_baseline": "", "catalyst": "",
+    "psychological_conflict": "", "blurb": "", "structure_template": "Linear Escalation",
+    "style_guide": "Write normally.", "style_example": "", "num_chapters": 7,
+    "target_words": 10000, "main_idea": "", "pacing": "Steady Build",
+    "transform_onset": "Mid-Story", "add_epilogue": False, "arc_proposal": "", "custom_note": "",
+}
+
+
+def _clamp_int(value, low, high, fallback):
+    try:
+        return max(low, min(high, int(value)))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def restore_dossier_into_session(row):
+    """Put a stored run's premise and setup back into session state."""
+    dossier = {**DOSSIER_DEFAULTS, **json.loads(row["dossier_json"] or "{}")}
+    cfg = json.loads(row["config_json"] or "{}")
+
+    cfg["num_chapters"] = _clamp_int(cfg.get("num_chapters"), 3, 15, 7)
+    cfg["target_words"] = _clamp_int(cfg.get("target_words"), 3000, 30000, 10000)
+    cfg["protagonists"] = (cfg.get("protagonists") or [])[:4]
+    dossier["num_chapters"] = _clamp_int(dossier.get("num_chapters"), 1, 20, cfg["num_chapters"])
+    dossier["target_words"] = _clamp_int(dossier.get("target_words"), 1000, 60000, cfg["target_words"])
+
+    example_file = cfg.get('style_example_file', 'None')
+    if example_file and example_file != 'None':
+        dossier['style_example'] = load_file_content(os.path.join(EXAMPLES_DIR, example_file)) or ''
+    else:
+        dossier['style_example'] = ''
+    if not dossier.get('style_guide'):
+        dossier['style_guide'] = load_file_content(
+            os.path.join(CONFIG_DIR, cfg.get('style_file', 'style_gritty.txt'))
+        ) or "Write normally."
+
+    st.session_state.dossier = dossier
+    st.session_state.manual_config = cfg
+    st.session_state.setup_snapshot = cfg
+    st.session_state.seed = row["seed"] or "Paradigm"
+    st.session_state.attempt = int(row["attempt"] or 0)
+    for key in ["gen_full_narrative", "gen_raw_story", "gen_state_log",
+                "gen_last_chapter_text", "gen_chapter_index", "gen_stats_start"]:
+        st.session_state.pop(key, None)
+
+
+def restore_run_into_session(row):
+    """Load a stored run's text and editor report back into the Final Cut view."""
+    restore_dossier_into_session(row)
+    st.session_state.original_story = row["raw_story"] or ""
+    st.session_state.final_story = row["final_story"] or row["raw_story"] or ""
+    st.session_state.rejected_edit = row["rejected_edit"] or ""
+    st.session_state.editor_report = json.loads(row["editor_report_json"] or "{}")
+    st.session_state.editor_issues = json.loads(row["editor_issues_json"] or "[]")
+    st.session_state.loaded_story_id = row["id"]
 
 
 # --- DIFF (RAW vs EDITED) ---
@@ -804,6 +1048,118 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
                             "for material the editor invented. ")
     return edited, info
 
+
+def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_pass,
+                    style_example="", status_cb=None, progress_cb=None):
+    """Run a full editor pass over an assembled manuscript.
+
+    Shared by the writing step and the history page's re-edit action, so a stored draft
+    can be re-edited with different settings without regenerating the prose.
+    Returns (final_story, report, rejected_text, issue_log).
+    """
+    def say(msg):
+        if status_cb:
+            status_cb(msg)
+
+    def tick(fraction):
+        if progress_cb:
+            progress_cb(min(1.0, max(0.0, fraction)))
+
+    cfg = EDITOR_INTENSITY[intensity]
+    vendor = MODELS[model_key]['vendor']
+    report = {
+        "used": True, "status": "skipped", "message": "", "model": model_key,
+        "mode": mode, "intensity": intensity, "two_pass": bool(two_pass),
+        "raw_chars": len(original_story), "edited_chars": 0,
+        "chapters": [], "issues_found": 0,
+    }
+
+    preamble, chapters = split_manuscript_chapters(raw_story)
+    per_chapter = mode == "Per Chapter" and len(chapters) > 0
+    if mode == "Per Chapter" and not chapters:
+        report["message"] = "No chapter headings were found, so the manuscript was edited in one pass. "
+
+    if per_chapter:
+        edited_chapters, chapter_infos, issue_log = [], [], []
+        prev_tail = ""
+        total = len(chapters)
+        for idx, (heading, body) in enumerate(chapters, 1):
+            label_name = clean_chapter_label(heading.lstrip('#').strip(), idx)
+
+            def _status(stage, _i=idx, _n=total, _t=label_name):
+                say(f"Editing chapter {_i}/{_n} — {_t} ({stage})...")
+
+            _status("starting")
+            edited_body, info = run_editor_block(
+                body, "chapter", cfg, model_key, style_example=style_example,
+                two_pass=two_pass, prev_tail=prev_tail,
+                rewrite_max=65000 if vendor == 'kimi' else 16000,
+                diagnose_max=8000, min_ratio=0.6, status_cb=_status,
+            )
+            info["chapter"], info["title"] = idx, label_name
+            chapter_infos.append(info)
+            if info["issues"]:
+                issue_log.append({"chapter": idx, "title": label_name, "issues": info["issues"]})
+                report["issues_found"] += len(info["issues"])
+
+            # A chapter the editor could not handle falls back to its raw text, so one
+            # bad response costs one chapter instead of the whole book.
+            kept = edited_body if edited_body else body
+            edited_chapters.append(f"{heading}\n\n{kept}")
+            prev_tail = kept
+            tick(idx / total)
+
+        assembled = "\n\n".join(edited_chapters)
+        if preamble:
+            assembled = f"{preamble}\n\n{assembled}"
+        assembled = clean_artifacts(assembled)
+
+        failed = [c for c in chapter_infos if c["status"] in ("error", "too_short")]
+        rejected = "\n\n".join(
+            f"### {c['title']}\n\n{c['rejected']}" for c in chapter_infos if c.get("rejected")
+        )
+        report["chapters"] = [
+            {k: c[k] for k in ("chapter", "title", "status", "message", "ratio")} for c in chapter_infos
+        ]
+        report["edited_chars"] = len(assembled)
+
+        if len(failed) == total:
+            report.update(status="error",
+                          message=report["message"] + f"All {total} chapters failed to edit. "
+                                  + (failed[0]["message"] if failed else ""))
+        elif failed:
+            report.update(status="partial",
+                          message=report["message"]
+                                  + f"{len(failed)} of {total} chapters kept their raw text; the rest were edited.")
+        elif assembled == original_story:
+            report.update(status="identical",
+                          message=report["message"] + "The editor returned every chapter unchanged.")
+        else:
+            report.update(status="ok")
+        return assembled, report, rejected, issue_log
+
+    def _status(stage):
+        say(f"Editing the manuscript in one pass ({stage})...")
+
+    _status("starting")
+    edited, info = run_editor_block(
+        raw_story, "manuscript", cfg, model_key, style_example=style_example,
+        two_pass=two_pass, rewrite_max=200000 if vendor == 'kimi' else 65000,
+        diagnose_max=16000, min_ratio=0.7,
+        heading_rule="Reproduce every chapter heading line (### ...) exactly as given.",
+        status_cb=_status,
+    )
+    tick(1.0)
+    issue_log = []
+    if info["issues"]:
+        issue_log = [{"chapter": 0, "title": "Manuscript", "issues": info["issues"]}]
+        report["issues_found"] = len(info["issues"])
+    report.update(status=info["status"], message=report["message"] + info["message"])
+    if edited is None:
+        return original_story, report, info.get("rejected", ""), issue_log
+    report["edited_chars"] = len(edited)
+    return edited, report, info.get("rejected", ""), issue_log
+
 # --- STORY STRUCTURE ---
 # Picked once per story in generate_dossier and used in exactly one place: the arc proposal
 # prompt. Chapter writing never sees these - it follows whatever outline comes out.
@@ -1221,6 +1577,15 @@ example_choice = st.sidebar.selectbox(
 
 st.sidebar.metric("Budget Spent", f"${st.session_state.stats['cost']:.4f}")
 
+st.sidebar.markdown("---")
+try:
+    _hist_runs = history_totals()[0]
+except Exception:
+    _hist_runs = 0
+if st.sidebar.button(f"📚 Story History ({_hist_runs})", use_container_width=True):
+    st.session_state.step = "history"
+    st.rerun()
+
 render_prompt_debug()
 
 # --- UI STEP 1: SETUP ---
@@ -1481,6 +1846,9 @@ elif st.session_state.step == "writing":
         st.session_state.gen_state_log = []
         st.session_state.gen_last_chapter_text = ""
         st.session_state.gen_chapter_index = 0
+        # Snapshot of the running totals so the history row records this run's own spend,
+        # not the whole session's.
+        st.session_state.gen_stats_start = dict(st.session_state.stats)
 
     full_narrative = st.session_state.gen_full_narrative
     raw_story = st.session_state.gen_raw_story
@@ -1546,129 +1914,42 @@ elif st.session_state.step == "writing":
     st.session_state.original_story = clean_artifacts(raw_story)
     st.session_state.rejected_edit = ""
 
-    editor_report = {
-        "used": bool(do_editor),
-        "status": "skipped",
-        "message": "",
-        "model": st.session_state.editor_model if do_editor else "",
-        "mode": editor_mode if do_editor else "",
-        "intensity": editor_intensity if do_editor else "",
-        "two_pass": bool(editor_two_pass) if do_editor else False,
-        "raw_chars": len(st.session_state.original_story),
-        "edited_chars": 0,
-        "chapters": [],
-        "issues_found": 0,
-    }
     st.session_state.editor_issues = []
 
     if do_editor:
-        cfg = EDITOR_INTENSITY[editor_intensity]
-        editor_vendor = MODELS[st.session_state.editor_model]['vendor']
-        original = st.session_state.original_story
-        preamble, chapters = split_manuscript_chapters(raw_story)
-        per_chapter = editor_mode == "Per Chapter" and len(chapters) > 0
-        if editor_mode == "Per Chapter" and not chapters:
-            editor_report["message"] = "No chapter headings were found, so the manuscript was edited in one pass. "
-
         edit_base = num_chapters / (num_chapters + 1)
-
-        if per_chapter:
-            edited_chapters, chapter_infos, issue_log = [], [], []
-            prev_tail = ""
-            total = len(chapters)
-            for idx, (heading, body) in enumerate(chapters, 1):
-                label_name = clean_chapter_label(heading.lstrip('#').strip(), idx)
-
-                def _status(stage, _i=idx, _n=total, _t=label_name):
-                    status_text.write(f"Editing chapter {_i}/{_n} — {_t} ({stage})...")
-
-                _status("starting")
-                edited_body, info = run_editor_block(
-                    body, "chapter", cfg, st.session_state.editor_model,
-                    style_example=d.get('style_example', ''), two_pass=editor_two_pass,
-                    prev_tail=prev_tail,
-                    rewrite_max=65000 if editor_vendor == 'kimi' else 16000,
-                    diagnose_max=8000, min_ratio=0.6, status_cb=_status,
-                )
-                info["chapter"] = idx
-                info["title"] = label_name
-                chapter_infos.append(info)
-                if info["issues"]:
-                    issue_log.append({"chapter": idx, "title": label_name, "issues": info["issues"]})
-                    editor_report["issues_found"] += len(info["issues"])
-
-                # A chapter the editor could not handle falls back to its raw text, so one
-                # bad response costs one chapter instead of the whole book.
-                kept = edited_body if edited_body else body
-                edited_chapters.append(f"{heading}\n\n{kept}")
-                prev_tail = kept
-                progress_bar.progress(min(1.0, edit_base + (1 - edit_base) * (idx / total)))
-
-            assembled = "\n\n".join(edited_chapters)
-            if preamble:
-                assembled = f"{preamble}\n\n{assembled}"
-            assembled = clean_artifacts(assembled)
-
-            failed = [c for c in chapter_infos if c["status"] in ("error", "too_short")]
-            rejected_parts = [f"### {c['title']}\n\n{c['rejected']}" for c in chapter_infos if c.get("rejected")]
-            st.session_state.rejected_edit = "\n\n".join(rejected_parts)
-            st.session_state.editor_issues = issue_log
-            editor_report["chapters"] = [
-                {k: c[k] for k in ("chapter", "title", "status", "message", "ratio")} for c in chapter_infos
-            ]
-            editor_report["edited_chars"] = len(assembled)
-            st.session_state.final_story = assembled
-
-            if len(failed) == total:
-                editor_report.update(
-                    status="error",
-                    message=editor_report["message"] + f"All {total} chapters failed to edit. "
-                            + (failed[0]["message"] if failed else ""),
-                )
-            elif failed:
-                editor_report.update(
-                    status="partial",
-                    message=editor_report["message"]
-                            + f"{len(failed)} of {total} chapters kept their raw text; the rest were edited.",
-                )
-            elif assembled == original:
-                editor_report.update(status="identical",
-                                     message=editor_report["message"] + "The editor returned every chapter unchanged.")
-            else:
-                editor_report.update(status="ok", message=editor_report["message"])
-        else:
-            status_text.write("Editing the manuscript in one pass...")
-
-            def _status(stage):
-                status_text.write(f"Editing the manuscript in one pass ({stage})...")
-
-            edited, info = run_editor_block(
-                raw_story, "manuscript", cfg, st.session_state.editor_model,
-                style_example=d.get('style_example', ''), two_pass=editor_two_pass,
-                rewrite_max=200000 if editor_vendor == 'kimi' else 65000,
-                diagnose_max=16000, min_ratio=0.7,
-                heading_rule="Reproduce every chapter heading line (### ...) exactly as given.",
-                status_cb=_status,
-            )
-            if info["issues"]:
-                st.session_state.editor_issues = [{"chapter": 0, "title": "Manuscript", "issues": info["issues"]}]
-                editor_report["issues_found"] = len(info["issues"])
-            st.session_state.rejected_edit = info.get("rejected", "")
-
-            if edited is None:
-                editor_report.update(status=info["status"], message=editor_report["message"] + info["message"])
-                st.session_state.final_story = original
-            else:
-                editor_report["edited_chars"] = len(edited)
-                editor_report.update(status=info["status"], message=editor_report["message"] + info["message"])
-                st.session_state.final_story = edited
+        final_story, editor_report, rejected, issue_log = run_editor_pass(
+            raw_story, st.session_state.original_story, st.session_state.editor_model,
+            editor_mode, editor_intensity, editor_two_pass,
+            style_example=d.get('style_example', ''),
+            status_cb=status_text.write,
+            progress_cb=lambda f: progress_bar.progress(min(1.0, edit_base + (1 - edit_base) * f)),
+        )
+        st.session_state.final_story = final_story
+        st.session_state.rejected_edit = rejected
+        st.session_state.editor_issues = issue_log
     else:
+        editor_report = {
+            "used": False, "status": "skipped", "message": "", "model": "", "mode": "",
+            "intensity": "", "two_pass": False, "raw_chars": len(st.session_state.original_story),
+            "edited_chars": 0, "chapters": [], "issues_found": 0,
+        }
         st.session_state.final_story = st.session_state.original_story
 
     st.session_state.editor_report = editor_report
 
+    status_text.write("Saving to history...")
+    try:
+        st.session_state.loaded_story_id = persist_current_run(
+            "generated", stats_delta=stats_since(st.session_state.get("gen_stats_start")),
+        )
+    except Exception as exc:
+        st.session_state.loaded_story_id = None
+        st.warning(f"This run could not be saved to history: {exc}")
+
     progress_bar.progress(1.0)
-    for key in ["gen_full_narrative", "gen_raw_story", "gen_state_log", "gen_last_chapter_text", "gen_chapter_index"]:
+    for key in ["gen_full_narrative", "gen_raw_story", "gen_state_log", "gen_last_chapter_text",
+                "gen_chapter_index", "gen_stats_start"]:
         st.session_state.pop(key, None)
 
     st.session_state.step = "final"
@@ -1786,7 +2067,11 @@ elif st.session_state.step == "final":
         st.text_area("Story", final or original, height=600)
         st.download_button("Download (.txt)", final or original, file_name=f"{safe_seed}.txt")
 
-    col1, col2 = st.columns(2)
+    loaded_id = st.session_state.get("loaded_story_id")
+    if loaded_id:
+        st.caption(f"Saved to history as run #{loaded_id}.")
+
+    col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("🔄 Rewrite Entire Story (Same Parameters)", use_container_width=True):
             st.session_state.step = "writing"
@@ -1795,3 +2080,179 @@ elif st.session_state.step == "final":
         if st.button("✨ Start New Story", use_container_width=True):
             st.session_state.step = "setup"
             st.rerun()
+    with col3:
+        if st.button("📚 Story History", use_container_width=True):
+            st.session_state.step = "history"
+            st.rerun()
+
+# --- UI STEP 5: HISTORY ---
+elif st.session_state.step == "history":
+    st.title("📚 Story History")
+
+    runs, total_cost, total_words = history_totals()
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Runs saved", f"{runs:,}")
+    m2.metric("Words written", f"{total_words:,}")
+    m3.metric("Total spend", f"${total_cost:.2f}")
+    m4.metric("Database", f"{os.path.getsize(DB_PATH)/1024:.0f} KB" if os.path.exists(DB_PATH) else "—")
+
+    top_l, top_r = st.columns([3, 1])
+    search = top_l.text_input("Search", placeholder="Filter by title, seed, genre, or note...")
+    top_r.markdown("<br>", unsafe_allow_html=True)
+    if top_r.button("⬅️ Back", use_container_width=True):
+        st.session_state.step = "final" if st.session_state.get("final_story") else "setup"
+        st.rerun()
+
+    rows = list_stories(search)
+    if not rows:
+        st.info("Nothing saved yet." if not search else "No runs match that search.")
+    else:
+        st.dataframe(
+            [{
+                "#": r["id"],
+                "Date": (r["created_at"] or "").replace("T", " ")[:16],
+                "Title": r["title"],
+                "Genre": r["genre"],
+                "Writer": r["writer_model"],
+                "Editor": (f"{r['editor_model']} ({r['editor_intensity']})"
+                           if r["editor_enabled"] else "—"),
+                "Result": r["editor_status"],
+                "Ch": r["num_chapters"],
+                "Words": r["final_words"],
+                "Cost": f"${r['cost']:.3f}",
+                "Note": (r["notes"] or "")[:40],
+            } for r in rows],
+            use_container_width=True, hide_index=True,
+        )
+
+        def _label(r):
+            edit = f"{r['editor_model']} ({r['editor_intensity']})" if r["editor_enabled"] else "no editor"
+            tag = " · re-edit" if r["origin"] == "re-edit" else ""
+            return (f"#{r['id']} · {(r['created_at'] or '').replace('T', ' ')[:16]} · {r['title']} · "
+                    f"{r['writer_model']} → {edit} · {r['final_words']:,}w{tag}")
+
+        ids = [r["id"] for r in rows]
+        labels = {r["id"]: _label(r) for r in rows}
+        chosen = st.selectbox("Open a run", ids, format_func=lambda i: labels[i])
+        row = get_story(chosen)
+
+        if row:
+            st.markdown("---")
+            detail = json.loads(row["editor_report_json"] or "{}")
+            cfg = json.loads(row["config_json"] or "{}")
+            dossier = json.loads(row["dossier_json"] or "{}")
+
+            d1, d2 = st.columns(2)
+            with d1:
+                st.markdown(f"**#{row['id']} — {row['title']}**")
+                st.markdown(
+                    f"- **Written:** {(row['created_at'] or '').replace('T', ' ')}\n"
+                    f"- **Seed:** `{row['seed']}` (attempt {row['attempt']})\n"
+                    f"- **Genre:** {row['genre'] or '—'}\n"
+                    f"- **Structure:** {dossier.get('structure_template', '—')} · "
+                    f"{row['num_chapters']} chapters · {row['final_words']:,} words"
+                )
+            with d2:
+                st.markdown("**Pipeline**")
+                editor_desc = "disabled"
+                if row["editor_enabled"]:
+                    editor_desc = (f"{row['editor_model']} · {row['editor_mode']} · {row['editor_intensity']} · "
+                                   f"{'two-pass' if row['editor_two_pass'] else 'single pass'} → "
+                                   f"**{row['editor_status']}**")
+                st.markdown(
+                    f"- **Writer:** {row['writer_model']}\n"
+                    f"- **Editor:** {editor_desc}\n"
+                    f"- **Style:** {row['style_file'] or '—'} · example: {row['style_example_file'] or 'None'}\n"
+                    f"- **Spend:** ${row['cost']:.4f} ({row['tokens_in']:,} in / {row['tokens_out']:,} out)"
+                )
+            if row["parent_id"]:
+                st.caption(f"Re-edit of run #{row['parent_id']}.")
+            if detail.get("message"):
+                st.caption(detail["message"])
+
+            if dossier.get("blurb"):
+                with st.expander("Premise", expanded=False):
+                    st.write(dossier.get("blurb", ""))
+                    st.caption(f"Baseline: {dossier.get('protagonist_baseline', '')}")
+                    st.caption(f"Catalyst: {dossier.get('catalyst', '')}")
+            with st.expander("Preview (first 2,000 characters)", expanded=False):
+                st.text((row["final_story"] or row["raw_story"] or "")[:2000])
+
+            note_col, save_col = st.columns([4, 1])
+            note = note_col.text_input("Note", value=row["notes"] or "", key=f"note_{row['id']}",
+                                       placeholder="e.g. best pacing so far, editor too soft on ch4")
+            save_col.markdown("<br>", unsafe_allow_html=True)
+            if save_col.button("Save note", use_container_width=True):
+                update_story(row["id"], notes=note)
+                st.rerun()
+
+            st.markdown("**Actions**")
+            a1, a2, a3 = st.columns(3)
+            if a1.button("👁️ Open in Final Cut", use_container_width=True):
+                restore_run_into_session(row)
+                st.session_state.step = "final"
+                st.rerun()
+            if a2.button("✍️ Rewrite from this dossier", use_container_width=True,
+                         help="Keeps the premise and chapter outline, drops the prose. Pick a different "
+                              "Writer Model in the sidebar first."):
+                restore_dossier_into_session(row)
+                st.session_state.step = "casting"
+                st.rerun()
+            if a3.button("♻️ Reuse setup only", use_container_width=True,
+                         help="Loads the parameters back into the setup screen for a fresh premise."):
+                restore_dossier_into_session(row)
+                st.session_state.step = "setup"
+                st.rerun()
+
+            b1, b2, b3 = st.columns(3)
+            reedit = b1.button("🩹 Re-edit raw draft", use_container_width=True,
+                               help="Runs the editor again over this run's raw draft using the editor "
+                                    "settings currently in the sidebar. Saved as a new run.")
+            b2.download_button("⬇️ Edited (.txt)", row["final_story"] or "",
+                               file_name=f"run{row['id']}_EDITED.txt", use_container_width=True)
+            b3.download_button("⬇️ Raw (.txt)", row["raw_story"] or "",
+                               file_name=f"run{row['id']}_RAW.txt", use_container_width=True)
+
+            if st.checkbox("Enable delete", key=f"del_{row['id']}"):
+                if st.button(f"🗑️ Delete run #{row['id']} permanently", type="secondary"):
+                    delete_story(row["id"])
+                    if st.session_state.get("loaded_story_id") == row["id"]:
+                        st.session_state.loaded_story_id = None
+                    st.rerun()
+
+            if reedit:
+                source_raw = row["raw_story"] or ""
+                if not source_raw.strip():
+                    st.error("This run has no raw draft stored, so there is nothing to re-edit.")
+                else:
+                    example_file = cfg.get("style_example_file", "None")
+                    style_example = ""
+                    if example_file and example_file != "None":
+                        style_example = load_file_content(os.path.join(EXAMPLES_DIR, example_file)) or ""
+
+                    baseline = dict(st.session_state.stats)
+                    bar = st.progress(0.0)
+                    txt = st.empty()
+                    txt.write("Re-editing...")
+                    new_final, new_report, new_rejected, new_issues = run_editor_pass(
+                        source_raw, source_raw, st.session_state.editor_model,
+                        editor_mode, editor_intensity, editor_two_pass,
+                        style_example=style_example, status_cb=txt.write, progress_cb=bar.progress,
+                    )
+                    bar.progress(1.0)
+
+                    restore_dossier_into_session(row)
+                    st.session_state.original_story = source_raw
+                    st.session_state.final_story = new_final
+                    st.session_state.rejected_edit = new_rejected
+                    st.session_state.editor_issues = new_issues
+                    st.session_state.editor_report = new_report
+                    try:
+                        st.session_state.loaded_story_id = persist_current_run(
+                            "re-edit", parent_id=row["id"], stats_delta=stats_since(baseline),
+                        )
+                    except Exception as exc:
+                        st.session_state.loaded_story_id = None
+                        st.warning(f"The re-edit could not be saved to history: {exc}")
+                    st.session_state.step = "final"
+                    st.rerun()

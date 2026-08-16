@@ -14,6 +14,7 @@ import html
 import difflib
 import sqlite3
 import datetime
+import hashlib
 import warnings
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -1189,9 +1190,38 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
     return edited, info
 
 
+EDITOR_CHECKPOINT_KEY = "editor_checkpoint"
+
+
+def _editor_checkpoint(key, raw_story, model_key, mode):
+    """Fetch (or start) the resume record for a per-chapter editor pass.
+
+    Streamlit restarts the whole script on any rerun - a widget touch, a websocket
+    reconnect, a source-file save with 'run on save' enabled. The chapter WRITER survives
+    that because it checkpoints after every chapter; without this the editor would start
+    again at chapter 1 and re-spend every token already paid for.
+
+    The signature covers the draft, the editor model and the scope: resuming across a
+    different manuscript or a Per Chapter / Whole Manuscript switch would splice together
+    incompatible work, so those start fresh. Intensity and effort deliberately are NOT in
+    it - changing them mid-run applies to the chapters still to come and keeps the rest.
+    """
+    signature = hashlib.sha256(
+        f"{model_key}|{mode}|{raw_story}".encode('utf-8', 'ignore')
+    ).hexdigest()
+    stored = st.session_state.get(key)
+    if isinstance(stored, dict) and stored.get("signature") == signature:
+        return stored
+    fresh = {"signature": signature, "index": 0, "chapters": [], "infos": [],
+             "issue_log": [], "prev_tail": ""}
+    st.session_state[key] = fresh
+    return fresh
+
+
 def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_pass,
                     style_example="", status_cb=None, progress_cb=None,
-                    diagnose_effort=None, rewrite_effort=None):
+                    diagnose_effort=None, rewrite_effort=None,
+                    checkpoint_key=EDITOR_CHECKPOINT_KEY):
     """Run a full editor pass over an assembled manuscript.
 
     Shared by the writing step and the history page's re-edit action, so a stored draft
@@ -1220,10 +1250,23 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
         report["message"] = "No chapter headings were found, so the manuscript was edited in one pass. "
 
     if per_chapter:
-        edited_chapters, chapter_infos, issue_log = [], [], []
-        prev_tail = ""
+        ckpt = _editor_checkpoint(checkpoint_key, raw_story, model_key, mode) if checkpoint_key else None
+        edited_chapters = list(ckpt["chapters"]) if ckpt else []
+        chapter_infos = list(ckpt["infos"]) if ckpt else []
+        issue_log = list(ckpt["issue_log"]) if ckpt else []
+        prev_tail = ckpt["prev_tail"] if ckpt else ""
+        done = int(ckpt["index"]) if ckpt else 0
+        report["issues_found"] = sum(len(block["issues"]) for block in issue_log)
+        if done:
+            resumed = (f"Resumed after an interruption - chapters 1-{done} were already edited "
+                       "and were not re-run. ")
+            report["message"] += resumed
+            say(resumed)
+
         total = len(chapters)
         for idx, (heading, body) in enumerate(chapters, 1):
+            if idx <= done:
+                continue
             label_name = clean_chapter_label(heading.lstrip('#').strip(), idx)
 
             def _status(stage, _i=idx, _n=total, _t=label_name):
@@ -1247,6 +1290,16 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
             edited_chapters.append(f"{heading}\n\n{kept}")
             prev_tail = kept
             tick(idx / total)
+
+            # Persist before starting the next chapter, so an interruption costs at most
+            # the chapter in flight rather than the whole pass.
+            if ckpt is not None:
+                ckpt.update(index=idx, chapters=edited_chapters, infos=chapter_infos,
+                            issue_log=issue_log, prev_tail=prev_tail)
+                st.session_state[checkpoint_key] = ckpt
+
+        if checkpoint_key:
+            st.session_state.pop(checkpoint_key, None)
 
         assembled = "\n\n".join(edited_chapters)
         if preamble:
@@ -2130,7 +2183,7 @@ elif st.session_state.step == "writing":
 
     progress_bar.progress(1.0)
     for key in ["gen_full_narrative", "gen_raw_story", "gen_state_log", "gen_last_chapter_text",
-                "gen_chapter_index", "gen_stats_start"]:
+                "gen_chapter_index", "gen_stats_start", EDITOR_CHECKPOINT_KEY]:
         st.session_state.pop(key, None)
 
     st.session_state.step = "final"

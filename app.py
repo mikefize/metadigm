@@ -10,6 +10,8 @@ import os
 import time
 import random
 import re
+import html
+import difflib
 import warnings
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -24,11 +26,11 @@ EXAMPLES_DIR = os.path.join(CONFIG_DIR, 'style_examples')
 MODELS = {
     "Grok 4.50": {"name": "Grok 4.50", "id": "grok-4.5", "vendor": "xai", "price_in": 2.00, "price_out": 6.00},
     "Grok 4.20": {"name": "Grok 4.20", "id": "grok-4.20-0309-reasoning", "vendor": "xai", "price_in": 1.25, "price_out": 2.50},
-    "Claude 4.6 Sonnet": {"name": "Claude 4.5 Sonnet", "id": "claude-sonnet-4-6", "vendor": "anthropic", "price_in": 3.00, "price_out": 15.00},
-    "Claude 5 Opus": {"name": "Claude 5 Opus", "id": "claude-opus-5", "vendor": "anthropic", "price_in": 5.00, "price_out": 25.00},
-    "Gemini 3.1 Pro": {"name": "Gemini 3 Pro", "id": "gemini-3.1-pro-preview", "vendor": "google", "price_in": 2.00, "price_out": 12.00},
-    "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.50, "price_out": 3.00},
-    "Gemini 3.1 Flash": {"name": "Gemini 3.1 Flash", "id": "gemini-3.1-flash-lite-preview", "vendor": "google", "price_in": 0.25, "price_out": 1.50},
+    "Claude 4.6 Sonnet": {"name": "Claude 4.5 Sonnet", "id": "claude-sonnet-4-6", "vendor": "anthropic", "price_in": 3.00, "price_out": 15.00, "max_out": 128000},
+    "Claude 5 Opus": {"name": "Claude 5 Opus", "id": "claude-opus-5", "vendor": "anthropic", "price_in": 5.00, "price_out": 25.00, "max_out": 128000},
+    "Gemini 3.1 Pro": {"name": "Gemini 3 Pro", "id": "gemini-3.1-pro-preview", "vendor": "google", "price_in": 2.00, "price_out": 12.00, "max_out": 65536},
+    "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.50, "price_out": 3.00, "max_out": 65536},
+    "Gemini 3.1 Flash": {"name": "Gemini 3.1 Flash", "id": "gemini-3.1-flash-lite-preview", "vendor": "google", "price_in": 0.25, "price_out": 1.50, "max_out": 65536},
     "Mistral Large": {"id": "mistral-large-latest", "vendor": "mistral", "price_in": 0.50, "price_out": 1.50},
     "Kimi K3": {"name": "Kimi K3", "id": "kimi-k3", "vendor": "kimi", "price_in": 3.00, "price_out": 15.00}
 }
@@ -82,6 +84,146 @@ def clean_artifacts(text):
 def get_secret(key_name):
     try: return st.secrets[key_name]
     except: return ""
+
+
+# --- DIFF (RAW vs EDITED) ---
+DIFF_CSS = """
+<style>
+.diffbox {
+    max-height: 620px; overflow-y: auto; padding: 1rem 1.2rem;
+    border: 1px solid rgba(128,128,128,0.35); border-radius: 0.5rem;
+    line-height: 1.65; font-size: 0.95rem;
+}
+.diffpara { white-space: pre-wrap; word-wrap: break-word; margin-bottom: 1.1rem; }
+.diffpara.unchanged { opacity: 0.5; }
+.diffbox del { background: rgba(220,53,69,0.28); text-decoration: line-through; text-decoration-thickness: 1px; border-radius: 2px; }
+.diffbox ins { background: rgba(40,167,69,0.28); text-decoration: none; border-radius: 2px; }
+.difftag { display: inline-block; font-size: 0.65rem; letter-spacing: 0.10em; text-transform: uppercase;
+           opacity: 0.55; margin-bottom: 0.2rem; }
+</style>
+"""
+
+_WORD_SPLIT_RE = re.compile(r'\s+|[^\s]+')
+
+
+def _tokenize_words(text):
+    return _WORD_SPLIT_RE.findall(text or "")
+
+
+def _norm_para(paragraph):
+    return " ".join((paragraph or "").split()).lower()
+
+
+def split_paragraphs(text):
+    if not text:
+        return []
+    text = text.replace('\r\n', '\n')
+    return [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+
+
+def _word_diff_html(old_text, new_text):
+    """Inline word-level diff of two paragraphs. Returns (html, words_added, words_removed)."""
+    old_tokens = _tokenize_words(old_text)
+    new_tokens = _tokenize_words(new_text)
+    matcher = difflib.SequenceMatcher(
+        None, [t.lower() for t in old_tokens], [t.lower() for t in new_tokens], autojunk=False
+    )
+    parts, added, removed = [], 0, 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        old_chunk = "".join(old_tokens[i1:i2])
+        new_chunk = "".join(new_tokens[j1:j2])
+        if tag == 'equal':
+            parts.append(html.escape(new_chunk))
+            continue
+        if not old_chunk.strip() and not new_chunk.strip():
+            # whitespace-only churn: keep the new spacing, don't mark it
+            parts.append(html.escape(new_chunk))
+            continue
+        if old_chunk.strip():
+            parts.append(f"<del>{html.escape(old_chunk)}</del>")
+            removed += len([t for t in old_tokens[i1:i2] if t.strip()])
+        if new_chunk.strip():
+            parts.append(f"<ins>{html.escape(new_chunk)}</ins>")
+            added += len([t for t in new_tokens[j1:j2] if t.strip()])
+    return "".join(parts), added, removed
+
+
+@st.cache_data(show_spinner=False)
+def build_diff_report(original, edited):
+    """Two-level diff: paragraphs first, then word-level inside rewritten paragraphs.
+
+    Returns (entries, stats) where entries is a list of (status, html) with status in
+    {unchanged, changed, added, removed}.
+    """
+    old_paras = split_paragraphs(original)
+    new_paras = split_paragraphs(edited)
+    matcher = difflib.SequenceMatcher(
+        None, [_norm_para(p) for p in old_paras], [_norm_para(p) for p in new_paras], autojunk=False
+    )
+
+    entries = []
+    stats = {"added": 0, "removed": 0, "changed_blocks": 0, "total_blocks": 0}
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            for p in new_paras[j1:j2]:
+                entries.append(("unchanged", html.escape(p)))
+        elif tag == 'delete':
+            for p in old_paras[i1:i2]:
+                entries.append(("removed", f"<del>{html.escape(p)}</del>"))
+                stats["removed"] += len(p.split())
+                stats["changed_blocks"] += 1
+        elif tag == 'insert':
+            for p in new_paras[j1:j2]:
+                entries.append(("added", f"<ins>{html.escape(p)}</ins>"))
+                stats["added"] += len(p.split())
+                stats["changed_blocks"] += 1
+        else:  # replace
+            old_block, new_block = old_paras[i1:i2], new_paras[j1:j2]
+            if len(old_block) == len(new_block):
+                pairs = list(zip(old_block, new_block))
+            else:
+                # paragraphs were merged/split: diff the whole run as one unit
+                pairs = [("\n\n".join(old_block), "\n\n".join(new_block))]
+            for old_p, new_p in pairs:
+                body, added, removed = _word_diff_html(old_p, new_p)
+                entries.append(("changed", body))
+                stats["added"] += added
+                stats["removed"] += removed
+                stats["changed_blocks"] += 1
+
+    stats["total_blocks"] = len(entries)
+    stats["original_words"] = len((original or "").split())
+    stats["edited_words"] = len((edited or "").split())
+    return entries, stats
+
+
+def render_diff_html(entries, only_changed=False):
+    labels = {"changed": "edited", "added": "added", "removed": "cut", "unchanged": ""}
+    parts = [DIFF_CSS, '<div class="diffbox">']
+    shown = 0
+    for status, body in entries:
+        if only_changed and status == "unchanged":
+            continue
+        shown += 1
+        label = labels.get(status, "")
+        tag_html = f'<span class="difftag">{label}</span><br>' if label else ''
+        parts.append(f'<div class="diffpara {status}">{tag_html}{body}</div>')
+    if shown == 0:
+        parts.append('<div class="diffpara"><em>No differences found.</em></div>')
+    parts.append('</div>')
+    return "".join(parts)
+
+
+def build_standalone_diff_html(entries, title):
+    body = render_diff_html(entries, only_changed=False)
+    return (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        f"<title>{html.escape(title)}</title>"
+        "<style>body{background:#111;color:#e6e6e6;font-family:Georgia,serif;margin:0;padding:2rem;}"
+        ".diffbox{max-height:none!important;border:none!important;}</style>"
+        f"</head><body><h2>{html.escape(title)}</h2>{body}</body></html>"
+    )
 
 
 def normalize_kinks(kinks):
@@ -319,14 +461,167 @@ DOSSIER_EDITOR_TASK = (
     "Only rewrite the phrasing inside each tag to fix AI-sounding prose. Keep every tag exactly as given, in the same order, with no commentary outside the tags."
 )
 
-def call_api(prompt, model_key, style_guide="", style_example="", is_editor=False, max_tokens=8192):
+# --- EDITOR ENGINE ---
+# The editor used to be handed the whole manuscript with "don't hold back" and a system
+# prompt that also said "preserve length". Faced with that conflict a model copies. What
+# actually moves the needle: a small enough block to hold in attention, a numeric quota it
+# can check itself against, and an explicit fence around what it must NOT touch.
+
+EDITOR_INTENSITY = {
+    "Light Touch": {
+        "quota": 15,
+        "posture": "Conservative line edit. Fix what is clearly broken and leave the rest alone.",
+        "para_rule": "Leave a paragraph untouched only when you genuinely cannot find anything wrong with it.",
+    },
+    "Standard": {
+        "quota": 30,
+        "posture": "Working line edit. Most paragraphs should come out better than they went in.",
+        "para_rule": "Most paragraphs should change. A paragraph you leave identical is one you are claiming was already excellent.",
+    },
+    "Aggressive": {
+        "quota": 50,
+        "posture": "Hard rewrite at sentence level. Assume this is a first draft and treat it like one.",
+        "para_rule": "Every paragraph must differ from the input. If a paragraph is already clean, sharpen it anyway: tighten the verbs, cut the throat-clearing, break up the even rhythm.",
+    },
+    "Ruthless": {
+        "quota": 75,
+        "posture": "Near-total re-prose. Keep the events and the meaning; rebuild the sentences carrying them.",
+        "para_rule": "Every paragraph must be substantially rewritten. Treat any sentence you kept verbatim as a sentence you failed to improve.",
+    },
+}
+
+EDITOR_INVARIANTS = """# WHAT MUST NOT CHANGE (hard constraints - violating these ruins the work)
+- Every scene stays, in the same order. Do not add scenes, cut scenes, merge them, or reorder them.
+- No new characters, no removed characters, no renamed characters.
+- Events and their outcomes are fixed. Who does what, and what results from it, does not change.
+- The information state is fixed: who knows what, and the moment they learn it.
+- Dialogue may be rewritten line by line, but what each line COMMUNICATES stays the same, and no character
+  gains or loses a line's worth of meaning.
+- Point of view and tense stay exactly as written.
+- Physical continuity is fixed: clothing, injuries, positions, time of day, who is in the room.
+Everything not on this list is yours to rewrite."""
+
+EDITOR_SYSTEM_BASE = (
+    "You are a Senior Editor specializing in adult transformation fiction and making AI text sound like it was "
+    "written by a person. You rewrite prose: you sharpen dialogue into subtext, make erotic detail concrete and "
+    "explicit, cut AI cliche on sight, and delete author remarks. You never summarise and you never skim."
+)
+
+DIAGNOSTIC_SYSTEM = (
+    "You are a Senior Editor specializing in adult transformation fiction, doing a diagnostic read. You locate "
+    "problems precisely and quote them exactly as written. In this pass you never rewrite the text, never offer "
+    "praise, and never summarise the story."
+)
+
+_EDITED_RE = re.compile(r'<edited>(.*?)</edited>', re.DOTALL | re.IGNORECASE)
+_ISSUE_RE = re.compile(
+    r'<issue>\s*<quote>(.*?)</quote>\s*<fix>(.*?)</fix>\s*</issue>', re.DOTALL | re.IGNORECASE
+)
+
+
+def build_editor_system(cfg):
+    return (
+        f"{EDITOR_SYSTEM_BASE}\n\n"
+        f"EDITING POSTURE: {cfg['posture']}\n"
+        "Total length stays within roughly 10% of the input. That is a constraint on the finished text, NOT a "
+        "reason to keep the input's sentences - rewrite freely and land on the same length."
+    )
+
+
+def extract_edited(text):
+    """Pull the rewritten block out of an <edited> wrapper, tolerating truncation."""
+    if not text:
+        return ""
+    match = _EDITED_RE.search(text)
+    if match:
+        return match.group(1).strip()
+    match = re.search(r'<edited>(.*)', text, re.DOTALL | re.IGNORECASE)
+    if match:  # opening tag only: the response was cut off before it could close
+        return match.group(1).strip()
+    return re.sub(r'</?edited>', '', text).strip()
+
+
+def parse_issues(diagnosis_text):
+    return [(q.strip(), f.strip()) for q, f in _ISSUE_RE.findall(diagnosis_text or "")]
+
+
+def build_diagnose_prompt(cfg, block_text, label):
+    words = len(block_text.split())
+    sentences = max(1, words // 15)
+    min_issues = max(5, min(30, round(sentences * cfg['quota'] / 200)))
+    return f"""TASK: Diagnostic read of one {label}. Do NOT rewrite anything in this pass.
+
+Find every line that breaks the writing rules below, plus every sentence that reads as AI-generated prose:
+generic verbs, cliche sensory beats, emotions named instead of shown, throat-clearing before a paragraph gets
+to its point, filler action between lines of dialogue, dialogue that states its own subtext, and paragraph
+rhythm that never varies.
+
+Find at least {min_issues} problems, and take them from the whole {label} - the last third matters as much as
+the opening. Quote exactly; never paraphrase the text you are quoting.
+
+OUTPUT FORMAT - nothing but this list, one entry per problem, no preamble and no closing remarks:
+<issue><quote>the offending sentence or fragment, copied verbatim</quote><fix>the concrete change to make</fix></issue>
+
+Check against these writing rules:
+{EDITOR_RULES_BLOCK}
+{label.upper()} TO DIAGNOSE:
+{block_text}"""
+
+
+def build_rewrite_prompt(cfg, block_text, label, issues_raw="", prev_tail="", heading_rule=""):
+    parts = [
+        f"TASK: Rewrite this {label} as its line editor.",
+        "",
+        f"REWRITE QUOTA: at least {cfg['quota']}% of the sentences must read differently when you are done. "
+        f"{cfg['para_rule']}",
+        "Work from the first line to the last. Do not summarise, do not compress, do not skip ahead - the final "
+        "third gets the same attention as the opening.",
+        "Make the erotic detail explicit and physically specific where the scene calls for it. Fix continuity "
+        "slips and broken logic. Delete author commentary, editorial notes, and stray tags.",
+        "",
+        EDITOR_INVARIANTS,
+        "",
+    ]
+    if issues_raw:
+        parts += [
+            "# ISSUES FOUND ON THE DIAGNOSTIC READ",
+            "Apply every fix below. This list is your floor, not your ceiling - fix everything else you find too.",
+            issues_raw,
+            "",
+        ]
+    parts += ["Check the finished text meticulously against these writing rules:", EDITOR_RULES_BLOCK, ""]
+    if prev_tail:
+        parts += [
+            "# CLOSING LINES OF THE PREVIOUS CHAPTER, ALREADY EDITED",
+            "Voice and continuity reference only. Do not repeat it, continue it, or edit it.",
+            prev_tail[-1500:],
+            "",
+        ]
+    output_rule = f"OUTPUT FORMAT: return the rewritten {label} wrapped in <edited></edited> tags."
+    if heading_rule:
+        output_rule += f" {heading_rule}"
+    parts += [
+        output_rule + " No preamble, no notes, no commentary outside the tags.",
+        "",
+        f"{label.upper()} TO REWRITE:",
+        block_text,
+    ]
+    return "\n".join(parts)
+
+def call_api(prompt, model_key, style_guide="", style_example="", is_editor=False, max_tokens=8192, editor_system=None):
     m_cfg = MODELS[model_key]
     vendor = m_cfg['vendor']
+
+    # Never ask a model for more output tokens than it can produce - the request would
+    # be rejected outright and the caller would see it as an empty/failed pass.
+    model_cap = m_cfg.get('max_out')
+    if model_cap:
+        max_tokens = min(max_tokens, model_cap)
 
     sys_prompt_path = os.path.join('prompts', f'system_{vendor}.txt')
     base_sys_prompt = load_file_content(sys_prompt_path) or "You are a creative writer."
 
-    editor_prompt = "You are a Senior Editor specializing in adult transformation fiction and making AI text sound more natural. Polish text while preserving length. Make dialogue sharp and subtextual, enhance erotic detail naturally, remove AI cliches, and remove author remarks."
+    editor_prompt = editor_system or EDITOR_SYSTEM_BASE
 
     style_example_block = build_style_example_block(style_example)
 
@@ -346,12 +641,23 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
 
     try:
         if vendor == 'anthropic':
-            client = anthropic.Anthropic(api_key=st.session_state.anthropic_key, timeout=600.0)
-            resp = client.messages.create(
-                model=m_cfg['id'], max_tokens=max_tokens, system=sys_prompt, 
-                messages=[{"role": "user", "content": prompt}]
-            )
+            client = anthropic.Anthropic(api_key=st.session_state.anthropic_key, timeout=1800.0)
+            req = {
+                "model": m_cfg['id'], "max_tokens": max_tokens, "system": sys_prompt,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+            # Long outputs (a whole manuscript) must stream, or the request dies on an
+            # idle-connection timeout long before the model is done.
+            if max_tokens > 16000:
+                with client.messages.stream(**req) as stream:
+                    resp = stream.get_final_message()
+            else:
+                resp = client.messages.create(**req)
             track_cost(resp.usage.input_tokens, resp.usage.output_tokens, m_cfg)
+            if getattr(resp, "stop_reason", None) == "max_tokens":
+                st.warning(
+                    f"{model_key} hit its {max_tokens:,}-token output limit and was cut off mid-text."
+                )
             try:
                 st.session_state.last_raw_response = json.dumps(resp.__dict__, default=str, indent=2)
             except Exception:
@@ -419,6 +725,84 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
 
     except Exception as e:
         return f"API ERROR: {str(e)}"
+
+
+def split_manuscript_chapters(raw_story):
+    """Split the assembled manuscript on its '### Title' headings.
+
+    Returns (preamble, [(heading, body), ...]). An empty chapter list means the text has
+    no headings to split on and must be edited as a single block.
+    """
+    parts = re.split(r'(?m)^(###[ \t]+.*)$', raw_story or "")
+    preamble = parts[0].strip()
+    chapters = []
+    for i in range(1, len(parts) - 1, 2):
+        body = parts[i + 1].strip()
+        if body:
+            chapters.append((parts[i].strip(), body))
+    return preamble, chapters
+
+
+def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pass=True,
+                     prev_tail="", rewrite_max=16000, diagnose_max=8000, heading_rule="",
+                     min_ratio=0.6, status_cb=None):
+    """Edit one block (chapter or whole manuscript).
+
+    Returns (edited_text_or_None, info). A None result means the block was not usable and
+    the caller should keep the raw text; info['rejected'] holds whatever came back so it
+    can still be inspected.
+    """
+    info = {"label": label, "status": "ok", "message": "", "issues": [], "issues_raw": "",
+            "ratio": 0.0, "rejected": ""}
+    issues_raw = ""
+
+    if two_pass:
+        if status_cb:
+            status_cb("diagnosing")
+        diagnosis = call_api(
+            build_diagnose_prompt(cfg, block_text, label), model_key,
+            is_editor=True, editor_system=DIAGNOSTIC_SYSTEM, max_tokens=diagnose_max,
+        )
+        if diagnosis and not diagnosis.startswith("API ERROR"):
+            issues_raw = diagnosis.strip()
+            info["issues"] = parse_issues(diagnosis)
+            info["issues_raw"] = issues_raw
+        else:
+            info["message"] = "Diagnostic pass failed, rewrote without an issue list. "
+
+    if status_cb:
+        status_cb("rewriting")
+    response = call_api(
+        build_rewrite_prompt(cfg, block_text, label, issues_raw, prev_tail, heading_rule),
+        model_key, style_example=style_example, is_editor=True,
+        editor_system=build_editor_system(cfg), max_tokens=rewrite_max,
+    )
+
+    if not response or not response.strip():
+        info.update(status="error", message=info["message"] + "The editor returned an empty response.")
+        return None, info
+    if response.startswith("API ERROR"):
+        info.update(status="error", message=info["message"] + response.strip())
+        return None, info
+
+    edited = clean_artifacts(extract_edited(response))
+    ratio = len(edited) / max(len(block_text.strip()), 1)
+    info["ratio"] = ratio
+    if ratio < min_ratio:
+        info.update(
+            status="too_short",
+            message=info["message"] + f"The editor returned {ratio:.0%} of the input length "
+                                      "(truncated or summarised), so the raw text was kept.",
+            rejected=edited,
+        )
+        return None, info
+    if edited == block_text.strip():
+        info.update(status="identical", message=info["message"] + "Returned unchanged.")
+    elif ratio > 1.4:
+        # The other failure direction: the editor started writing rather than editing.
+        info["message"] += (f"Expanded to {ratio:.0%} of the input length - check the Changes tab "
+                            "for material the editor invented. ")
+    return edited, info
 
 # --- STORY STRUCTURE ---
 # Picked once per story in generate_dossier and used in exactly one place: the arc proposal
@@ -796,6 +1180,34 @@ st.session_state.kimi_key = st.sidebar.text_input("Kimi Key", value=get_secret("
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
+
+editor_mode = "Per Chapter"
+editor_intensity = "Aggressive"
+editor_two_pass = True
+if do_editor:
+    with st.sidebar.expander("Editor Settings", expanded=False):
+        editor_mode = st.selectbox(
+            "Editing Scope", ["Per Chapter", "Whole Manuscript"], index=0,
+            help="Per Chapter sends each chapter separately. A smaller block gets far more actual "
+                 "rewriting than a whole manuscript, and one bad chapter costs one chapter."
+        )
+        editor_intensity = st.select_slider(
+            "Intensity", options=list(EDITOR_INTENSITY.keys()), value="Aggressive",
+            help="Sets the rewrite quota the editor has to hit. Check the Changes tab afterwards "
+                 "to see whether it actually did."
+        )
+        editor_two_pass = st.checkbox(
+            "Two-pass (diagnose, then rewrite)", value=True,
+            help="First call lists concrete problems with quotes; second call applies that list. "
+                 "Much more aggressive than a single polish pass, at double the editor calls."
+        )
+        cfg_preview = EDITOR_INTENSITY[editor_intensity]
+        st.caption(f"**{cfg_preview['quota']}% sentence quota.** {cfg_preview['posture']}")
+
+st.session_state.editor_mode = editor_mode
+st.session_state.editor_intensity = editor_intensity
+st.session_state.editor_two_pass = editor_two_pass
+
 st.session_state.show_prompt_debug = st.sidebar.checkbox("Show Prompt Debug", value=st.session_state.get("show_prompt_debug", False))
 
 style_files = [f for f in os.listdir(CONFIG_DIR) if f.startswith('style_') and f.endswith('.txt')] if os.path.exists(CONFIG_DIR) else []
@@ -1132,20 +1544,128 @@ elif st.session_state.step == "writing":
         progress_bar.progress((i + 1) / (len(arc) + 1))
 
     st.session_state.original_story = clean_artifacts(raw_story)
+    st.session_state.rejected_edit = ""
+
+    editor_report = {
+        "used": bool(do_editor),
+        "status": "skipped",
+        "message": "",
+        "model": st.session_state.editor_model if do_editor else "",
+        "mode": editor_mode if do_editor else "",
+        "intensity": editor_intensity if do_editor else "",
+        "two_pass": bool(editor_two_pass) if do_editor else False,
+        "raw_chars": len(st.session_state.original_story),
+        "edited_chars": 0,
+        "chapters": [],
+        "issues_found": 0,
+    }
+    st.session_state.editor_issues = []
 
     if do_editor:
-        status_text.write("Applying Senior Editor Polish Pass...")
-        manuscript_task = (
-            "TASK: Polish manuscript. Fix logic. No summaries. Remove tags. Don't be afraid to change the manuscript, don't hold back. "
-            "Keep its essence but fix the writing, especially lengthy metaphors. Enhance explicit erotic details and vulgarity where applicable. "
-            "Remove author comments."
-        )
-        edit_p = build_editor_prompt(manuscript_task, raw_story)
-        editor_max = 200000 if MODELS[st.session_state.editor_model]['vendor'] == 'kimi' else 65000
-        final = call_api(edit_p, st.session_state.editor_model, style_example=d.get('style_example', ''), is_editor=True, max_tokens=editor_max)
-        st.session_state.final_story = clean_artifacts(final) if final and len(final) > len(raw_story)*0.7 else clean_artifacts(raw_story)
+        cfg = EDITOR_INTENSITY[editor_intensity]
+        editor_vendor = MODELS[st.session_state.editor_model]['vendor']
+        original = st.session_state.original_story
+        preamble, chapters = split_manuscript_chapters(raw_story)
+        per_chapter = editor_mode == "Per Chapter" and len(chapters) > 0
+        if editor_mode == "Per Chapter" and not chapters:
+            editor_report["message"] = "No chapter headings were found, so the manuscript was edited in one pass. "
+
+        edit_base = num_chapters / (num_chapters + 1)
+
+        if per_chapter:
+            edited_chapters, chapter_infos, issue_log = [], [], []
+            prev_tail = ""
+            total = len(chapters)
+            for idx, (heading, body) in enumerate(chapters, 1):
+                label_name = clean_chapter_label(heading.lstrip('#').strip(), idx)
+
+                def _status(stage, _i=idx, _n=total, _t=label_name):
+                    status_text.write(f"Editing chapter {_i}/{_n} — {_t} ({stage})...")
+
+                _status("starting")
+                edited_body, info = run_editor_block(
+                    body, "chapter", cfg, st.session_state.editor_model,
+                    style_example=d.get('style_example', ''), two_pass=editor_two_pass,
+                    prev_tail=prev_tail,
+                    rewrite_max=65000 if editor_vendor == 'kimi' else 16000,
+                    diagnose_max=8000, min_ratio=0.6, status_cb=_status,
+                )
+                info["chapter"] = idx
+                info["title"] = label_name
+                chapter_infos.append(info)
+                if info["issues"]:
+                    issue_log.append({"chapter": idx, "title": label_name, "issues": info["issues"]})
+                    editor_report["issues_found"] += len(info["issues"])
+
+                # A chapter the editor could not handle falls back to its raw text, so one
+                # bad response costs one chapter instead of the whole book.
+                kept = edited_body if edited_body else body
+                edited_chapters.append(f"{heading}\n\n{kept}")
+                prev_tail = kept
+                progress_bar.progress(min(1.0, edit_base + (1 - edit_base) * (idx / total)))
+
+            assembled = "\n\n".join(edited_chapters)
+            if preamble:
+                assembled = f"{preamble}\n\n{assembled}"
+            assembled = clean_artifacts(assembled)
+
+            failed = [c for c in chapter_infos if c["status"] in ("error", "too_short")]
+            rejected_parts = [f"### {c['title']}\n\n{c['rejected']}" for c in chapter_infos if c.get("rejected")]
+            st.session_state.rejected_edit = "\n\n".join(rejected_parts)
+            st.session_state.editor_issues = issue_log
+            editor_report["chapters"] = [
+                {k: c[k] for k in ("chapter", "title", "status", "message", "ratio")} for c in chapter_infos
+            ]
+            editor_report["edited_chars"] = len(assembled)
+            st.session_state.final_story = assembled
+
+            if len(failed) == total:
+                editor_report.update(
+                    status="error",
+                    message=editor_report["message"] + f"All {total} chapters failed to edit. "
+                            + (failed[0]["message"] if failed else ""),
+                )
+            elif failed:
+                editor_report.update(
+                    status="partial",
+                    message=editor_report["message"]
+                            + f"{len(failed)} of {total} chapters kept their raw text; the rest were edited.",
+                )
+            elif assembled == original:
+                editor_report.update(status="identical",
+                                     message=editor_report["message"] + "The editor returned every chapter unchanged.")
+            else:
+                editor_report.update(status="ok", message=editor_report["message"])
+        else:
+            status_text.write("Editing the manuscript in one pass...")
+
+            def _status(stage):
+                status_text.write(f"Editing the manuscript in one pass ({stage})...")
+
+            edited, info = run_editor_block(
+                raw_story, "manuscript", cfg, st.session_state.editor_model,
+                style_example=d.get('style_example', ''), two_pass=editor_two_pass,
+                rewrite_max=200000 if editor_vendor == 'kimi' else 65000,
+                diagnose_max=16000, min_ratio=0.7,
+                heading_rule="Reproduce every chapter heading line (### ...) exactly as given.",
+                status_cb=_status,
+            )
+            if info["issues"]:
+                st.session_state.editor_issues = [{"chapter": 0, "title": "Manuscript", "issues": info["issues"]}]
+                editor_report["issues_found"] = len(info["issues"])
+            st.session_state.rejected_edit = info.get("rejected", "")
+
+            if edited is None:
+                editor_report.update(status=info["status"], message=editor_report["message"] + info["message"])
+                st.session_state.final_story = original
+            else:
+                editor_report["edited_chars"] = len(edited)
+                editor_report.update(status=info["status"], message=editor_report["message"] + info["message"])
+                st.session_state.final_story = edited
     else:
         st.session_state.final_story = st.session_state.original_story
+
+    st.session_state.editor_report = editor_report
 
     progress_bar.progress(1.0)
     for key in ["gen_full_narrative", "gen_raw_story", "gen_state_log", "gen_last_chapter_text", "gen_chapter_index"]:
@@ -1160,16 +1680,108 @@ elif st.session_state.step == "final":
 
     original = st.session_state.get("original_story", "")
     final = st.session_state.get("final_story", "")
+    rejected = st.session_state.get("rejected_edit", "")
+    report = st.session_state.get("editor_report", {})
     safe_seed = "".join([c for c in st.session_state.seed if c.isalnum()]).rstrip()
 
-    if original and final and original != final and do_editor:
-        tab_edit, tab_orig = st.tabs(["✨ Edited Manuscript", "📜 Original Raw Draft"])
-        with tab_edit:
+    status = report.get("status", "skipped")
+    editor_label = report.get("model", "")
+    if report.get("used"):
+        st.caption(
+            f"Editor: **{editor_label}** · {report.get('mode', '')} · {report.get('intensity', '')} "
+            f"({EDITOR_INTENSITY.get(report.get('intensity', ''), {}).get('quota', '?')}% quota) · "
+            f"{'two-pass' if report.get('two_pass') else 'single pass'}"
+            + (f" · {report['issues_found']} issues logged" if report.get("issues_found") else "")
+        )
+    if status == "error":
+        st.error(f"**Editor pass failed** ({editor_label}) — showing the raw draft.\n\n{report.get('message', '')}")
+    elif status == "partial":
+        st.warning(f"**Editor pass partially failed.** {report.get('message', '')} "
+                   "Per-chapter detail is in the *Editor Notes* tab.")
+    elif status == "too_short":
+        st.warning(f"**Editor output rejected** ({editor_label}). {report.get('message', '')} "
+                   "It is still available in the *Rejected Edit* tab below.")
+    elif status == "identical":
+        st.info(f"The editor ({editor_label}) returned the manuscript unchanged.")
+    elif status == "ok" and report.get("message"):
+        st.info(report["message"])
+
+    # The edited text to diff against: normally the final story, but if the edit was
+    # rejected for length we still want to see what it actually did.
+    diff_target = final if (final and final != original) else rejected
+
+    if report.get("used") and original:
+        tab_names = ["✨ Edited Manuscript", "📜 Original Raw Draft", "🔍 Changes", "🗒️ Editor Notes"]
+        if rejected:
+            tab_names.append("⚠️ Rejected Edit")
+        tabs = st.tabs(tab_names)
+
+        with tabs[0]:
             st.text_area("Polished Story", final, height=600)
             st.download_button("Download Edited (.txt)", final, file_name=f"{safe_seed}_EDITED.txt")
-        with tab_orig:
+        with tabs[1]:
             st.text_area("Raw Draft", original, height=600)
             st.download_button("Download Raw (.txt)", original, file_name=f"{safe_seed}_RAW.txt")
+        with tabs[2]:
+            if not diff_target:
+                st.info("No edited version to compare — the raw draft is the final text.")
+            else:
+                with st.spinner("Comparing drafts..."):
+                    entries, stats = build_diff_report(original, diff_target)
+                touched = stats["changed_blocks"]
+                total = max(stats["total_blocks"], 1)
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Paragraphs touched", f"{touched}/{stats['total_blocks']}", f"{touched/total:.0%}")
+                c2.metric("Words added", f"+{stats['added']:,}")
+                c3.metric("Words cut", f"-{stats['removed']:,}")
+                c4.metric("Word count", f"{stats['edited_words']:,}",
+                          f"{stats['edited_words'] - stats['original_words']:+,}")
+                if final == original and rejected:
+                    st.caption("Comparing the raw draft against the **rejected** edit.")
+                only_changed = st.checkbox("Show changed paragraphs only", value=False)
+                st.caption("🟥 struck-through = cut from the raw draft · 🟩 highlighted = added by the editor")
+                st.markdown(render_diff_html(entries, only_changed=only_changed), unsafe_allow_html=True)
+                st.download_button(
+                    "Download Diff (.html)",
+                    build_standalone_diff_html(entries, f"{safe_seed} — Raw vs Edited"),
+                    file_name=f"{safe_seed}_DIFF.html",
+                    mime="text/html",
+                )
+        with tabs[3]:
+            chapter_rows = report.get("chapters", [])
+            if chapter_rows:
+                st.markdown("**Per-chapter result**")
+                icons = {"ok": "✅", "identical": "➖", "error": "❌", "too_short": "⚠️"}
+                for row in chapter_rows:
+                    line = (f"{icons.get(row['status'], '•')} **Ch {row['chapter']} — {row['title']}** "
+                            f"· {row['status']}")
+                    if row.get("ratio"):
+                        line += f" · {row['ratio']:.0%} of raw length"
+                    st.markdown(line)
+                    if row.get("message"):
+                        st.caption(row["message"])
+                st.markdown("---")
+
+            issue_log = st.session_state.get("editor_issues", [])
+            if issue_log:
+                st.markdown("**What the editor flagged on its diagnostic read**")
+                for block in issue_log:
+                    header = block["title"] if not block["chapter"] else f"Ch {block['chapter']} — {block['title']}"
+                    with st.expander(f"{header} ({len(block['issues'])} issues)", expanded=False):
+                        for quote, fix in block["issues"]:
+                            st.markdown(f"> {quote}")
+                            st.markdown(f"→ {fix}")
+                            st.markdown("")
+            elif report.get("two_pass"):
+                st.info("The diagnostic pass returned no parseable issue list for this run.")
+            else:
+                st.info("Two-pass editing was off, so there is no diagnostic list. "
+                        "Enable it in the sidebar under Editor Settings for a rationale trail.")
+
+        if rejected:
+            with tabs[4]:
+                st.text_area("Rejected Editor Output", rejected, height=600)
+                st.download_button("Download Rejected Edit (.txt)", rejected, file_name=f"{safe_seed}_REJECTED.txt")
     else:
         st.text_area("Story", final or original, height=600)
         st.download_button("Download (.txt)", final or original, file_name=f"{safe_seed}.txt")

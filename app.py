@@ -57,6 +57,12 @@ if "last_sys_prompt" not in st.session_state: st.session_state.last_sys_prompt =
 if "last_user_prompt" not in st.session_state: st.session_state.last_user_prompt = ""
 if "last_raw_response" not in st.session_state: st.session_state.last_raw_response = ""
 if "last_api_payload" not in st.session_state: st.session_state.last_api_payload = ""
+# Premise Builder (optional source-adaptation step; see PREMISE BUILDER section)
+if "premise_source" not in st.session_state: st.session_state.premise_source = ""
+if "premise_skeleton" not in st.session_state: st.session_state.premise_skeleton = None
+if "premise_skeleton_hash" not in st.session_state: st.session_state.premise_skeleton_hash = ""
+if "premise_result" not in st.session_state: st.session_state.premise_result = None
+if "premise_return_step" not in st.session_state: st.session_state.premise_return_step = "setup"
 
 # --- UTILS ---
 def load_list(filename):
@@ -1716,6 +1722,230 @@ OUTPUT AT THE VERY END ON NEW LINES:
 """
     return global_bible + "\n" + pacing_rules + "\n" + task_block
 
+# --- PREMISE BUILDER (SOURCE ADAPTATION) ---
+# An optional front-end for ONE field: main_idea on the setup screen. It takes a summary of an
+# existing film/show/book and folds selected motifs into it. Nothing downstream knows or cares
+# that a premise arrived this way, and the whole step can be skipped.
+#
+# Why two calls instead of one: asked in a single shot to "rewrite this summary with these
+# kinks", a model APPENDS - you get the original plot back with a paragraph of motif bolted
+# onto the end. Splitting it forces the model to name the load-bearing joints of the source
+# plot first, then substitute INTO them. Substitution rather than addition is the whole
+# mechanism behind "integrated without deviating from the plot".
+
+PREMISE_SKELETON_TAGS = [
+    "logline", "protagonist", "want", "antagonist_force",
+    "power_dynamic", "setting", "escalation", "ending", "joints",
+]
+
+# How far the source plot is allowed to move. A 0-100 slider does nothing useful here - the
+# model just varies adjective density. Levels that each define what may CHANGE steer hard.
+DEVIATION_LEVELS = {
+    "1 · Subtext": {
+        "caption": "Every plot beat survives untouched. The motifs are undertone only.",
+        "rule": (
+            "SUBTEXT ONLY. Every beat, reveal and outcome of the source survives unchanged and in the same "
+            "order. The motifs may only colour how things are described, what a character privately notices, "
+            "and what the atmosphere implies. Nothing overt happens on the motifs. Where a motif will not fit "
+            "without altering a beat, leave it as implication rather than bending the plot."
+        ),
+    },
+    "2 · Thread": {
+        "caption": "Main plot intact; the motifs own one subplot or one character's arc.",
+        "rule": (
+            "ONE THREAD. The main plot - its beats, their order, and the ending - stays as it is. The motifs "
+            "take over exactly one subplot or one supporting character's arc, which may be re-purposed freely. "
+            "That thread must touch the main plot at least twice, but must never redirect it."
+        ),
+    },
+    "3 · Engine": {
+        "caption": "Same beats, same structure, same ending — but the motifs are now what CAUSES them.",
+        "rule": (
+            "RE-CAUSED. Keep the act structure, the sequence of major beats, and who ends up where. Change "
+            "WHY each beat happens: the motifs become the causal engine underneath the existing plot. A "
+            "reader who knows the source should recognise every beat and be unable to point at one that was "
+            "added. Prefer replacing an existing plot element with a motif over introducing a new element."
+        ),
+    },
+    "4 · Reskin": {
+        "caption": "Only the setting, cast, tone and central relationship survive. Plot rebuilt around the motifs.",
+        "rule": (
+            "REBUILD. Keep the setting, the cast and their relationships, the tone, and the central dramatic "
+            "question. Everything else is yours: beats, escalation and ending are rebuilt so the motifs drive "
+            "the story from the first page. The result must still feel like it belongs in the source's world."
+        ),
+    },
+}
+
+MOTIF_PROMINENCE = {
+    1: "Garnish - present as flavour and implication only; must not own a plot beat.",
+    2: "Thread - recurs across several scenes and shapes a character, but is not the spine.",
+    3: "Pillar - load-bearing; at least one major beat exists because of this motif.",
+}
+
+# The slider shows these words directly rather than 1/2/3 behind a format_func, so what the
+# widget stores is what the user read. normalize_kinks still wants the number.
+PROMINENCE_LABELS = {"Garnish": 1, "Thread": 2, "Pillar": 3}
+
+
+def build_skeleton_prompt(summary):
+    """Stage A: reduce the source to structure. Cheap, and stable across motif tweaks."""
+    return f"""TASK: Break the story summary below into its structural skeleton. You are not judging,
+continuing, or rewriting it - you are stripping it down to the load-bearing parts so it can be
+adapted later.
+
+Keep the real names, places and specifics from the summary. Where the summary is vague, infer the
+most probable reading rather than leaving a field empty, and keep the inference conservative.
+
+SOURCE SUMMARY:
+\"\"\"
+{summary.strip()}
+\"\"\"
+
+The <joints> field is the important one. A joint is an element of THIS plot that could be swapped
+for something else without the story falling apart - the object everyone wants, the reason a
+character has power over another, the institution in the background, the nature of the threat, the
+thing the protagonist is running from. List 4-6 of them, most substitutable first, each as
+"element - the job it does in the plot".
+
+OUTPUT FORMAT (STRICT XML - NO OTHER TEXT):
+<logline>One sentence: who wants what, and what stands in the way.</logline>
+<protagonist>Name, role, situation at the start, and the flaw or need they carry.</protagonist>
+<want>What the protagonist is actually chasing, and what they need underneath that.</want>
+<antagonist_force>The person, system or condition opposing them, and the leverage it holds.</antagonist_force>
+<power_dynamic>Who holds power over whom, in what currency, and how that shifts across the story.</power_dynamic>
+<setting>Place, period, social texture, and the rules of this world.</setting>
+<escalation>The 4-6 major beats in order, one short line each.</escalation>
+<ending>How it resolves and what state the protagonist is left in.</ending>
+<joints>The substitutable elements, one per line.</joints>
+"""
+
+
+def build_fusion_prompt(summary, skeleton, motif_lines, method_list, deviation_key, notes):
+    """Stage B: substitute the motifs into the joints found in stage A, then write the premise."""
+    level = DEVIATION_LEVELS[deviation_key]
+    skeleton_block = "\n".join(
+        f"<{tag}>{skeleton.get(tag, '')}</{tag}>" for tag in PREMISE_SKELETON_TAGS if skeleton.get(tag)
+    )
+    motif_block = "\n".join(motif_lines) if motif_lines else "None specified - work from the mechanism and notes alone."
+    method_block = ", ".join(method_list) if method_list else "Not specified - choose whatever the plot already supports."
+
+    prompt = f"""TASK: Adapt the source story below into a premise for an erotic transformation story, with
+the given motifs built into it. This premise becomes the top-level concept another model writes
+the full story from, so it must read as one coherent story, not as a summary with additions.
+
+SOURCE SKELETON (from the original):
+{skeleton_block}
+
+ORIGINAL SUMMARY (for detail and texture - the skeleton above is the authority on structure):
+\"\"\"
+{summary.strip()}
+\"\"\"
+
+MOTIFS TO BUILD IN:
+{motif_block}
+
+TRANSFORMATION MECHANISM: {method_block}
+
+DEVIATION LEVEL - {deviation_key}:
+{level['rule']}
+
+# METHOD (follow this order - do not skip to the premise)
+1. Read the <joints> in the skeleton. Those are the elements of this plot that can carry weight.
+2. For each motif, find the joint it can REPLACE. The motif should take over a job the plot already
+   needed doing - the thing everyone wants, the source of one character's hold over another, the
+   institution in the background, the nature of the threat. A motif that arrives as a new element
+   alongside the plot has been added, not integrated, and is a failure.
+3. Only then write the premise, from the substitutions you just made.
+
+# HARD CONSTRAINTS
+- Keep the original names, places and world. This is an adaptation of THIS story, not a story like it.
+- Do not narrate, do not write scenes, and do not open with "In a world where". Write the premise as a
+  publisher's concept note: what the story is, in the present tense.
+- Do not use the words "explores", "delves", "journey", "unravels" or "little did they know".
+- Every element you introduce must be traceable to a substitution you listed. No free additions.
+- The transformation must be something that HAPPENS TO or THROUGH the protagonist across the plot,
+  not a state they already start in.
+"""
+    if notes.strip():
+        prompt += f"\nUSER DIRECTION (overrides your own choices where they conflict):\n{notes.strip()}\n"
+
+    prompt += """
+OUTPUT FORMAT (STRICT XML - NO OTHER TEXT):
+<substitutions>
+One line per substitution, formatted as: SOURCE ELEMENT -> WHAT IT BECOMES [motif responsible]
+One line per motif at minimum. Be concrete about the source element - name it as the source names it.
+</substitutions>
+<premise>
+The premise itself: 180-260 words of continuous prose, present tense, no headings or bullets. Name the
+protagonist, the mechanism acting on them, what escalates, and where it ends up.
+</premise>
+<changes>
+What a reader of the original would notice as different, one bullet per line. If a beat survived but is
+now caused by something else, say so. Be honest here - this is how the user checks your work.
+</changes>
+"""
+    return prompt
+
+
+def generate_source_skeleton(summary, model_key):
+    """Stage A call. Returns {tag: text} or {"error": ...}."""
+    res = call_api(build_skeleton_prompt(summary), model_key, max_tokens=3000, effort="low")
+    if not res or res.startswith("API ERROR"):
+        return {"error": res or "Empty API response."}
+    skeleton = {tag: extract_tag(res, tag) for tag in PREMISE_SKELETON_TAGS}
+    if not any(skeleton.values()):
+        return {"error": "The model did not return a usable skeleton. Try a longer summary or another model."}
+    skeleton["raw_response"] = res
+    return skeleton
+
+
+def generate_fused_premise(summary, skeleton, motif_lines, method_list, deviation_key, notes, model_key):
+    """Stage B call. Returns {"premise", "substitutions", "changes"} or {"error": ...}."""
+    prompt = build_fusion_prompt(summary, skeleton, motif_lines, method_list, deviation_key, notes)
+    res = call_api(prompt, model_key, max_tokens=6000, effort="medium")
+    if not res or res.startswith("API ERROR"):
+        return {"error": res or "Empty API response."}
+    premise = extract_tag(res, "premise")
+    if not premise:
+        return {"error": "The model returned no <premise> block. Check the raw response in Prompt Debug."}
+    return {
+        "premise": premise,
+        "substitutions": extract_tag(res, "substitutions"),
+        "changes": extract_tag(res, "changes"),
+        "raw_response": res,
+    }
+
+
+def build_motif_lines(kink_details, custom_motifs):
+    """One line per motif, carrying its own prominence definition so the model cannot average them."""
+    lines = []
+    for k in normalize_kinks(kink_details):
+        lines.append(f"- {k['name']} [{MOTIF_PROMINENCE[k['strength']]}]")
+    for motif in custom_motifs:
+        lines.append(f"- {motif} [{MOTIF_PROMINENCE[2]}]")
+    return lines
+
+
+def push_premise_to_setup(text):
+    """Write the premise into the setup screen's snapshot. main_idea is an unkeyed text_area, so
+    changing the snapshot is enough - no stale widget state to purge."""
+    snapshot = dict(st.session_state.get("setup_snapshot") or st.session_state.get("manual_config") or {})
+    snapshot["main_idea"] = text.strip()
+    st.session_state.setup_snapshot = snapshot
+    st.session_state.manual_config = snapshot
+
+
+def open_premise_builder(return_step):
+    # "writing" resumes generation the moment it renders, so it must never be a Back target -
+    # the user would press Back and find a run restarting under them. Casting is the step they
+    # can safely re-launch from.
+    if return_step in ("writing", "premise"):
+        return_step = "casting" if st.session_state.get("dossier") else "setup"
+    st.session_state.premise_return_step = return_step
+    st.session_state.step = "premise"
+
+
 # --- SIDEBAR & CONFIG ---
 st.sidebar.header("Settings")
 st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", value=get_secret("ANTHROPIC_API_KEY"), type="password")
@@ -1804,6 +2034,12 @@ except Exception:
     _hist_runs = 0
 if st.sidebar.button(f"📚 Story History ({_hist_runs})", use_container_width=True):
     st.session_state.step = "history"
+    st.rerun()
+
+if st.sidebar.button("🎭 Premise Builder", use_container_width=True,
+                     help="Optional. Adapt a film/show/book summary into a Main Story Concept with your "
+                          "motifs folded in. Skip it whenever you'd rather write the concept yourself."):
+    open_premise_builder(st.session_state.step)
     st.rerun()
 
 render_prompt_debug()
@@ -1955,7 +2191,15 @@ if st.session_state.step == "setup":
 
     st.markdown("---")
     st.subheader("4. Main Story Concept")
-    manual_config['main_idea'] = st.text_area("Main Story Idea / High-Level Concept", value=snapshot.get('main_idea', ''), height=100, placeholder="Describe the premise, specific plot hook, or character dynamics...")
+    idea_col, tool_col = st.columns([4, 1])
+    manual_config['main_idea'] = idea_col.text_area("Main Story Idea / High-Level Concept", value=snapshot.get('main_idea', ''), height=100, placeholder="Describe the premise, specific plot hook, or character dynamics...")
+    tool_col.markdown("<br>", unsafe_allow_html=True)
+    if tool_col.button("🎭 Adapt a source", use_container_width=True,
+                       help="Optional: build this concept from a film/show/book summary plus your motifs. "
+                            "Everything you have set up so far is kept."):
+        save_setup_snapshot(manual_config, seed, pov, style_choice)
+        open_premise_builder("setup")
+        st.rerun()
 
     st.markdown("---")
 
@@ -2318,6 +2562,206 @@ elif st.session_state.step == "final":
         if st.button("📚 Story History", use_container_width=True):
             st.session_state.step = "history"
             st.rerun()
+
+# --- UI STEP (OPTIONAL): PREMISE BUILDER ---
+elif st.session_state.step == "premise":
+    st.title("🎭 Premise Builder")
+    st.caption(
+        "Optional. Turns a summary of an existing film, show or book into a Main Story Concept with your "
+        "motifs built into the plot rather than bolted onto it. Skip it whenever you'd rather write the "
+        "concept yourself — the setup screen is unchanged."
+    )
+
+    nav_col, model_col = st.columns([1, 3])
+    if nav_col.button("⬅️ Back", use_container_width=True):
+        st.session_state.step = st.session_state.get("premise_return_step", "setup")
+        st.rerun()
+    model_keys = list(MODELS.keys())
+    default_model = st.session_state.get("premise_model", st.session_state.writer_model)
+    premise_model = model_col.selectbox(
+        "Model for this step", model_keys,
+        index=model_keys.index(default_model) if default_model in model_keys else 0,
+        help="Independent of the Writer Model. Both calls here are small, so a cheap model is usually fine.",
+    )
+    st.session_state.premise_model = premise_model
+
+    # Streamlit drops the state of any widget that was not rendered on the previous run, so
+    # leaving this page for Setup and coming back would otherwise blank the whole form -
+    # including a long pasted summary. The values are mirrored into premise_form and re-seeded
+    # here, before any of the widgets below are instantiated.
+    form = st.session_state.setdefault("premise_form", {})
+
+    def seed_premise_widget(widget_key, default):
+        if widget_key not in st.session_state:
+            st.session_state[widget_key] = form.get(widget_key, default)
+
+    motif_options = load_list('fetishes.txt') if os.path.exists(CONFIG_DIR) else []
+    method_options = load_list('mc_methods.txt') if os.path.exists(CONFIG_DIR) else []
+
+    for _key, _default in (("prem_source_input", ""), ("prem_notes", ""), ("prem_custom", ""),
+                           ("prem_motifs", []), ("prem_methods", []), ("prem_deviation", "3 · Engine")):
+        seed_premise_widget(_key, _default)
+    # A restored selection can name an option that has since been edited out of the config file,
+    # which a multiselect rejects outright.
+    st.session_state.prem_motifs = [m for m in st.session_state.prem_motifs if m in motif_options]
+    st.session_state.prem_methods = [m for m in st.session_state.prem_methods if m in method_options]
+    if st.session_state.prem_deviation not in DEVIATION_LEVELS:
+        st.session_state.prem_deviation = "3 · Engine"
+
+    src_col, opt_col = st.columns([3, 2])
+
+    with src_col:
+        st.subheader("Source")
+        summary = st.text_area(
+            "Summary of the film / show / book",
+            key="prem_source_input", height=280,
+            placeholder="Paste or write a plot summary. The more structure it contains — who wants what, who "
+                        "holds power, how it escalates, how it ends — the more places there are to fold the "
+                        "motifs into. A two-line logline gives the model nothing to work with.",
+        )
+        notes = st.text_area(
+            "Your direction (optional)", key="prem_notes", height=90,
+            placeholder="e.g. keep the heist structure but make the vault the conditioning suite; "
+                        "the sister should be the one who changes, not Ada.",
+            help="Overrides the model's own choices where they conflict.",
+        )
+
+    with opt_col:
+        st.subheader("What to fold in")
+        selected_motifs = st.multiselect(
+            "Motifs / Kinks", motif_options, max_selections=4, key="prem_motifs",
+            help="Each one gets its own prominence below — a garnish and a pillar are very different asks.",
+        )
+        motif_details = []
+        for motif in selected_motifs:
+            seed_premise_widget(f"prem_str_{motif}", "Thread")
+            if st.session_state[f"prem_str_{motif}"] not in PROMINENCE_LABELS:
+                st.session_state[f"prem_str_{motif}"] = "Thread"
+            label = st.select_slider(
+                f"Prominence — {motif.split(' (')[0]}", options=list(PROMINENCE_LABELS),
+                key=f"prem_str_{motif}",
+            )
+            motif_details.append({"name": motif, "strength": PROMINENCE_LABELS[label], "label": label})
+
+        selected_methods = st.multiselect(
+            "Transformation Mechanism", method_options, max_selections=2, key="prem_methods",
+            help="Leave empty to let the model pick whatever the source plot already supports.",
+        )
+        custom_raw = st.text_input(
+            "Custom motifs (comma separated)", key="prem_custom",
+            placeholder="anything not in the lists above",
+        )
+        custom_motifs = [m.strip() for m in custom_raw.split(",") if m.strip()]
+
+        st.markdown("---")
+        deviation = st.select_slider(
+            "Deviation from the source", options=list(DEVIATION_LEVELS.keys()), key="prem_deviation",
+        )
+        st.caption(DEVIATION_LEVELS[deviation]["caption"])
+
+    form.update({
+        "prem_source_input": summary, "prem_notes": notes, "prem_custom": custom_raw,
+        "prem_motifs": list(selected_motifs), "prem_methods": list(selected_methods),
+        "prem_deviation": deviation,
+    })
+    for _m in motif_details:
+        form[f"prem_str_{_m['name']}"] = _m['label']
+
+    st.markdown("---")
+
+    skeleton = st.session_state.premise_skeleton
+    summary_hash = hashlib.sha1(summary.strip().encode('utf-8')).hexdigest() if summary.strip() else ""
+    analysis_fresh = bool(skeleton) and summary_hash == st.session_state.premise_skeleton_hash
+
+    b1, b2 = st.columns(2)
+    build = b1.button("⚙️ Build Premise", type="primary", use_container_width=True)
+    fuse_again = b2.button(
+        "🔁 Re-fuse (reuse analysis)", use_container_width=True, disabled=not analysis_fresh,
+        help="Skips the analysis call and only redoes the fusion — the cheap way to try different motifs "
+             "or a different deviation level against the same source.",
+    )
+    if analysis_fresh:
+        st.caption("Source already analysed. Re-fuse costs one call instead of two.")
+
+    if build or fuse_again:
+        if len(summary.strip()) < 120:
+            st.error("That summary is too thin to adapt. Give it at least a paragraph — ideally who wants "
+                     "what, what opposes them, and how it ends.")
+        elif not (motif_details or custom_motifs or selected_methods or notes.strip()):
+            st.error("Nothing to fold in. Pick at least one motif, mechanism, or write some direction.")
+        else:
+            failed = False
+            if build and not analysis_fresh:
+                with st.spinner("Analysing the source structure..."):
+                    skeleton = generate_source_skeleton(summary, premise_model)
+                if "error" in skeleton:
+                    st.error(f"Analysis failed: {skeleton['error']}")
+                    failed = True
+                else:
+                    st.session_state.premise_skeleton = skeleton
+                    st.session_state.premise_skeleton_hash = summary_hash
+                    st.session_state.premise_source = summary
+
+            if not failed:
+                source_text = st.session_state.premise_source or summary
+                with st.spinner("Folding the motifs into the plot..."):
+                    result = generate_fused_premise(
+                        source_text, skeleton, build_motif_lines(motif_details, custom_motifs),
+                        selected_methods, deviation, notes, premise_model,
+                    )
+                if "error" in result:
+                    st.error(f"Fusion failed: {result['error']}")
+                else:
+                    result["deviation"] = deviation
+                    st.session_state.premise_result = result
+                    # Safe to assign: the widget below has not been instantiated yet this run.
+                    st.session_state.prem_text = result["premise"]
+
+    result = st.session_state.premise_result
+    if not result:
+        st.info("Nothing built yet. Paste a summary, pick your motifs, and press **Build Premise**.")
+    else:
+        st.markdown("---")
+        st.subheader("Premise")
+        st.caption(f"Built at deviation level **{result.get('deviation', '—')}**. "
+                   "Edit freely — what is in this box is what gets sent to Setup.")
+        # Same widget-state cleanup as the form above: a round trip to Setup would empty this box
+        # while premise_result still holds the text.
+        if "prem_text" not in st.session_state:
+            st.session_state.prem_text = result["premise"]
+        st.text_area("Main Story Concept", key="prem_text", height=260, label_visibility="collapsed")
+
+        a1, a2, a3 = st.columns(3)
+        if a1.button("📋 Send to Setup", type="primary", use_container_width=True):
+            push_premise_to_setup(st.session_state.prem_text)
+            st.session_state.step = "setup"
+            st.rerun()
+        a2.download_button(
+            "⬇️ Download (.txt)", st.session_state.get("prem_text", ""),
+            file_name="premise.txt", use_container_width=True,
+        )
+        if a3.button("🗑️ Discard", use_container_width=True,
+                     help="Clears this result. The source analysis is kept, so re-fusing stays cheap."):
+            st.session_state.premise_result = None
+            st.rerun()
+
+        if result.get("substitutions"):
+            with st.expander("Substitutions — what became what", expanded=True):
+                st.caption("Each motif should have taken over a job the original plot already needed doing. "
+                           "A motif that shows up here as a brand-new element was added, not integrated.")
+                st.text(result["substitutions"])
+        if result.get("changes"):
+            with st.expander("Changes a reader of the original would notice", expanded=False):
+                st.markdown(result["changes"])
+        # Read from session rather than the local: a failed analysis leaves an error dict here,
+        # which would render as an empty expander.
+        stored_skeleton = st.session_state.premise_skeleton or {}
+        if any(stored_skeleton.get(tag) for tag in PREMISE_SKELETON_TAGS):
+            with st.expander("Source skeleton (from the analysis pass)", expanded=False):
+                for tag in PREMISE_SKELETON_TAGS:
+                    if stored_skeleton.get(tag):
+                        st.markdown(f"**{tag.replace('_', ' ').title()}**")
+                        st.text(stored_skeleton[tag])
 
 # --- UI STEP 5: HISTORY ---
 elif st.session_state.step == "history":

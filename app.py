@@ -62,6 +62,7 @@ if "premise_source" not in st.session_state: st.session_state.premise_source = "
 if "premise_skeleton" not in st.session_state: st.session_state.premise_skeleton = None
 if "premise_skeleton_hash" not in st.session_state: st.session_state.premise_skeleton_hash = ""
 if "premise_result" not in st.session_state: st.session_state.premise_result = None
+if "premise_cast" not in st.session_state: st.session_state.premise_cast = None
 if "premise_return_step" not in st.session_state: st.session_state.premise_return_step = "setup"
 
 # --- UTILS ---
@@ -1777,6 +1778,51 @@ DEVIATION_LEVELS = {
     },
 }
 
+# Mainstream sources almost always resolve upward, so adapting one faithfully imports an ending
+# this engine rarely wants. This overrides the final beat only - never the road to it.
+ENDING_MODES = {
+    "Follow the source": {
+        "caption": "Resolve the way the original does.",
+        "rule": "",
+    },
+    "Protagonist loses": {
+        "caption": "The transformation wins. No rescue, no reversal, no last-minute clarity.",
+        "rule": (
+            "THE PROTAGONIST LOSES. The transformation completes, holds, and wins. There is no rescue, no "
+            "reversal, no eleventh-hour moment of clarity, and no comeuppance for whoever set it in motion. "
+            "Write it as a completion rather than a tragedy: by the final beat the protagonist no longer "
+            "wants what they wanted on page one, and is not fighting it. If the source ends in a victory, "
+            "that victory is what fails here."
+        ),
+    },
+    "Protagonist resists": {
+        "caption": "They come through it — changed and marked, but still themselves.",
+        "rule": (
+            "THE PROTAGONIST COMES THROUGH IT. They end the story still recognisably themselves, having "
+            "broken, escaped or outlasted the mechanism. The change is real and it leaves marks they will "
+            "carry, so this is a survival rather than a restoration - nothing is put back the way it was."
+        ),
+    },
+    "Ambiguous": {
+        "caption": "The change holds and the cost is visible; deliberately unresolved.",
+        "rule": (
+            "LEAVE IT UNRESOLVED. The change holds and its cost is fully visible, but whether the protagonist "
+            "has been ruined or remade is left genuinely open - both readings must be supportable from the "
+            "same final beat. Do not resolve it with a closing line that tips the balance either way."
+        ),
+    },
+}
+
+# The exact option values the setup screen's widgets accept. They live here rather than inline in
+# the setup UI because the premise builder now writes into that snapshot: a value outside these
+# lists either falls back silently (selectboxes) or raises outright (the body-focus sliders).
+SETUP_GENDERS = ["Female", "Male", "Non-binary"]
+SETUP_CHANGE_TYPES = ["Physical", "Mental", "Both", "None"]
+SETUP_INTENSITIES = ["Subtle", "Pronounced", "Extreme"]
+SETUP_POV = ["Third Person (She/He)", "First Person (I)", "Second Person (You)", "Antagonist Perspective"]
+SETUP_PACING = ["Fast & Explicit", "Steady Build", "Agonizing Slow Burn"]
+SETUP_ONSETS = ["Early", "Mid", "Late"]
+
 MOTIF_PROMINENCE = {
     1: "Garnish - present as flavour and implication only; must not own a plot beat.",
     2: "Thread - recurs across several scenes and shapes a character, but is not the spine.",
@@ -1821,9 +1867,10 @@ OUTPUT FORMAT (STRICT XML - NO OTHER TEXT):
 """
 
 
-def build_fusion_prompt(summary, skeleton, motif_lines, method_list, deviation_key, notes):
+def build_fusion_prompt(summary, skeleton, motif_lines, method_list, deviation_key, ending_key, notes):
     """Stage B: substitute the motifs into the joints found in stage A, then write the premise."""
     level = DEVIATION_LEVELS[deviation_key]
+    ending_rule = ENDING_MODES.get(ending_key, {}).get("rule", "")
     skeleton_block = "\n".join(
         f"<{tag}>{skeleton.get(tag, '')}</{tag}>" for tag in PREMISE_SKELETON_TAGS if skeleton.get(tag)
     )
@@ -1849,7 +1896,18 @@ TRANSFORMATION MECHANISM: {method_block}
 
 DEVIATION LEVEL - {deviation_key}:
 {level['rule']}
+"""
+    if ending_rule:
+        prompt += f"""
+ENDING DIRECTIVE - {ending_key}. This overrides the deviation level wherever the two conflict, and it
+overrides the source's own ending outright:
+{ending_rule}
+Reach it by changing the fewest possible links in the chain of cause and effect you have already built.
+Everything before the final beat stays as the deviation level allows, and the new ending must read as
+what those earlier beats were always going to produce - not as a swerve in the last paragraph.
+"""
 
+    prompt += """
 # METHOD (follow this order - do not skip to the premise)
 1. Read the <joints> in the skeleton. Those are the elements of this plot that can carry weight.
 2. For each motif, find the joint it can REPLACE. The motif should take over a job the plot already
@@ -1900,9 +1958,11 @@ def generate_source_skeleton(summary, model_key):
     return skeleton
 
 
-def generate_fused_premise(summary, skeleton, motif_lines, method_list, deviation_key, notes, model_key):
+def generate_fused_premise(summary, skeleton, motif_lines, method_list, deviation_key, ending_key,
+                           notes, model_key):
     """Stage B call. Returns {"premise", "substitutions", "changes"} or {"error": ...}."""
-    prompt = build_fusion_prompt(summary, skeleton, motif_lines, method_list, deviation_key, notes)
+    prompt = build_fusion_prompt(summary, skeleton, motif_lines, method_list, deviation_key,
+                                 ending_key, notes)
     res = call_api(prompt, model_key, max_tokens=6000, effort="medium")
     if not res or res.startswith("API ERROR"):
         return {"error": res or "Empty API response."}
@@ -1915,6 +1975,238 @@ def generate_fused_premise(summary, skeleton, motif_lines, method_list, deviatio
         "changes": extract_tag(res, "changes"),
         "raw_response": res,
     }
+
+
+# --- STAGE C: CASTING SHEET ---
+# Turns the finished premise into the setup screen's own fields. It is a separate call rather than
+# extra tags on the fusion output because the two jobs pull in opposite directions: fusion wants
+# prose judgement, this wants values copied verbatim out of fixed lists. Bolting them together
+# degrades both, and this way the fusion prompt keeps the output contract it was tuned on.
+
+def build_casting_prompt(premise, skeleton, motif_lines, genre_options, motif_options, body_options,
+                         method_options):
+    def as_list(options):
+        return "\n".join(f"  - {o}" for o in options) or "  (none available)"
+
+    return f"""TASK: Fill in a production sheet for the story premise below. You are not writing prose here -
+you are choosing values, and most of them must be copied verbatim from the lists provided.
+
+PREMISE (the authority - if it contradicts anything else here, it wins):
+\"\"\"
+{premise.strip()}
+\"\"\"
+
+SOURCE CONTEXT (from the original the premise was adapted from):
+<protagonist>{skeleton.get('protagonist', '')}</protagonist>
+<antagonist_force>{skeleton.get('antagonist_force', '')}</antagonist_force>
+<power_dynamic>{skeleton.get('power_dynamic', '')}</power_dynamic>
+<setting>{skeleton.get('setting', '')}</setting>
+
+MOTIFS THE USER ALREADY CHOSE (carry these through as the protagonist's kinks unless the premise
+plainly outgrew one):
+{chr(10).join(motif_lines) if motif_lines else "  (none)"}
+
+# VALUE LISTS - copy the wording EXACTLY, character for character
+Genre (pick the one closest to the premise's tone):
+{as_list(genre_options)}
+Transformation Mechanism (pick what the premise actually uses):
+{as_list(method_options)}
+Kinks (0-4 per protagonist, each with strength 1-3):
+{as_list(motif_options)}
+Body Focus (0-3 per protagonist, physical changes only):
+{as_list(body_options)}
+
+# FIXED CHOICES
+gender: {" | ".join(SETUP_GENDERS)}
+change_type: {" | ".join(SETUP_CHANGE_TYPES)}
+intensity: {" | ".join(SETUP_INTENSITIES)}
+pov: {" | ".join(SETUP_POV)}
+pacing: {" | ".join(SETUP_PACING)}
+transform_onset: {" | ".join(SETUP_ONSETS)}   (how early the change starts biting)
+
+# RULES
+- Protagonists are the people the premise puts through the change. Use the names the premise uses.
+  One is normal; add a second only if the premise genuinely carries two. Never more than four.
+- "info" is one short line - age, job, and the personality note that makes them a person. No prose.
+- The antagonist is whoever holds the leverage in the premise. Set include to false when the opposing
+  force is a system or a condition rather than a person who can appear on the page.
+- Give body_details only when change_type is Physical or Both, and keep "remark" to a few words.
+- Choose nothing that the premise does not support. An empty list beats an invented entry.
+
+OUTPUT FORMAT - a single JSON object inside the tag, and nothing else:
+<cast>
+{{
+  "pov": "...",
+  "genre": "...",
+  "mc_method": "...",
+  "pacing": "...",
+  "transform_onset": "Early | Mid | Late",
+  "antagonist": {{"include": true, "name": "...", "gender": "...", "info": "..."}},
+  "protagonists": [
+    {{"name": "...", "gender": "...", "info": "...", "change_type": "...",
+      "kinks": [{{"name": "...", "strength": 2}}],
+      "body_details": [{{"part": "...", "intensity": "...", "remark": "..."}}]}}
+  ]
+}}
+</cast>
+"""
+
+
+def parse_cast_json(text):
+    """Pull the JSON object out of <cast>. Models wrap it in fences or trail commentary often
+    enough that going straight to json.loads on the tag body is not reliable."""
+    body = extract_tag(text, "cast") or text or ""
+    body = re.sub(r'```(?:json)?\s*(.*?)\s*```', r'\1', body, flags=re.DOTALL | re.IGNORECASE).strip()
+    start, end = body.find('{'), body.rfind('}')
+    if start == -1 or end <= start:
+        return None
+    try:
+        return json.loads(body[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def _pick(value, options, fallback):
+    """Case-insensitive match onto an allowed option, since models re-case and re-punctuate."""
+    if isinstance(value, str):
+        cleaned = value.strip()
+        for opt in options:
+            if cleaned.lower() == opt.lower():
+                return opt
+        # A bare label against a list whose entries carry a parenthetical gloss, e.g. "Corruption"
+        # against "Corruption (Protagonist comes to love...)".
+        for opt in options:
+            if cleaned and opt.lower().startswith(cleaned.lower().rstrip(' .')):
+                return opt
+    return fallback
+
+
+def sanitize_cast_for_setup(cast, num_chapters=7):
+    """Coerce model output onto values the setup widgets actually accept.
+
+    This is not belt-and-braces: the body-focus intensity slider is passed straight into
+    st.select_slider(value=...), which RAISES on an unknown value and would strand the user on a
+    broken setup screen. The selectboxes fail more quietly by falling back to their first option,
+    which is just as wrong. So nothing reaches the snapshot unchecked."""
+    cast = cast if isinstance(cast, dict) else {}
+    genre_options = load_list('genres.txt')
+    method_options = load_list('mc_methods.txt')
+    kink_options = load_list('fetishes.txt')
+    body_options = load_list('body_parts.txt')
+
+    onset_label = _pick(cast.get('transform_onset'), SETUP_ONSETS, "Mid")
+    total = max(1, int(num_chapters or 7))
+    onset_chapter = {
+        "Early": min(total, 2),
+        "Mid": max(1, min(total, (total + 1) // 2)),
+        "Late": max(1, total - 1),
+    }[onset_label]
+
+    # Note the order: filter first, then cap. Capping first would let a hallucinated kink or a
+    # duplicate spend one of the four slots the setup screen allows.
+    protagonists = []
+    for entry in (cast.get('protagonists') or []):
+        if len(protagonists) >= 4:
+            break
+        if not isinstance(entry, dict):
+            continue
+        change_type = _pick(entry.get('change_type'), SETUP_CHANGE_TYPES, "Both")
+
+        kinks = []
+        for k in (entry.get('kinks') or []):
+            if len(kinks) >= 4:
+                break
+            name = _pick(k.get('name') if isinstance(k, dict) else k, kink_options, None)
+            if not name or any(existing['name'] == name for existing in kinks):
+                continue
+            strength = k.get('strength', 2) if isinstance(k, dict) else 2
+            kinks.append({"name": name, "strength": _clamp_int(strength, 1, 3, 2)})
+
+        body_details = []
+        if change_type in ("Physical", "Both"):
+            for b in (entry.get('body_details') or []):
+                if len(body_details) >= 3:
+                    break
+                if not isinstance(b, dict):
+                    continue
+                part = _pick(b.get('part'), body_options, None)
+                if not part or any(existing['part'] == part for existing in body_details):
+                    continue
+                body_details.append({
+                    "part": part,
+                    "intensity": _pick(b.get('intensity'), SETUP_INTENSITIES, "Pronounced"),
+                    "remark": str(b.get('remark') or '').strip()[:80],
+                })
+
+        protagonists.append({
+            "name": str(entry.get('name') or '').strip()[:60],
+            "gender": _pick(entry.get('gender'), SETUP_GENDERS, "Female"),
+            "info": str(entry.get('info') or '').strip()[:200],
+            "change_type": change_type,
+            "kinks": kinks,
+            "body_details": body_details,
+        })
+
+    antag_raw = cast.get('antagonist')
+    antag_raw = antag_raw if isinstance(antag_raw, dict) else {}
+    if antag_raw.get('include', True):
+        antagonist = {
+            "include": True,
+            "name": str(antag_raw.get('name') or '').strip()[:60],
+            "gender": _pick(antag_raw.get('gender'), SETUP_GENDERS, "Female"),
+            "info": str(antag_raw.get('info') or '').strip()[:200],
+        }
+    else:
+        antagonist = {"include": False}
+
+    return {
+        "pov": _pick(cast.get('pov'), SETUP_POV, SETUP_POV[0]),
+        "genre": _pick(cast.get('genre'), genre_options, None),
+        "mc_method": _pick(cast.get('mc_method'), method_options, None),
+        "pacing": _pick(cast.get('pacing'), SETUP_PACING, "Steady Build"),
+        "transform_onset": f"Chapter {onset_chapter}",
+        "onset_label": onset_label,
+        "protagonists": protagonists,
+        "antagonist": antagonist,
+    }
+
+
+def generate_setup_cast(premise, skeleton, motif_lines, model_key, num_chapters=7):
+    """Stage C call. Returns a sanitised setup-config fragment or {"error": ...}."""
+    prompt = build_casting_prompt(
+        premise, skeleton or {}, motif_lines,
+        load_list('genres.txt'), load_list('fetishes.txt'),
+        load_list('body_parts.txt'), load_list('mc_methods.txt'),
+    )
+    res = call_api(prompt, model_key, max_tokens=4000, effort="low")
+    if not res or res.startswith("API ERROR"):
+        return {"error": res or "Empty API response."}
+    parsed = parse_cast_json(res)
+    if parsed is None:
+        return {"error": "The model did not return readable JSON. Check the raw response in Prompt Debug."}
+    cast = sanitize_cast_for_setup(parsed, num_chapters)
+    if not cast["protagonists"]:
+        return {"error": "No usable protagonist came back. Try again, or a stronger model."}
+    return cast
+
+
+# Widgets in the setup screen's protagonist loop carry explicit keys, and a keyed widget prefers
+# whatever is already in session state over the snapshot's value. Streamlit usually clears that
+# state while another page is showing, but "usually" is not a guarantee to hang a silent
+# wrong-cast bug on, so the keys are cleared explicitly on the way in.
+_SETUP_WIDGET_KEY_RE = re.compile(r'^(pname|pgender|pinfo|pchange|pbody|pkinks|pbody_int|pbody_rem|pkink_strength)_')
+
+
+def push_cast_to_setup(premise_text, cast):
+    snapshot = dict(st.session_state.get("setup_snapshot") or st.session_state.get("manual_config") or {})
+    snapshot["main_idea"] = (premise_text or "").strip()
+    for field in ("pov", "genre", "mc_method", "pacing", "transform_onset", "protagonists", "antagonist"):
+        snapshot[field] = cast[field]
+    st.session_state.setup_snapshot = snapshot
+    st.session_state.manual_config = snapshot
+    for key in list(st.session_state.keys()):
+        if _SETUP_WIDGET_KEY_RE.match(str(key)):
+            del st.session_state[key]
 
 
 def build_motif_lines(kink_details, custom_motifs):
@@ -2058,7 +2350,7 @@ if st.session_state.step == "setup":
     with col1:
         st.subheader("1. Core Setup")
         seed = st.text_input("Story Seed", value=snapshot.get("seed", st.session_state.get("seed", "Entropy")))
-        pov_options = ["Third Person (She/He)", "First Person (I)", "Second Person (You)", "Antagonist Perspective"]
+        pov_options = SETUP_POV
         saved_pov = snapshot.get("pov", pov_options[0])
         pov = st.selectbox("Point of View", pov_options, index=pov_options.index(saved_pov) if saved_pov in pov_options else 0)
         manual_config['pov'] = pov
@@ -2071,7 +2363,7 @@ if st.session_state.step == "setup":
         manual_config['add_epilogue'] = st.checkbox("Add Post-Transformation Epilogue", value=bool(snapshot.get('add_epilogue', False)))
 
         st.markdown("---")
-        pacing_options = ["Fast & Explicit", "Steady Build", "Agonizing Slow Burn"]
+        pacing_options = SETUP_PACING
         pacing_value = snapshot.get('pacing', 'Steady Build')
         transform_options = [f"Chapter {i}" for i in range(1, num_chapters + 1)]
         transform_value = resolve_transform_onset_value(num_chapters, snapshot.get('transform_onset', 'Mid-Story'))
@@ -2104,11 +2396,11 @@ if st.session_state.step == "setup":
             saved_p = saved_protagonists[i] if i < len(saved_protagonists) else {}
             with st.expander(f"Protagonist {i+1}", expanded=(i==0)):
                 p_name = st.text_input(f"Name #{i+1} (blank = random)", value=saved_p.get('name',''), key=f"pname_{i}")
-                p_gender_options = ["Female", "Male", "Non-binary"]
+                p_gender_options = SETUP_GENDERS
                 p_gender_value = saved_p.get('gender', 'Female')
                 p_gender = st.selectbox(f"Gender #{i+1}", p_gender_options, index=p_gender_options.index(p_gender_value) if p_gender_value in p_gender_options else 0, key=f"pgender_{i}")
                 p_info = st.text_input(f"Info #{i+1} (age/job/personality)", value=saved_p.get('info',''), key=f"pinfo_{i}")
-                change_type_options = ["Physical", "Mental", "Both", "None"]
+                change_type_options = SETUP_CHANGE_TYPES
                 p_change_value = saved_p.get('change_type', 'Both')
                 p_change = st.selectbox(f"Changes #{i+1}", change_type_options, index=change_type_options.index(p_change_value) if p_change_value in change_type_options else 1, key=f"pchange_{i}")
                 p_body_details = []
@@ -2130,8 +2422,8 @@ if st.session_state.step == "setup":
                             with st.expander(f"Focus: {bp}", expanded=True):
                                 intensity = st.select_slider(
                                     f"Intensity for {bp}",
-                                    options=["Subtle", "Pronounced", "Extreme"],
-                                    value=saved_detail.get('intensity', 'Pronounced'),
+                                    options=SETUP_INTENSITIES,
+                                    value=_pick(saved_detail.get('intensity'), SETUP_INTENSITIES, 'Pronounced'),
                                     key=f"pbody_int_{i}_{idx_body}"
                                 )
                                 remark = st.text_input(
@@ -2173,7 +2465,7 @@ if st.session_state.step == "setup":
         if include_antag:
             with st.expander("Antagonist Details", expanded=True):
                 a_name = st.text_input("Antagonist Name", value=saved_antag.get('name',''))
-                a_gender_options = ["Female", "Male", "Non-binary"]
+                a_gender_options = SETUP_GENDERS
                 a_gender_value = saved_antag.get('gender', 'Female')
                 a_gender = st.selectbox("Antagonist Gender", a_gender_options, index=a_gender_options.index(a_gender_value) if a_gender_value in a_gender_options else 0)
                 a_info = st.text_input("Additional Info", value=saved_antag.get('info',''))
@@ -2599,7 +2891,8 @@ elif st.session_state.step == "premise":
     method_options = load_list('mc_methods.txt') if os.path.exists(CONFIG_DIR) else []
 
     for _key, _default in (("prem_source_input", ""), ("prem_notes", ""), ("prem_custom", ""),
-                           ("prem_motifs", []), ("prem_methods", []), ("prem_deviation", "3 · Engine")):
+                           ("prem_motifs", []), ("prem_methods", []), ("prem_deviation", "3 · Engine"),
+                           ("prem_ending", "Protagonist loses")):
         seed_premise_widget(_key, _default)
     # A restored selection can name an option that has since been edited out of the config file,
     # which a multiselect rejects outright.
@@ -2607,6 +2900,8 @@ elif st.session_state.step == "premise":
     st.session_state.prem_methods = [m for m in st.session_state.prem_methods if m in method_options]
     if st.session_state.prem_deviation not in DEVIATION_LEVELS:
         st.session_state.prem_deviation = "3 · Engine"
+    if st.session_state.prem_ending not in ENDING_MODES:
+        st.session_state.prem_ending = "Protagonist loses"
 
     src_col, opt_col = st.columns([3, 2])
 
@@ -2659,10 +2954,20 @@ elif st.session_state.step == "premise":
         )
         st.caption(DEVIATION_LEVELS[deviation]["caption"])
 
+        ending = st.selectbox(
+            "How it ends", list(ENDING_MODES.keys()), key="prem_ending",
+            help="Mainstream sources nearly always resolve upward. This overrides the source's ending "
+                 "without touching the road that leads to it.",
+        )
+        st.caption(ENDING_MODES[ending]["caption"])
+        if ending != "Follow the source" and deviation in ("1 · Subtext", "2 · Thread"):
+            st.caption("⚠️ At this deviation level every beat is meant to survive. The ending directive "
+                       "wins for the final beat only — everything before it still holds.")
+
     form.update({
         "prem_source_input": summary, "prem_notes": notes, "prem_custom": custom_raw,
         "prem_motifs": list(selected_motifs), "prem_methods": list(selected_methods),
-        "prem_deviation": deviation,
+        "prem_deviation": deviation, "prem_ending": ending,
     })
     for _m in motif_details:
         form[f"prem_str_{_m['name']}"] = _m['label']
@@ -2707,13 +3012,16 @@ elif st.session_state.step == "premise":
                 with st.spinner("Folding the motifs into the plot..."):
                     result = generate_fused_premise(
                         source_text, skeleton, build_motif_lines(motif_details, custom_motifs),
-                        selected_methods, deviation, notes, premise_model,
+                        selected_methods, deviation, ending, notes, premise_model,
                     )
                 if "error" in result:
                     st.error(f"Fusion failed: {result['error']}")
                 else:
                     result["deviation"] = deviation
+                    result["ending"] = ending
                     st.session_state.premise_result = result
+                    # The cast was derived from the premise that just got replaced.
+                    st.session_state.premise_cast = None
                     # Safe to assign: the widget below has not been instantiated yet this run.
                     st.session_state.prem_text = result["premise"]
 
@@ -2723,7 +3031,8 @@ elif st.session_state.step == "premise":
     else:
         st.markdown("---")
         st.subheader("Premise")
-        st.caption(f"Built at deviation level **{result.get('deviation', '—')}**. "
+        st.caption(f"Built at deviation level **{result.get('deviation', '—')}**, "
+                   f"ending: **{result.get('ending', 'Follow the source')}**. "
                    "Edit freely — what is in this box is what gets sent to Setup.")
         # Same widget-state cleanup as the form above: a round trip to Setup would empty this box
         # while premise_result still holds the text.
@@ -2732,7 +3041,8 @@ elif st.session_state.step == "premise":
         st.text_area("Main Story Concept", key="prem_text", height=260, label_visibility="collapsed")
 
         a1, a2, a3 = st.columns(3)
-        if a1.button("📋 Send to Setup", type="primary", use_container_width=True):
+        if a1.button("📋 Send premise only", use_container_width=True,
+                     help="Fills the Main Story Concept box and leaves every other setup field as you had it."):
             push_premise_to_setup(st.session_state.prem_text)
             st.session_state.step = "setup"
             st.rerun()
@@ -2743,7 +3053,73 @@ elif st.session_state.step == "premise":
         if a3.button("🗑️ Discard", use_container_width=True,
                      help="Clears this result. The source analysis is kept, so re-fusing stays cheap."):
             st.session_state.premise_result = None
+            st.session_state.premise_cast = None
             st.rerun()
+
+        # --- Setup pre-fill (stage C) ---
+        st.markdown("---")
+        st.subheader("Setup pre-fill")
+        cast = st.session_state.premise_cast
+        st.caption("Optional second step: read the premise above and fill in the cast, genre, mechanism, "
+                   "POV and pacing on the setup screen. Derive it after any edits you make — it reads the "
+                   "box above, not the original generation.")
+
+        if st.button("🎬 Derive cast & settings from this premise", use_container_width=True):
+            snapshot_chapters = _clamp_int(
+                (st.session_state.get("setup_snapshot") or {}).get("num_chapters"), 3, 15, 7)
+            with st.spinner("Casting the premise..."):
+                derived = generate_setup_cast(
+                    st.session_state.prem_text, st.session_state.premise_skeleton,
+                    build_motif_lines(motif_details, custom_motifs), premise_model,
+                    num_chapters=snapshot_chapters,
+                )
+            if "error" in derived:
+                st.error(f"Casting failed: {derived['error']}")
+            else:
+                derived["source_hash"] = hashlib.sha1(
+                    st.session_state.prem_text.strip().encode('utf-8')).hexdigest()
+                st.session_state.premise_cast = derived
+                cast = derived
+
+        if cast:
+            current_hash = hashlib.sha1(st.session_state.prem_text.strip().encode('utf-8')).hexdigest()
+            if cast.get("source_hash") and cast["source_hash"] != current_hash:
+                st.warning("The premise has been edited since this cast was derived. Derive it again "
+                           "if the edits changed the cast, the setting or the mechanism.")
+            c_left, c_right = st.columns(2)
+            with c_left:
+                st.markdown(
+                    f"- **Genre:** {cast['genre'] or 'Random'}\n"
+                    f"- **Mechanism:** {cast['mc_method'] or 'Random'}\n"
+                    f"- **POV:** {cast['pov']}\n"
+                    f"- **Pacing:** {cast['pacing']}\n"
+                    f"- **Onset:** {cast['transform_onset']} ({cast.get('onset_label', 'Mid')})"
+                )
+                antag = cast['antagonist']
+                if antag.get('include'):
+                    st.markdown(f"- **Antagonist:** {antag['name'] or 'Unnamed'} ({antag['gender']})"
+                                + (f" — {antag['info']}" if antag.get('info') else ""))
+                else:
+                    st.markdown("- **Antagonist:** none (the opposing force is not a person)")
+            with c_right:
+                for p in cast['protagonists']:
+                    st.markdown(f"**{p['name'] or 'Unnamed'}** ({p['gender']}) — changes: {p['change_type']}")
+                    if p.get('info'):
+                        st.caption(p['info'])
+                    if p.get('kinks'):
+                        st.caption(f"Kinks: {format_kink_list(p['kinks'])}")
+                    if p.get('body_details'):
+                        st.caption("Body: " + "; ".join(
+                            f"{b['part']} [{b['intensity']}]" + (f" ({b['remark']})" if b['remark'] else "")
+                            for b in p['body_details']
+                        ))
+
+            st.caption("Anything here can still be changed on the setup screen — this only pre-selects it. "
+                       "Chapter count, word count and style are left alone.")
+            if st.button("🎬 Send premise + setup", type="primary", use_container_width=True):
+                push_cast_to_setup(st.session_state.prem_text, cast)
+                st.session_state.step = "setup"
+                st.rerun()
 
         if result.get("substitutions"):
             with st.expander("Substitutions — what became what", expanded=True):

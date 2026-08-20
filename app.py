@@ -1813,6 +1813,24 @@ ENDING_MODES = {
     },
 }
 
+# Most mainstream sources lead with a man, and this engine's motif vocabulary is written for a female
+# lead, so adapting a source faithfully usually imports the wrong protagonist. The recast happens at
+# fusion, never during analysis: the skeleton keeps describing the source as it really is, which is why
+# toggling this only costs a re-fuse rather than a fresh analysis pass.
+RECAST_FEMALE_RULE = """
+RECAST THE PROTAGONIST AS FEMALE. The lead is a woman in this version.
+- Give her a name from the same culture, era and social register as the original's. Pick a name a real
+  person would carry, not a feminised spelling of the source's (no Michael -> Michelle).
+- Change pronouns and gendered nouns throughout, and adjust only what the recast actually forces:
+  spouses and love interests, honorifics, titles, and any beat whose mechanics depend on the lead's sex.
+  Every other character keeps the gender the source gave them.
+- Do not soften her. Her competence, rank, temper, appetites and agency are exactly what the original
+  character had. She is not more cautious, more nurturing, more emotional or more decorative than he was,
+  and nothing he accomplished becomes something done for her here.
+- Where a beat genuinely depends on the lead being male - a men-only institution, an inheritance, a
+  conscription - re-cause that beat instead of deleting it. The beat survives; its reason changes.
+"""
+
 # The exact option values the setup screen's widgets accept. They live here rather than inline in
 # the setup UI because the premise builder now writes into that snapshot: a value outside these
 # lists either falls back silently (selectboxes) or raises outright (the body-focus sliders).
@@ -1867,7 +1885,8 @@ OUTPUT FORMAT (STRICT XML - NO OTHER TEXT):
 """
 
 
-def build_fusion_prompt(summary, skeleton, motif_lines, method_list, deviation_key, ending_key, notes):
+def build_fusion_prompt(summary, skeleton, motif_lines, method_list, deviation_key, ending_key, notes,
+                        recast_female=False):
     """Stage B: substitute the motifs into the joints found in stage A, then write the premise."""
     level = DEVIATION_LEVELS[deviation_key]
     ending_rule = ENDING_MODES.get(ending_key, {}).get("rule", "")
@@ -1907,7 +1926,19 @@ Everything before the final beat stays as the deviation level allows, and the ne
 what those earlier beats were always going to produce - not as a swerve in the last paragraph.
 """
 
-    prompt += """
+    if recast_female:
+        prompt += RECAST_FEMALE_RULE
+
+    # The "keep the original names" constraint below has to bend for the one name the recast changes,
+    # or the two directives contradict each other and the model picks whichever it read last.
+    names_rule = (
+        "- Keep the original places, world and supporting names. Only the protagonist's name changes, and "
+        "only as the RECAST directive requires. This is an adaptation of THIS story, not a story like it."
+        if recast_female else
+        "- Keep the original names, places and world. This is an adaptation of THIS story, not a story like it."
+    )
+
+    prompt += f"""
 # METHOD (follow this order - do not skip to the premise)
 1. Read the <joints> in the skeleton. Those are the elements of this plot that can carry weight.
 2. For each motif, find the joint it can REPLACE. The motif should take over a job the plot already
@@ -1917,7 +1948,7 @@ what those earlier beats were always going to produce - not as a swerve in the l
 3. Only then write the premise, from the substitutions you just made.
 
 # HARD CONSTRAINTS
-- Keep the original names, places and world. This is an adaptation of THIS story, not a story like it.
+{names_rule}
 - Do not narrate, do not write scenes, and do not open with "In a world where". Write the premise as a
   publisher's concept note: what the story is, in the present tense.
 - Do not use the words "explores", "delves", "journey", "unravels" or "little did they know".
@@ -1959,10 +1990,10 @@ def generate_source_skeleton(summary, model_key):
 
 
 def generate_fused_premise(summary, skeleton, motif_lines, method_list, deviation_key, ending_key,
-                           notes, model_key):
+                           notes, model_key, recast_female=False):
     """Stage B call. Returns {"premise", "substitutions", "changes"} or {"error": ...}."""
     prompt = build_fusion_prompt(summary, skeleton, motif_lines, method_list, deviation_key,
-                                 ending_key, notes)
+                                 ending_key, notes, recast_female)
     res = call_api(prompt, model_key, max_tokens=6000, effort="medium")
     if not res or res.startswith("API ERROR"):
         return {"error": res or "Empty API response."}
@@ -1984,9 +2015,14 @@ def generate_fused_premise(summary, skeleton, motif_lines, method_list, deviatio
 # degrades both, and this way the fusion prompt keeps the output contract it was tuned on.
 
 def build_casting_prompt(premise, skeleton, motif_lines, genre_options, motif_options, body_options,
-                         method_options):
+                         method_options, recast_female=False):
     def as_list(options):
         return "\n".join(f"  - {o}" for o in options) or "  (none available)"
+
+    recast_note = ("""
+- The lead was deliberately recast as female during the adaptation. Take her name and gender from the
+  PREMISE - the source context below still describes the original man."""
+                   if recast_female else "")
 
     return f"""TASK: Fill in a production sheet for the story premise below. You are not writing prose here -
 you are choosing values, and most of them must be copied verbatim from the lists provided.
@@ -2031,7 +2067,7 @@ transform_onset: {" | ".join(SETUP_ONSETS)}   (how early the change starts bitin
 - The antagonist is whoever holds the leverage in the premise. Set include to false when the opposing
   force is a system or a condition rather than a person who can appear on the page.
 - Give body_details only when change_type is Physical or Both, and keep "remark" to a few words.
-- Choose nothing that the premise does not support. An empty list beats an invented entry.
+- Choose nothing that the premise does not support. An empty list beats an invented entry.{recast_note}
 
 OUTPUT FORMAT - a single JSON object inside the tag, and nothing else:
 <cast>
@@ -2081,7 +2117,7 @@ def _pick(value, options, fallback):
     return fallback
 
 
-def sanitize_cast_for_setup(cast, num_chapters=7):
+def sanitize_cast_for_setup(cast, num_chapters=7, force_female_lead=False):
     """Coerce model output onto values the setup widgets actually accept.
 
     This is not belt-and-braces: the body-focus intensity slider is passed straight into
@@ -2147,6 +2183,11 @@ def sanitize_cast_for_setup(cast, num_chapters=7):
             "body_details": body_details,
         })
 
+    # The premise already reads as female, so this only catches a model that drifted back to the
+    # source's lead. Index 0 is the lead, by the same convention generate_dossier uses.
+    if force_female_lead and protagonists:
+        protagonists[0]["gender"] = "Female"
+
     antag_raw = cast.get('antagonist')
     antag_raw = antag_raw if isinstance(antag_raw, dict) else {}
     if antag_raw.get('include', True):
@@ -2171,12 +2212,13 @@ def sanitize_cast_for_setup(cast, num_chapters=7):
     }
 
 
-def generate_setup_cast(premise, skeleton, motif_lines, model_key, num_chapters=7):
+def generate_setup_cast(premise, skeleton, motif_lines, model_key, num_chapters=7,
+                        recast_female=False):
     """Stage C call. Returns a sanitised setup-config fragment or {"error": ...}."""
     prompt = build_casting_prompt(
         premise, skeleton or {}, motif_lines,
         load_list('genres.txt'), load_list('fetishes.txt'),
-        load_list('body_parts.txt'), load_list('mc_methods.txt'),
+        load_list('body_parts.txt'), load_list('mc_methods.txt'), recast_female,
     )
     res = call_api(prompt, model_key, max_tokens=4000, effort="low")
     if not res or res.startswith("API ERROR"):
@@ -2184,7 +2226,7 @@ def generate_setup_cast(premise, skeleton, motif_lines, model_key, num_chapters=
     parsed = parse_cast_json(res)
     if parsed is None:
         return {"error": "The model did not return readable JSON. Check the raw response in Prompt Debug."}
-    cast = sanitize_cast_for_setup(parsed, num_chapters)
+    cast = sanitize_cast_for_setup(parsed, num_chapters, force_female_lead=recast_female)
     if not cast["protagonists"]:
         return {"error": "No usable protagonist came back. Try again, or a stronger model."}
     return cast
@@ -2892,7 +2934,7 @@ elif st.session_state.step == "premise":
 
     for _key, _default in (("prem_source_input", ""), ("prem_notes", ""), ("prem_custom", ""),
                            ("prem_motifs", []), ("prem_methods", []), ("prem_deviation", "3 · Engine"),
-                           ("prem_ending", "Protagonist loses")):
+                           ("prem_ending", "Protagonist loses"), ("prem_recast", False)):
         seed_premise_widget(_key, _default)
     # A restored selection can name an option that has since been edited out of the config file,
     # which a multiselect rejects outright.
@@ -2960,6 +3002,12 @@ elif st.session_state.step == "premise":
                  "without touching the road that leads to it.",
         )
         st.caption(ENDING_MODES[ending]["caption"])
+        recast_female = st.checkbox(
+            "Recast the protagonist as female", key="prem_recast",
+            help="Most sources lead with a man. This rewrites the lead as a woman - new name, pronouns and "
+                 "whatever the change forces - without softening her or touching the rest of the cast.",
+        )
+
         if ending != "Follow the source" and deviation in ("1 · Subtext", "2 · Thread"):
             st.caption("⚠️ At this deviation level every beat is meant to survive. The ending directive "
                        "wins for the final beat only — everything before it still holds.")
@@ -2967,7 +3015,7 @@ elif st.session_state.step == "premise":
     form.update({
         "prem_source_input": summary, "prem_notes": notes, "prem_custom": custom_raw,
         "prem_motifs": list(selected_motifs), "prem_methods": list(selected_methods),
-        "prem_deviation": deviation, "prem_ending": ending,
+        "prem_deviation": deviation, "prem_ending": ending, "prem_recast": recast_female,
     })
     for _m in motif_details:
         form[f"prem_str_{_m['name']}"] = _m['label']
@@ -3012,13 +3060,14 @@ elif st.session_state.step == "premise":
                 with st.spinner("Folding the motifs into the plot..."):
                     result = generate_fused_premise(
                         source_text, skeleton, build_motif_lines(motif_details, custom_motifs),
-                        selected_methods, deviation, ending, notes, premise_model,
+                        selected_methods, deviation, ending, notes, premise_model, recast_female,
                     )
                 if "error" in result:
                     st.error(f"Fusion failed: {result['error']}")
                 else:
                     result["deviation"] = deviation
                     result["ending"] = ending
+                    result["recast_female"] = recast_female
                     st.session_state.premise_result = result
                     # The cast was derived from the premise that just got replaced.
                     st.session_state.premise_cast = None
@@ -3031,8 +3080,9 @@ elif st.session_state.step == "premise":
     else:
         st.markdown("---")
         st.subheader("Premise")
+        recast_note_ui = " · protagonist recast as female" if result.get("recast_female") else ""
         st.caption(f"Built at deviation level **{result.get('deviation', '—')}**, "
-                   f"ending: **{result.get('ending', 'Follow the source')}**. "
+                   f"ending: **{result.get('ending', 'Follow the source')}**{recast_note_ui}. "
                    "Edit freely — what is in this box is what gets sent to Setup.")
         # Same widget-state cleanup as the form above: a round trip to Setup would empty this box
         # while premise_result still holds the text.
@@ -3071,7 +3121,7 @@ elif st.session_state.step == "premise":
                 derived = generate_setup_cast(
                     st.session_state.prem_text, st.session_state.premise_skeleton,
                     build_motif_lines(motif_details, custom_motifs), premise_model,
-                    num_chapters=snapshot_chapters,
+                    num_chapters=snapshot_chapters, recast_female=recast_female,
                 )
             if "error" in derived:
                 st.error(f"Casting failed: {derived['error']}")

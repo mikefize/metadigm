@@ -149,14 +149,53 @@ LIST_COLUMNS = (
 )
 
 
+# --- STORAGE BACKEND ---
+# Streamlit Cloud rebuilds the container from the git repo on every restart - the app sleeping,
+# a redeploy, a manual reboot, a resource kill - and data/ is gitignored, so a local SQLite file
+# comes back as an empty schema every time. That failure is silent: History still works, it is
+# just empty, which is exactly how it went unnoticed.
+#
+# Point TURSO_DATABASE_URL at a hosted libSQL database and the same schema lives somewhere that
+# outlives the container. libSQL speaks SQLite's dialect, so every statement below runs unchanged
+# against both backends and the driver is only imported when a URL is actually configured - local
+# runs need no network and no extra dependency.
+
+def turso_config():
+    """(url, token) when a hosted database is configured, else None."""
+    url = (get_secret("TURSO_DATABASE_URL") or os.environ.get("TURSO_DATABASE_URL") or "").strip()
+    token = (get_secret("TURSO_AUTH_TOKEN") or os.environ.get("TURSO_AUTH_TOKEN") or "").strip()
+    return (url, token) if url else None
+
+
+def using_remote_db():
+    return turso_config() is not None
+
+
+def _open_connection():
+    remote = turso_config()
+    if not remote:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        return sqlite3.connect(DB_PATH, timeout=15)
+    import libsql          # lazy: a local-only install never needs this package present
+    url, token = remote
+    return libsql.connect(url, auth_token=token) if token else libsql.connect(url)
+
+
+def _rows_as_dicts(cursor, rows):
+    """libSQL returns plain tuples and has no row_factory, so rows are normalised here instead.
+    Everything downstream indexes rows by column name and does not care which backend served
+    them."""
+    columns = [c[0] for c in (cursor.description or [])]
+    return [dict(zip(columns, row)) for row in rows]
+
+
 @st.cache_resource(show_spinner=False)
 def init_history_db():
-    os.makedirs(DATA_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+    conn = _open_connection()
     try:
         conn.executescript(HISTORY_SCHEMA)
-        # Tolerate an older file created before a column was added.
-        existing = {row[1] for row in conn.execute("PRAGMA table_info(stories)")}
+        # Tolerate an older database created before a column was added.
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(stories)").fetchall()}
         for line in HISTORY_SCHEMA.splitlines():
             line = line.strip().rstrip(',')
             if not line or line.upper().startswith(('CREATE', ');', 'ID ')):
@@ -167,20 +206,46 @@ def init_history_db():
         conn.commit()
     finally:
         conn.close()
-    return DB_PATH
+    return "turso" if using_remote_db() else DB_PATH
 
 
 def _db(sql, params=(), fetch=None):
     init_history_db()
-    conn = sqlite3.connect(DB_PATH, timeout=15)
-    conn.row_factory = sqlite3.Row
+    conn = _open_connection()
     try:
         cur = conn.execute(sql, params)
-        result = cur.fetchone() if fetch == 'one' else cur.fetchall() if fetch == 'all' else cur.lastrowid
+        if fetch == 'one':
+            row = cur.fetchone()
+            result = _rows_as_dicts(cur, [row])[0] if row is not None else None
+        elif fetch == 'all':
+            result = _rows_as_dicts(cur, cur.fetchall())
+        else:
+            result = cur.lastrowid
         conn.commit()
         return result
     finally:
         conn.close()
+
+
+def history_columns():
+    conn = _open_connection()
+    try:
+        return [row[1] for row in conn.execute("PRAGMA table_info(stories)").fetchall()]
+    finally:
+        conn.close()
+
+
+def history_backend_status():
+    """(label, detail, ok) for the sidebar. Verified with a real query rather than by connecting:
+    libsql.connect() is lazy, so a wrong URL or an expired token stays invisible until a statement
+    runs - which would otherwise be the moment a finished story is being saved."""
+    if not using_remote_db():
+        return ("Local file", "Resets whenever Streamlit Cloud restarts the app.", True)
+    try:
+        runs = history_totals()[0]
+        return ("Turso (hosted)", f"{runs:,} runs stored off-container.", True)
+    except Exception as exc:
+        return ("Turso unreachable", str(exc)[:300], False)
 
 
 def save_story(record):
@@ -212,6 +277,47 @@ def get_story(story_id):
 
 def delete_story(story_id):
     _db("DELETE FROM stories WHERE id = ?", (story_id,))
+
+
+def export_history_payload():
+    """Every run as JSON. Deliberately not a .db file copy: the export has to move between a local
+    SQLite file and a hosted libSQL database, and only a neutral format does that."""
+    rows = _db("SELECT * FROM stories ORDER BY id", fetch='all') or []
+    return json.dumps({
+        "format": "metadigm-history",
+        "version": 1,
+        "exported_at": datetime.datetime.now().isoformat(timespec='seconds'),
+        "count": len(rows),
+        "stories": rows,
+    }, indent=2, default=str)
+
+
+def import_history_payload(raw_text):
+    """Insert stories from an export. Returns (imported, skipped). Rows come in as NEW rows - the
+    original ids are dropped so a restore can never overwrite a run that is already there."""
+    data = json.loads(raw_text)
+    stories = data.get("stories") if isinstance(data, dict) else data
+    if not isinstance(stories, list):
+        raise ValueError("No story list found in that file.")
+
+    valid = set(history_columns()) - {"id"}
+    imported = skipped = 0
+    for entry in stories:
+        if not isinstance(entry, dict):
+            skipped += 1
+            continue
+        # Drop anything the current schema does not have, so an export taken before a column was
+        # added or removed still restores instead of failing on the first row.
+        record = {k: v for k, v in entry.items() if k in valid}
+        if not record:
+            skipped += 1
+            continue
+        record.setdefault("created_at", datetime.datetime.now().isoformat(timespec='seconds'))
+        record.setdefault("updated_at", record["created_at"])
+        record.setdefault("origin", "imported")
+        save_story(record)
+        imported += 1
+    return imported, skipped
 
 
 def history_totals():
@@ -2370,6 +2476,17 @@ if st.sidebar.button(f"📚 Story History ({_hist_runs})", use_container_width=T
     st.session_state.step = "history"
     st.rerun()
 
+# Where the history actually lives is worth stating on every screen. The original failure mode was
+# silent - an empty History looks identical to a working one that has nothing in it yet.
+_db_label, _db_detail, _db_ok = history_backend_status()
+if not _db_ok:
+    st.sidebar.error(f"History storage: {_db_label}. Runs are NOT being saved. {_db_detail}")
+elif using_remote_db():
+    st.sidebar.caption(f"History: {_db_label} · {_db_detail}")
+else:
+    st.sidebar.caption("History: local file. On Streamlit Cloud this is wiped on every restart - "
+                       "set TURSO_DATABASE_URL in secrets to keep it.")
+
 if st.sidebar.button("🎭 Premise Builder", use_container_width=True,
                      help="Optional. Adapt a film/show/book summary into a Main Story Concept with your "
                           "motifs folded in. Skip it whenever you'd rather write the concept yourself."):
@@ -3198,7 +3315,42 @@ elif st.session_state.step == "history":
     m1.metric("Runs saved", f"{runs:,}")
     m2.metric("Words written", f"{total_words:,}")
     m3.metric("Total spend", f"${total_cost:.2f}")
-    m4.metric("Database", f"{os.path.getsize(DB_PATH)/1024:.0f} KB" if os.path.exists(DB_PATH) else "—")
+    if using_remote_db():
+        m4.metric("Storage", "Turso", help="Hosted libSQL - survives Streamlit Cloud restarts.")
+    else:
+        _size = f"{os.path.getsize(DB_PATH)/1024:.0f} KB" if os.path.exists(DB_PATH) else "—"
+        m4.metric("Storage", _size, help="Local SQLite file. On Streamlit Cloud this is wiped "
+                                         "whenever the app restarts.")
+
+    with st.expander("Backup & restore", expanded=False):
+        st.caption("A portable snapshot of every run, including the full manuscripts. It moves between "
+                   "a local file and a hosted database in either direction, so it doubles as the way to "
+                   "migrate history onto Turso.")
+        bk_l, bk_r = st.columns(2)
+        try:
+            bk_l.download_button(
+                f"⬇️ Export all ({runs:,} runs)", export_history_payload(),
+                file_name=f"metadigm_history_{datetime.date.today().isoformat()}.json",
+                mime="application/json", use_container_width=True, disabled=not runs,
+            )
+        except Exception as exc:
+            bk_l.error(f"Export failed: {exc}")
+
+        upload = bk_r.file_uploader("Restore from an export", type=["json"], key="history_restore")
+        if upload is not None:
+            st.warning("Restoring adds every run in the file as a NEW row. Import the same file twice "
+                       "and you get two copies of each run.")
+            if st.button("♻️ Restore now", use_container_width=True):
+                try:
+                    added, skipped = import_history_payload(upload.getvalue().decode("utf-8"))
+                except Exception as exc:
+                    st.error(f"Restore failed: {exc}")
+                else:
+                    note = f"Restored {added:,} runs."
+                    if skipped:
+                        note += f" Skipped {skipped:,} unreadable entries."
+                    st.success(note)
+                    st.rerun()
 
     top_l, top_r = st.columns([3, 1])
     search = top_l.text_input("Search", placeholder="Filter by title, seed, genre, or note...")

@@ -1222,7 +1222,8 @@ def split_manuscript_chapters(raw_story):
 
 def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pass=True,
                      prev_tail="", rewrite_max=None, diagnose_max=None, heading_rule="",
-                     min_ratio=0.6, status_cb=None, diagnose_effort=None, rewrite_effort=None):
+                     min_ratio=0.5, keep_raw_when_short=True, status_cb=None,
+                     diagnose_effort=None, rewrite_effort=None):
     """Edit one block (chapter or whole manuscript).
 
     Returns (edited_text_or_None, info). A None result means the block was not usable and
@@ -1246,7 +1247,9 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
         diagnosis, _, _ = call_api_complete(
             build_diagnose_prompt(cfg, block_text, label), model_key, diagnose_max,
             retries=0, is_editor=True, editor_system=build_diagnostic_system(),
-            effort=diagnose_effort,
+            # Without this the pass deciding WHAT is wrong could not see the prose reference,
+            # while the pass fixing it could - so it flagged deliberate features of the style.
+            style_example=style_example, effort=diagnose_effort,
         )
         if diagnosis and not diagnosis.startswith("API ERROR"):
             issues_raw = diagnosis.strip()
@@ -1287,13 +1290,20 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
     ratio = len(edited) / max(len(block_text.strip()), 1)
     info["ratio"] = ratio
     if ratio < min_ratio:
-        info.update(
-            status="too_short",
-            message=info["message"] + f"The editor returned {ratio:.0%} of the input length "
-                                      "(truncated or summarised), so the raw text was kept.",
-            rejected=edited,
-        )
-        return None, info
+        # Short output usually means the model summarised instead of editing. Whether that is
+        # fatal is a judgement call, so it is the caller's to make.
+        if keep_raw_when_short:
+            info.update(
+                status="too_short",
+                message=info["message"] + f"The editor returned {ratio:.0%} of the input length, "
+                                          f"under the {min_ratio:.0%} minimum, so the raw text was kept.",
+                rejected=edited,
+            )
+            return None, info
+        info["message"] += (f"The editor returned {ratio:.0%} of the input length, under the "
+                            f"{min_ratio:.0%} minimum, and was kept anyway - check the Changes tab "
+                            "for material that was dropped. ")
+        info["status"] = "short_accepted"
     if edited == block_text.strip():
         info.update(status="identical", message=info["message"] + "Returned unchanged.")
     elif ratio > 1.4:
@@ -1333,8 +1343,8 @@ def _editor_checkpoint(key, raw_story, model_key, mode):
 
 def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_pass,
                     style_example="", status_cb=None, progress_cb=None,
-                    diagnose_effort=None, rewrite_effort=None,
-                    checkpoint_key=EDITOR_CHECKPOINT_KEY):
+                    diagnose_effort=None, rewrite_effort=None, min_ratio=0.5,
+                    keep_raw_when_short=True, checkpoint_key=EDITOR_CHECKPOINT_KEY):
     """Run a full editor pass over an assembled manuscript.
 
     Shared by the writing step and the history page's re-edit action, so a stored draft
@@ -1388,7 +1398,8 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
             _status("starting")
             edited_body, info = run_editor_block(
                 body, "chapter", cfg, model_key, style_example=style_example,
-                two_pass=two_pass, prev_tail=prev_tail, min_ratio=0.6, status_cb=_status,
+                two_pass=two_pass, prev_tail=prev_tail, min_ratio=min_ratio,
+                keep_raw_when_short=keep_raw_when_short, status_cb=_status,
                 diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
             )
             info["chapter"], info["title"] = idx, label_name
@@ -1449,7 +1460,7 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
     _status("starting")
     edited, info = run_editor_block(
         raw_story, "manuscript", cfg, model_key, style_example=style_example,
-        two_pass=two_pass, min_ratio=0.7,
+        two_pass=two_pass, min_ratio=min_ratio, keep_raw_when_short=keep_raw_when_short,
         heading_rule="Reproduce every chapter heading line (### ...) exactly as given.",
         status_cb=_status, diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
     )
@@ -1610,7 +1621,7 @@ def generate_dossier(seed, attempt, config):
 
     CHARACTER & ATMOSPHERE DIRECTIVE:
     Analyze the inputs above to establish a believable protagonist and conflict.
-    1. Describe their baseline life and 1-2 subtle personality nuances (e.g., a quiet preference, personal boundary, mild insecurity, or habit) that ground them as a realistic person.
+    1. Describe their baseline life.
     2. Define the catalyst event that brings them into contact with the mechanism.
     3. Describe the internal friction in subtle terms: how the initial changes subtly clash with their personal boundaries or self-perception without making it an overbearing drama.
     """
@@ -1702,9 +1713,19 @@ def generate_arc_proposal(d, model_key):
     template = d.get('structure_template', 'Linear Escalation')
     directive = STRUCTURE_TEMPLATES.get(template, STRUCTURE_TEMPLATES['Linear Escalation'])['arc_directive']
 
+    main_idea = (d.get('main_idea') or '').strip()
+    hook_block = f"""
+STORY CONCEPT HOOK - THIS OUTRANKS EVERYTHING BELOW:
+{main_idea}
+
+Every chapter must serve this concept. Where the premise, the structure template or your own sense
+of a good arc pulls against it, the concept wins and the rest bends. Do not broaden it into a more
+generic version of itself, and do not treat it as one beat among many - it is what the story IS.
+""" if main_idea else ""
+
     prompt = f"""
 You are a story architect. Outline this story chapter by chapter.
-
+{hook_block}
 STORY:
 - Premise: {d.get('blurb')}
 - Protagonist: {d.get('protagonist_baseline')}
@@ -1728,7 +1749,10 @@ CHAPTER 1: [short plain title]
 CHAPTER 2: [short plain title]
 [What happens. One sentence, two at most.]
 """
-    res = call_api(prompt, model_key, max_tokens=8192)
+    # The outline used to be planned with no style information at all, which left the structure
+    # deciding beats in a voice the chapters would then have to write against.
+    res = call_api(prompt, model_key, max_tokens=8192,
+                   style_guide=d.get('style_guide', ''), style_example=d.get('style_example', ''))
     if res.startswith("API ERROR") or not res:
         return "\n".join([f"CHAPTER {i+1}: Chapter {i+1}\nDevelop the story organically." for i in range(num_ch)])
     return clean_artifacts(res)
@@ -2403,6 +2427,8 @@ editor_intensity = "Aggressive"
 editor_two_pass = True
 diagnose_effort = "low"
 rewrite_effort = "high"
+editor_min_ratio = 0.5
+editor_keep_raw_short = True
 if do_editor:
     with st.sidebar.expander("Editor Settings", expanded=False):
         editor_mode = st.selectbox(
@@ -2420,6 +2446,17 @@ if do_editor:
             help="First call lists concrete problems with quotes; second call applies that list. "
                  "Much more aggressive than a single polish pass, at double the editor calls."
         )
+        editor_min_ratio = st.slider(
+            "Minimum edited length", min_value=30, max_value=100, value=50, step=5, format="%d%%",
+            help="An edit much shorter than the original was summarised rather than edited. At 50%, "
+                 "anything at least half the original length is accepted.",
+        ) / 100.0
+        editor_keep_raw_short = st.checkbox(
+            "Keep raw text below that", value=True,
+            help="On: a short edit is rejected and the original is kept - it is still viewable in the "
+                 "Changes tab. Off: the short edit is used anyway and flagged in the editor report.",
+        )
+
         cfg_preview = EDITOR_INTENSITY[editor_intensity]
         st.caption(f"**{cfg_preview['quota']}% sentence quota.** {cfg_preview['posture']}")
 
@@ -2446,6 +2483,8 @@ st.session_state.editor_intensity = editor_intensity
 st.session_state.editor_two_pass = editor_two_pass
 st.session_state.diagnose_effort = diagnose_effort
 st.session_state.rewrite_effort = rewrite_effort
+st.session_state.editor_min_ratio = editor_min_ratio
+st.session_state.editor_keep_raw_short = editor_keep_raw_short
 
 st.session_state.show_prompt_debug = st.sidebar.checkbox("Show Prompt Debug", value=st.session_state.get("show_prompt_debug", False))
 
@@ -2853,6 +2892,7 @@ elif st.session_state.step == "writing":
             status_cb=status_text.write,
             progress_cb=lambda f: progress_bar.progress(min(1.0, edit_base + (1 - edit_base) * f)),
             diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
+            min_ratio=editor_min_ratio, keep_raw_when_short=editor_keep_raw_short,
         )
         st.session_state.final_story = final_story
         st.session_state.rejected_edit = rejected
@@ -2911,6 +2951,9 @@ elif st.session_state.step == "final":
     elif status in ("too_short", "truncated"):
         st.warning(f"**Editor output rejected** ({editor_label}). {report.get('message', '')} "
                    "It is still available in the *Rejected Edit* tab below.")
+    elif status == "short_accepted":
+        st.warning(f"**Editor output was short but kept** ({editor_label}). {report.get('message', '')} "
+                   "Compare against the raw draft in the *Changes* tab before using it.")
     elif status == "identical":
         st.info(f"The editor ({editor_label}) returned the manuscript unchanged.")
     elif status == "ok" and report.get("message"):
@@ -2961,7 +3004,8 @@ elif st.session_state.step == "final":
             chapter_rows = report.get("chapters", [])
             if chapter_rows:
                 st.markdown("**Per-chapter result**")
-                icons = {"ok": "✅", "identical": "➖", "error": "❌", "too_short": "⚠️", "truncated": "✂️"}
+                icons = {"ok": "✅", "identical": "➖", "error": "❌", "too_short": "⚠️",
+                         "truncated": "✂️", "short_accepted": "📉"}
                 for row in chapter_rows:
                     line = (f"{icons.get(row['status'], '•')} **Ch {row['chapter']} — {row['title']}** "
                             f"· {row['status']}")
@@ -3495,6 +3539,7 @@ elif st.session_state.step == "history":
                         editor_mode, editor_intensity, editor_two_pass,
                         style_example=style_example, status_cb=txt.write, progress_cb=bar.progress,
                         diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
+                        min_ratio=editor_min_ratio, keep_raw_when_short=editor_keep_raw_short,
                     )
                     bar.progress(1.0)
 

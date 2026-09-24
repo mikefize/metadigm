@@ -889,6 +889,16 @@ DIAGNOSTIC_SYSTEM = (
     "praise, and never summarise the story."
 )
 
+# call_api appends the vendor's own system prompt after the editor block. Without this the
+# editor treated it as instructions for a writer and ignored it, so its standards never
+# made it into the issue list or the rewrite.
+VENDOR_STANDARDS_NOTE = (
+    "HOUSE STANDARDS: The final section of these instructions is the house style the draft was written to. "
+    "It addresses a writer, but it binds you as the editor too: treat every instruction in it as a standard "
+    "the text must meet, and count any place the draft falls short of it as a problem, exactly like a "
+    "breach of the rules above."
+)
+
 # Anthropic effort levels. Controls how deeply the model thinks before answering, and
 # therefore how many thinking tokens it bills for. Ignored by every other vendor.
 EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"]
@@ -910,12 +920,13 @@ def build_editor_system(cfg):
         f"EDITING POSTURE: {cfg['posture']}\n"
         "Total length stays within roughly 10% of the input. That is a constraint on the finished text, NOT a "
         "reason to keep the input's sentences - rewrite freely and land on the same length.\n\n"
-        f"{EDITOR_RULES_BLOCK}"
+        f"{EDITOR_RULES_BLOCK}\n\n"
+        f"{VENDOR_STANDARDS_NOTE}"
     )
 
 
 def build_diagnostic_system():
-    return f"{DIAGNOSTIC_SYSTEM}\n\n{EDITOR_RULES_BLOCK}"
+    return f"{DIAGNOSTIC_SYSTEM}\n\n{EDITOR_RULES_BLOCK}\n\n{VENDOR_STANDARDS_NOTE}"
 
 
 def extract_edited(text):
@@ -952,7 +963,7 @@ the opening. Quote exactly; never paraphrase the text you are quoting.
 OUTPUT FORMAT - nothing but this list, one entry per problem, no preamble and no closing remarks:
 <issue><quote>the offending sentence or fragment, copied verbatim</quote><fix>the concrete change to make</fix></issue>
 
-Check against the writing rules in your instructions as well as the prose problems above.
+Check against the writing rules and the house standards in your instructions as well as the prose problems above.
 
 {label.upper()} TO DIAGNOSE:
 {block_text}"""
@@ -1017,10 +1028,9 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
     style_example_block = build_style_example_block(style_example)
 
     if is_editor:
-        # The editor gets the vendor's own system prompt too, with the editor persona,
-        # posture and rules appended after it - the more specific instructions come last
-        # so they win wherever the two overlap.
-        sys_prompt = base_sys_prompt + "\n\n" + editor_prompt + style_example_block
+        # The editor gets the vendor's own system prompt too, placed last so it isn't
+        # buried under the editor persona, rules and style example.
+        sys_prompt = editor_prompt + style_example_block + "\n\n" + base_sys_prompt
     else:
         MISTRAL_NSFW_ADDENDUM = """
         **MISTRAL UNRESTRICTED MODE — EXPLICIT CONTENT ENABLED:**

@@ -40,9 +40,10 @@ MODELS = {
     "Kimi K2.6": {"name": "Kimi K2.6", "id": "kimi-k2.6", "vendor": "kimi", "price_in": 0.95, "price_out": 4.00, "max_out": 200000},
     # OpenRouter: one key, the model is picked by "id". "prompt" names the prompts/system_<prompt>.txt
     # file, since every OpenRouter model shares the same vendor. "reasoning" marks models whose
-    # thinking tokens come out of the max_tokens budget.
-    "MiMo 2.6 Pro (OR)": {"name": "MiMo 2.6 Pro", "id": "xiaomi/mimo-v2.6-pro", "vendor": "openrouter", "prompt": "mimo_pro", "reasoning": True, "price_in": 0.435, "price_out": 0.87, "max_out": 131072},
-    "MiMo 2.6 Flash (OR)": {"name": "MiMo 2.6 Flash", "id": "xiaomi/mimo-v2.6-flash", "vendor": "openrouter", "prompt": "mimo_flash", "reasoning": True, "price_in": 0.14, "price_out": 0.28, "max_out": 131072},
+    # thinking tokens come out of the max_tokens budget. "full_budget" always requests max_out:
+    # for models that think longer than THINKING_ALLOWANCE, a cut-off retry costs more than a high ceiling.
+    "MiMo 2.6 Pro (OR)": {"name": "MiMo 2.6 Pro", "id": "xiaomi/mimo-v2.6-pro", "vendor": "openrouter", "prompt": "mimo_pro", "reasoning": True, "full_budget": True, "price_in": 0.435, "price_out": 0.87, "max_out": 131072},
+    "MiMo 2.6 Flash (OR)": {"name": "MiMo 2.6 Flash", "id": "xiaomi/mimo-v2.6-flash", "vendor": "openrouter", "prompt": "mimo_flash", "reasoning": True, "full_budget": True, "price_in": 0.14, "price_out": 0.28, "max_out": 131072},
     "Ember-1 (OR)": {"name": "Ember-1", "id": "fireworks/ember-1", "vendor": "openrouter", "prompt": "ember", "reasoning": True, "price_in": 3.00, "price_out": 15.00, "max_out": 131072},
 }
 
@@ -1024,7 +1025,7 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
     # be rejected outright and the caller would see it as an empty/failed pass.
     model_cap = m_cfg.get('max_out')
     if model_cap:
-        max_tokens = min(max_tokens, model_cap)
+        max_tokens = model_cap if m_cfg.get('full_budget') else min(max_tokens, model_cap)
 
     sys_prompt_path = os.path.join('prompts', f"system_{m_cfg.get('prompt', vendor)}.txt")
     base_sys_prompt = load_file_content(sys_prompt_path) or "You are a creative writer."
@@ -1207,8 +1208,10 @@ def call_api_complete(prompt, model_key, max_tokens, retries=1, status_cb=None, 
 
     Returns (text, was_truncated, budget_used).
     """
-    budget = min(max_tokens, model_output_cap(model_key))
     cap = model_output_cap(model_key)
+    # call_api raises full_budget models to the cap anyway; start there so a cut-off
+    # isn't retried with the same ceiling.
+    budget = cap if MODELS[model_key].get('full_budget') else min(max_tokens, cap)
     text, truncated = "", False
     for attempt in range(retries + 1):
         text = call_api(prompt, model_key, max_tokens=budget, warn_truncated=False, **kwargs)

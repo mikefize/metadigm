@@ -37,7 +37,13 @@ MODELS = {
     "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.50, "price_out": 3.00, "max_out": 65536},
     "Gemini 3.1 Flash": {"name": "Gemini 3.1 Flash", "id": "gemini-3.1-flash-lite-preview", "vendor": "google", "price_in": 0.25, "price_out": 1.50, "max_out": 65536},
     "Mistral Large": {"id": "mistral-large-latest", "vendor": "mistral", "price_in": 0.50, "price_out": 1.50},
-    "Kimi K2.6": {"name": "Kimi K2.6", "id": "kimi-k2.6", "vendor": "kimi", "price_in": 0.95, "price_out": 4.00, "max_out": 200000}
+    "Kimi K2.6": {"name": "Kimi K2.6", "id": "kimi-k2.6", "vendor": "kimi", "price_in": 0.95, "price_out": 4.00, "max_out": 200000},
+    # OpenRouter: one key, the model is picked by "id". "prompt" names the prompts/system_<prompt>.txt
+    # file, since every OpenRouter model shares the same vendor. "reasoning" marks models whose
+    # thinking tokens come out of the max_tokens budget.
+    "MiMo 2.6 Pro (OR)": {"name": "MiMo 2.6 Pro", "id": "xiaomi/mimo-v2.6-pro", "vendor": "openrouter", "prompt": "mimo_pro", "reasoning": True, "price_in": 0.435, "price_out": 0.87, "max_out": 131072},
+    "MiMo 2.6 Flash (OR)": {"name": "MiMo 2.6 Flash", "id": "xiaomi/mimo-v2.6-flash", "vendor": "openrouter", "prompt": "mimo_flash", "reasoning": True, "price_in": 0.14, "price_out": 0.28, "max_out": 131072},
+    "Ember-1 (OR)": {"name": "Ember-1", "id": "fireworks/ember-1", "vendor": "openrouter", "prompt": "ember", "reasoning": True, "price_in": 3.00, "price_out": 15.00, "max_out": 131072},
 }
 
 # --- INITIALIZE SESSION STATE ---
@@ -1020,7 +1026,7 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
     if model_cap:
         max_tokens = min(max_tokens, model_cap)
 
-    sys_prompt_path = os.path.join('prompts', f'system_{vendor}.txt')
+    sys_prompt_path = os.path.join('prompts', f"system_{m_cfg.get('prompt', vendor)}.txt")
     base_sys_prompt = load_file_content(sys_prompt_path) or "You are a creative writer."
 
     editor_prompt = editor_system or EDITOR_SYSTEM_BASE
@@ -1121,16 +1127,18 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
             flag_truncation('MAX_TOKENS' in finish or finish.endswith('2'))
             return text
 
-        elif vendor in ['mistral', 'xai', 'kimi']:
+        elif vendor in ['mistral', 'xai', 'kimi', 'openrouter']:
             endpoints = {
                 'mistral': "https://api.mistral.ai/v1/chat/completions",
                 'xai': "https://api.x.ai/v1/chat/completions",
-                'kimi': "https://api.moonshot.ai/v1/chat/completions"
+                'kimi': "https://api.moonshot.ai/v1/chat/completions",
+                'openrouter': "https://openrouter.ai/api/v1/chat/completions"
             }
             api_keys = {
                 'mistral': st.session_state.mistral_key,
                 'xai': st.session_state.xai_key,
-                'kimi': st.session_state.kimi_key
+                'kimi': st.session_state.kimi_key,
+                'openrouter': st.session_state.openrouter_key
             }
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_keys[vendor]}"}
             payload = {
@@ -1154,7 +1162,8 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
                 track_cost(data['usage'].get('prompt_tokens', 0), data['usage'].get('completion_tokens', 0), m_cfg)
             choice = data['choices'][0]
             flag_truncation(choice.get('finish_reason') == 'length')
-            return choice['message']['content']
+            # Reasoning models on OpenRouter return content None when thinking used up the budget.
+            return choice['message'].get('content') or ""
 
     except Exception as e:
         return f"API ERROR: {str(e)}"
@@ -1180,7 +1189,8 @@ def _tokens_from_chars(chars):
 
 def _reserves_thinking_tokens(cfg):
     """Models that reason before answering spend part of the same max_tokens budget on it."""
-    return cfg['vendor'] == 'anthropic' or 'reasoning' in str(cfg.get('id', '')).lower()
+    return (cfg['vendor'] == 'anthropic' or cfg.get('reasoning', False)
+            or 'reasoning' in str(cfg.get('id', '')).lower())
 
 
 def output_budget(model_key, expected_chars, floor=16000):
@@ -2427,6 +2437,7 @@ st.session_state.google_key = st.sidebar.text_input("Google Key", value=get_secr
 st.session_state.mistral_key = st.sidebar.text_input("Mistral Key", value=get_secret("MISTRAL_API_KEY"), type="password") 
 st.session_state.xai_key = st.sidebar.text_input("xAI (Grok) Key", value=get_secret("XAI_API_KEY"), type="password")
 st.session_state.kimi_key = st.sidebar.text_input("Kimi Key", value=get_secret("KIMI_API_KEY"), type="password")
+st.session_state.openrouter_key = st.sidebar.text_input("OpenRouter Key", value=get_secret("OPENROUTER_API_KEY"), type="password")
 
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)

@@ -31,7 +31,7 @@ DB_PATH = os.path.join(DATA_DIR, 'history.db')
 MODELS = {
     "Grok 4.50": {"name": "Grok 4.50", "id": "grok-4.5", "vendor": "xai", "price_in": 2.00, "price_out": 6.00},
     "Grok 4.20": {"name": "Grok 4.20", "id": "grok-4.20-0309-reasoning", "vendor": "xai", "price_in": 1.25, "price_out": 2.50},
-    "Claude 5 Sonnet": {"name": "Claude 5 Sonnet", "id": "claude-sonnet-5", "vendor": "anthropic", "price_in": 2.00, "price_out": 10.00, "max_out": 128000},
+    "Claude 5.5 Sonnet": {"name": "Claude 5.5 Sonnet", "id": "claude-sonnet-5-5", "vendor": "anthropic", "price_in": 2.00, "price_out": 10.00, "max_out": 128000},
     "Claude 5.5 Opus": {"name": "Claude 5.5 Opus", "id": "claude-opus-5-5", "vendor": "anthropic", "price_in": 4.00, "price_out": 20.00, "max_out": 128000},
     "Gemini 3.1 Pro": {"name": "Gemini 3 Pro", "id": "gemini-3.1-pro-preview", "vendor": "google", "price_in": 2.00, "price_out": 12.00, "max_out": 65536},
     "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.50, "price_out": 3.00, "max_out": 65536},

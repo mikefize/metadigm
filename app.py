@@ -1674,7 +1674,8 @@ def generate_dossier(seed, attempt, config):
         f"<antagonist>{antag_instr}</antagonist>\n"
     )
     
-    res = call_api(prompt, st.session_state.writer_model, style_guide, style_example=style_example)
+    res = call_api(prompt, st.session_state.writer_model, style_guide, style_example=style_example,
+                   effort=st.session_state.get('writer_effort'))
     if not res or res.startswith("API ERROR"):
         return {"error": res or "Empty API response."}
 
@@ -1775,7 +1776,8 @@ CHAPTER 2: [short plain title]
     # The outline used to be planned with no style information at all, which left the structure
     # deciding beats in a voice the chapters would then have to write against.
     res = call_api(prompt, model_key, max_tokens=8192,
-                   style_guide=d.get('style_guide', ''), style_example=d.get('style_example', ''))
+                   style_guide=d.get('style_guide', ''), style_example=d.get('style_example', ''),
+                   effort=st.session_state.get('writer_effort'))
     if res.startswith("API ERROR") or not res:
         return "\n".join([f"CHAPTER {i+1}: Chapter {i+1}\nDevelop the story organically." for i in range(num_ch)])
     return clean_artifacts(res)
@@ -2443,6 +2445,14 @@ st.session_state.kimi_key = st.sidebar.text_input("Kimi Key", value=get_secret("
 st.session_state.openrouter_key = st.sidebar.text_input("OpenRouter Key", value=get_secret("OPENROUTER_API_KEY"), type="password")
 
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
+# Set explicitly: left unset, Claude 5.5 Opus defaults to medium while Claude 5 Sonnet defaults to high.
+writer_is_claude = MODELS[st.session_state.writer_model]['vendor'] == 'anthropic'
+st.session_state.writer_effort = st.sidebar.selectbox(
+    "Writer effort", EFFORT_LEVELS, index=EFFORT_LEVELS.index("high"),
+    disabled=not writer_is_claude,
+    help="Reasoning effort for the dossier, arc outline and chapters (Claude writers only). "
+         "Deeper thinking costs more output tokens per chapter.",
+)
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
 
@@ -2869,6 +2879,7 @@ elif st.session_state.step == "writing":
             p, st.session_state.writer_model, chapter_max,
             status_cb=lambda msg, _i=i: status_text.write(f"Writing Chapter {_i+1}: {msg}..."),
             style_guide=d['style_guide'], style_example=d.get('style_example', ''),
+            effort=st.session_state.get('writer_effort'),
         )
 
         if "API ERROR" in text:

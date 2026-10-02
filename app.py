@@ -44,6 +44,8 @@ MODELS = {
     # for models that think longer than THINKING_ALLOWANCE, a cut-off retry costs more than a high ceiling.
     "MiMo 2.6 Pro (OR)": {"name": "MiMo 2.6 Pro", "id": "xiaomi/mimo-v2.6-pro", "vendor": "openrouter", "prompt": "mimo_pro", "reasoning": True, "full_budget": True, "price_in": 0.435, "price_out": 0.87, "max_out": 131072},
     "MiMo 2.6 Flash (OR)": {"name": "MiMo 2.6 Flash", "id": "xiaomi/mimo-v2.6-flash", "vendor": "openrouter", "prompt": "mimo_flash", "reasoning": True, "full_budget": True, "price_in": 0.14, "price_out": 0.28, "max_out": 131072},
+    "DeepSeek V4 Pro (OR)": {"name": "DeepSeek V4 Pro", "id": "deepseek/deepseek-v4-pro-0813", "vendor": "openrouter", "prompt": "deepseek_pro", "reasoning": True, "full_budget": True, "price_in": 0.66, "price_out": 1.98, "max_out": 131072},
+    "DeepSeek V4.1 Flash (OR)": {"name": "DeepSeek V4.1 Flash", "id": "deepseek/deepseek-v4.1-flash", "vendor": "openrouter", "prompt": "deepseek_flash", "reasoning": True, "full_budget": True, "price_in": 0.30, "price_out": 1.20, "max_out": 131072},
     "Ember-1 (OR)": {"name": "Ember-1", "id": "fireworks/ember-1", "vendor": "openrouter", "prompt": "ember", "reasoning": True, "price_in": 3.00, "price_out": 15.00, "max_out": 131072},
 }
 

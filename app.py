@@ -897,7 +897,7 @@ EDITOR_INTENSITY = {
     },
 }
 
-EDITOR_INVARIANTS = """# WHAT MUST NOT CHANGE (hard constraints - violating these ruins the work)
+_INVARIANT_RULES = """# WHAT MUST NOT CHANGE (hard constraints - violating these ruins the work)
 - Every scene stays, in the same order. Do not add scenes, cut scenes, merge them, or reorder them.
 - No new characters, no removed characters, no renamed characters.
 - Events and their outcomes are fixed. Who does what, and what results from it, does not change.
@@ -905,8 +905,8 @@ EDITOR_INVARIANTS = """# WHAT MUST NOT CHANGE (hard constraints - violating thes
 - Dialogue may be rewritten line by line, but what each line COMMUNICATES stays the same, and no character
   gains or loses a line's worth of meaning.
 - Point of view and tense stay exactly as written.
-- Physical continuity is fixed: clothing, injuries, positions, time of day, who is in the room.
-Everything not on this list is yours to rewrite."""
+- Physical continuity is fixed: clothing, injuries, positions, time of day, who is in the room."""
+EDITOR_INVARIANTS = _INVARIANT_RULES + "\nEverything not on this list is yours to rewrite."
 
 EDITOR_SYSTEM_BASE = (
     "You are a Senior Editor specializing in adult transformation fiction and making AI text sound like it was "
@@ -1006,10 +1006,18 @@ def parse_issues(diagnosis_text):
     return [(q.strip(), f.strip()) for q, f in _ISSUE_RE.findall(diagnosis_text or "")]
 
 
-def build_diagnose_prompt(cfg, block_text, label):
+def build_diagnose_prompt(cfg, block_text, label, targeted=False):
     words = len(block_text.split())
     sentences = max(1, words // 15)
     min_issues = max(5, min(30, round(sentences * cfg['quota'] / 200)))
+    if targeted:
+        # Every issue listed here becomes a rewrite and nothing else does, so a minimum would
+        # force edits to prose that was already fine - the thing targeted mode exists to avoid.
+        count_rule = (f"Flag only real problems, at most {min_issues}. A passage that already works is not a "
+                      "problem: every issue you list gets rewritten, and everything you leave out stays exactly "
+                      "as written. Take them")
+    else:
+        count_rule = f"Find at least {min_issues} problems, and take them"
     return f"""TASK: Diagnostic read of one {label}. Do NOT rewrite anything in this pass.
 
 Find every line that breaks the writing rules below, plus every sentence that reads as AI-generated prose:
@@ -1017,7 +1025,7 @@ generic verbs, cliche sensory beats, emotions named instead of shown, throat-cle
 to its point, filler action between lines of dialogue, dialogue that states its own subtext, and paragraph
 rhythm that never varies.
 
-Find at least {min_issues} problems, and take them from the whole {label} - the last third matters as much as
+{count_rule} from the whole {label} - the last third matters as much as
 the opening. Quote exactly; never paraphrase the text you are quoting.
 
 OUTPUT FORMAT - nothing but this list, one entry per problem, no preamble and no closing remarks:
@@ -1068,6 +1076,170 @@ def build_rewrite_prompt(cfg, block_text, label, issues_raw="", prev_tail="", he
         block_text,
     ]
     return "\n".join(parts)
+
+
+# --- TARGETED REWRITE ---
+# A full rewrite under a quota also changes sentences that were fine; behind a strong writer
+# most of those changes are sideways moves at best. Targeted mode rewrites only the paragraphs
+# the diagnostic read quoted a problem in, and every other paragraph stays byte-identical.
+
+_PARA_SPLIT_RE = re.compile(r'(\n[ \t]*\n\s*)')
+_TARGET_P_RE = re.compile(r'<p\s+id\s*=\s*["\']?(\d+)["\']?\s*>(.*?)</p>', re.DOTALL | re.IGNORECASE)
+_QUOTE_FOLD = str.maketrans({'“': '"', '”': '"', '„': '"', '‘': "'", '’': "'",
+                             '—': '-', '–': '-', '…': '...'})
+# A replacement this far off the original length was rewritten wholesale or gutted, not fixed.
+TARGETED_PARA_RATIO = (0.25, 2.5)
+
+
+def _fold_quote(text):
+    return " ".join((text or "").translate(_QUOTE_FOLD).split()).lower()
+
+
+def _targetable(paragraph):
+    stripped = paragraph.strip()
+    return bool(stripped) and not stripped.startswith('#')
+
+
+def locate_issues(paragraphs, issues):
+    """Map each (quote, fix) to the paragraph(s) it quotes.
+
+    Returns ({paragraph_index: [(quote, fix), ...]}, unmatched_count). A quote is tried whole
+    first, then by its fragments - models elide with '...' and quote across paragraph breaks.
+    """
+    folded = [_fold_quote(p) if _targetable(p) else "" for p in paragraphs]
+    targets, unmatched = {}, 0
+    for quote, fix in issues:
+        whole = _fold_quote(quote).strip(' "\'')
+        hits = [i for i, p in enumerate(folded) if whole and whole in p][:1]
+        if not hits:
+            for piece in re.split(r'\n+|\.\.\.|…', quote):
+                frag = _fold_quote(piece).strip(' "\'')
+                if len(frag) < 15:
+                    continue
+                hit = next((i for i, p in enumerate(folded) if frag in p), None)
+                if hit is not None and hit not in hits:
+                    hits.append(hit)
+        if not hits:
+            unmatched += 1
+        for i in hits:
+            targets.setdefault(i, []).append((quote, fix))
+    return targets, unmatched
+
+
+def build_targeted_system():
+    return (
+        f"{EDITOR_SYSTEM_BASE}\n\n"
+        "EDITING POSTURE: Targeted fixes. You change what the diagnostic read flagged and nothing else - a "
+        "sentence nobody flagged is a sentence you keep.\n\n"
+        f"{EDITOR_RULES_BLOCK}\n\n"
+        f"{VENDOR_STANDARDS_NOTE}"
+    )
+
+
+def build_targeted_rewrite_prompt(paragraphs, targets, label):
+    flagged = []
+    for i in sorted(targets):
+        flagged.append(f"[P{i + 1}]")
+        for quote, fix in targets[i]:
+            flagged.append(f'- Problem: "{quote}"\n  Fix: {fix}')
+        flagged.append("")
+    context = "\n\n".join(f"[P{i + 1}] {p.strip()}" for i, p in enumerate(paragraphs) if p.strip())
+    return "\n".join([
+        f"TASK: Targeted line edit of one {label}. A diagnostic read flagged problems in some paragraphs. "
+        "Rewrite ONLY those paragraphs, and only as far as the problems require.",
+        "",
+        "# RULES",
+        "- Fix every problem listed for a paragraph. A fix note is a direction, not a script: if following it "
+        "literally would break the voice, the style reference or the constraints below, solve the problem "
+        "another way.",
+        "- Everything in a flagged paragraph that is not part of a listed problem stays word for word. The "
+        "paragraph was flagged for specific lines, not handed over for a rewrite.",
+        "- One paragraph in, one paragraph out. Do not merge, split, add or drop paragraphs, and do not return "
+        "paragraphs that are not listed.",
+        "- Keep each paragraph close to its original length unless the fix is a cut.",
+        "",
+        _INVARIANT_RULES,
+        "",
+        "# PARAGRAPHS TO FIX",
+        *flagged,
+        f"# THE FULL {label.upper()}, FOR CONTEXT (read only - paragraph numbers in brackets)",
+        context,
+        "",
+        "OUTPUT FORMAT: for every paragraph listed under PARAGRAPHS TO FIX, in order:",
+        '<p id="N">the corrected paragraph, without its [PN] label</p>',
+        "Nothing else - no unlisted paragraphs, no preamble, no commentary.",
+    ])
+
+
+def run_targeted_rewrite(block_text, label, info, model_key, style_example="", effort=None,
+                         status_cb=None):
+    """Rewrite only the paragraphs the diagnosis quoted and splice them back in place.
+
+    Same contract as run_editor_block: (edited_text_or_None, info).
+    """
+    # Odd entries are the original separators, so untouched paragraphs reassemble exactly.
+    parts = _PARA_SPLIT_RE.split(block_text.strip())
+    paragraphs = parts[0::2]
+    total = sum(1 for p in paragraphs if _targetable(p))
+    targets, unmatched = locate_issues(paragraphs, info["issues"])
+    info["targeted"] = {"paragraphs": total, "flagged": len(targets), "changed": 0,
+                        "unmatched": unmatched}
+    unmatched_note = (f"{unmatched} quoted passage(s) could not be found in the text and were skipped. "
+                      if unmatched else "")
+
+    if not targets:
+        info.update(status="identical", ratio=1.0,
+                    message=info["message"] + "Targeted: no flagged passage to rewrite, kept as written. "
+                            + unmatched_note)
+        return block_text.strip(), info
+
+    if status_cb:
+        status_cb(f"rewriting {len(targets)} of {total} paragraphs")
+    flagged_chars = sum(len(paragraphs[i]) for i in targets)
+    response, truncated, used_budget = call_api_complete(
+        build_targeted_rewrite_prompt(paragraphs, targets, label),
+        model_key, output_budget(model_key, flagged_chars), retries=1,
+        status_cb=status_cb, style_example=style_example, is_editor=True,
+        editor_system=build_targeted_system(), effort=effort,
+    )
+    info["budget"] = used_budget
+    if not response or not response.strip():
+        info.update(status="error", message=info["message"] + "The editor returned an empty response.")
+        return None, info
+    if response.startswith("API ERROR"):
+        info.update(status="error", message=info["message"] + response.strip())
+        return None, info
+
+    # Each paragraph is closed on its own, so a cut-off response still yields the ones
+    # finished before the cut; the unfinished one simply has no closing tag and is skipped.
+    replies = {int(pid) - 1: text for pid, text in _TARGET_P_RE.findall(response)}
+    changed, missing, refused = 0, 0, 0
+    low, high = TARGETED_PARA_RATIO
+    for i in sorted(targets):
+        if i not in replies:
+            missing += 1
+            continue
+        new = clean_artifacts(re.sub(r'^\s*\[P\d+\]\s*|\s*\[P\d+\]\s*$', '', replies[i]))
+        original = paragraphs[i].strip()
+        if not new or not (low <= len(new) / max(len(original), 1) <= high):
+            refused += 1
+            continue
+        if new != original:
+            parts[2 * i] = new
+            changed += 1
+
+    edited = "".join(parts).strip()
+    info["targeted"]["changed"] = changed
+    info["ratio"] = len(edited) / max(len(block_text.strip()), 1)
+    message = f"Targeted: rewrote {changed} of {total} paragraphs ({len(info['issues'])} issues). " + unmatched_note
+    if missing:
+        message += (f"{missing} flagged paragraph(s) did not come back"
+                    + (" because the response was cut off" if truncated else "") + " and were kept as written. ")
+    if refused:
+        message += (f"{refused} replacement(s) were far off the original length and were rejected - "
+                    "the original paragraph was kept. ")
+    info.update(status="ok" if changed else "identical", message=info["message"] + message)
+    return edited, info
 
 def call_api(prompt, model_key, style_guide="", style_example="", is_editor=False, max_tokens=8192,
              editor_system=None, warn_truncated=True, effort=None, cache_system=True):
@@ -1303,13 +1475,14 @@ def split_manuscript_chapters(raw_story):
 def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pass=True,
                      prev_tail="", rewrite_max=None, diagnose_max=None, heading_rule="",
                      min_ratio=0.5, keep_raw_when_short=True, status_cb=None,
-                     diagnose_effort=None, rewrite_effort=None):
+                     diagnose_effort=None, rewrite_effort=None, targeted=False):
     """Edit one block (chapter or whole manuscript).
 
     Returns (edited_text_or_None, info). A None result means the block was not usable and
     the caller should keep the raw text; info['rejected'] holds whatever came back so it
-    can still be inspected.
+    can still be inspected. `targeted` (needs two_pass) rewrites only the flagged paragraphs.
     """
+    targeted = targeted and two_pass
     info = {"label": label, "status": "ok", "message": "", "issues": [], "issues_raw": "",
             "ratio": 0.0, "rejected": ""}
     issues_raw = ""
@@ -1325,7 +1498,7 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
         if status_cb:
             status_cb("diagnosing")
         diagnosis, _, _ = call_api_complete(
-            build_diagnose_prompt(cfg, block_text, label), model_key, diagnose_max,
+            build_diagnose_prompt(cfg, block_text, label, targeted=targeted), model_key, diagnose_max,
             retries=0, is_editor=True, editor_system=build_diagnostic_system(),
             # Without this the pass deciding WHAT is wrong could not see the prose reference,
             # while the pass fixing it could - so it flagged deliberate features of the style.
@@ -1335,8 +1508,18 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
             issues_raw = diagnosis.strip()
             info["issues"] = parse_issues(diagnosis)
             info["issues_raw"] = issues_raw
+        elif targeted:
+            # Falling back to a full rewrite would hand the whole block to the editor - exactly
+            # what targeted mode was chosen to prevent - so the raw text stays instead.
+            info.update(status="error", message="Diagnostic pass failed; targeted mode kept the raw text. "
+                                                + (diagnosis or "").strip()[:300])
+            return None, info
         else:
             info["message"] = "Diagnostic pass failed, rewrote without an issue list. "
+
+    if targeted:
+        return run_targeted_rewrite(block_text, label, info, model_key, style_example=style_example,
+                                    effort=rewrite_effort, status_cb=status_cb)
 
     if status_cb:
         status_cb("rewriting")
@@ -1424,7 +1607,7 @@ def _editor_checkpoint(key, raw_story, model_key, mode):
 def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_pass,
                     style_example="", status_cb=None, progress_cb=None,
                     diagnose_effort=None, rewrite_effort=None, min_ratio=0.5,
-                    keep_raw_when_short=True, checkpoint_key=EDITOR_CHECKPOINT_KEY):
+                    keep_raw_when_short=True, checkpoint_key=EDITOR_CHECKPOINT_KEY, targeted=False):
     """Run a full editor pass over an assembled manuscript.
 
     Shared by the writing step and the history page's re-edit action, so a stored draft
@@ -1443,6 +1626,7 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
     report = {
         "used": True, "status": "skipped", "message": "", "model": model_key,
         "mode": mode, "intensity": intensity, "two_pass": bool(two_pass),
+        "targeted": bool(targeted and two_pass),
         "raw_chars": len(original_story), "edited_chars": 0,
         "chapters": [], "issues_found": 0,
     }
@@ -1480,7 +1664,7 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
                 body, "chapter", cfg, model_key, style_example=style_example,
                 two_pass=two_pass, prev_tail=prev_tail, min_ratio=min_ratio,
                 keep_raw_when_short=keep_raw_when_short, status_cb=_status,
-                diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
+                diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort, targeted=targeted,
             )
             info["chapter"], info["title"] = idx, label_name
             chapter_infos.append(info)
@@ -1543,6 +1727,7 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
         two_pass=two_pass, min_ratio=min_ratio, keep_raw_when_short=keep_raw_when_short,
         heading_rule="Reproduce every chapter heading line (### ...) exactly as given.",
         status_cb=_status, diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
+        targeted=targeted,
     )
     tick(1.0)
     issue_log = []
@@ -2516,6 +2701,7 @@ do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
 editor_mode = "Per Chapter"
 editor_intensity = "Aggressive"
 editor_two_pass = True
+editor_targeted = False
 diagnose_effort = "low"
 rewrite_effort = "high"
 editor_min_ratio = 0.5
@@ -2537,6 +2723,12 @@ if do_editor:
             help="First call lists concrete problems with quotes; second call applies that list. "
                  "Much more aggressive than a single polish pass, at double the editor calls."
         )
+        editor_targeted = st.checkbox(
+            "Rewrite flagged passages only", value=False, disabled=not editor_two_pass,
+            help="Only the paragraphs the diagnostic pass quoted a problem in are rewritten; every other "
+                 "paragraph stays exactly as written. Best behind a strong writer. Intensity then only sets "
+                 "how many problems the diagnostic pass may flag, not a rewrite quota. Needs two-pass.",
+        ) and editor_two_pass
         editor_min_ratio = st.slider(
             "Minimum edited length", min_value=30, max_value=100, value=50, step=5, format="%d%%",
             help="An edit much shorter than the original was summarised rather than edited. At 50%, "
@@ -2549,7 +2741,11 @@ if do_editor:
         )
 
         cfg_preview = EDITOR_INTENSITY[editor_intensity]
-        st.caption(f"**{cfg_preview['quota']}% sentence quota.** {cfg_preview['posture']}")
+        if editor_targeted:
+            st.caption("**Targeted.** Intensity only caps how many problems the diagnostic pass flags; "
+                       "unflagged paragraphs are never touched.")
+        else:
+            st.caption(f"**{cfg_preview['quota']}% sentence quota.** {cfg_preview['posture']}")
 
         editor_has_effort = bool(effort_levels(st.session_state.editor_model))
         st.markdown("**Reasoning effort**")
@@ -2570,6 +2766,7 @@ if do_editor:
 st.session_state.editor_mode = editor_mode
 st.session_state.editor_intensity = editor_intensity
 st.session_state.editor_two_pass = editor_two_pass
+st.session_state.editor_targeted = editor_targeted
 st.session_state.diagnose_effort = diagnose_effort
 st.session_state.rewrite_effort = rewrite_effort
 st.session_state.editor_min_ratio = editor_min_ratio
@@ -2990,6 +3187,7 @@ elif st.session_state.step == "writing":
             progress_cb=lambda f: progress_bar.progress(min(1.0, edit_base + (1 - edit_base) * f)),
             diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
             min_ratio=editor_min_ratio, keep_raw_when_short=editor_keep_raw_short,
+            targeted=editor_targeted,
         )
         st.session_state.final_story = final_story
         st.session_state.rejected_edit = rejected
@@ -3037,8 +3235,9 @@ elif st.session_state.step == "final":
     if report.get("used"):
         st.caption(
             f"Editor: **{editor_label}** · {report.get('mode', '')} · {report.get('intensity', '')} "
-            f"({EDITOR_INTENSITY.get(report.get('intensity', ''), {}).get('quota', '?')}% quota) · "
-            f"{'two-pass' if report.get('two_pass') else 'single pass'}"
+            + ("(flagged passages only) · " if report.get('targeted') else
+               f"({EDITOR_INTENSITY.get(report.get('intensity', ''), {}).get('quota', '?')}% quota) · ")
+            + f"{'two-pass' if report.get('two_pass') else 'single pass'}"
             + (f" · {report['issues_found']} issues logged" if report.get("issues_found") else "")
         )
     if status == "error":
@@ -3639,6 +3838,7 @@ elif st.session_state.step == "history":
                         style_example=style_example, status_cb=txt.write, progress_cb=bar.progress,
                         diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
                         min_ratio=editor_min_ratio, keep_raw_when_short=editor_keep_raw_short,
+                        targeted=editor_targeted,
                     )
                     bar.progress(1.0)
 

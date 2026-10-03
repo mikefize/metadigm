@@ -42,11 +42,13 @@ MODELS = {
     # file, since every OpenRouter model shares the same vendor. "reasoning" marks models whose
     # thinking tokens come out of the max_tokens budget. "full_budget" always requests max_out:
     # for models that think longer than THINKING_ALLOWANCE, a cut-off retry costs more than a high ceiling.
+    # "efforts" lists the reasoning levels OpenRouter accepts for the model (sent as reasoning.effort),
+    # "default_effort" is the model's own default, used as the dropdown preset. MiMo has no levels.
     "MiMo 2.6 Pro (OR)": {"name": "MiMo 2.6 Pro", "id": "xiaomi/mimo-v2.6-pro", "vendor": "openrouter", "prompt": "mimo_pro", "reasoning": True, "full_budget": True, "price_in": 0.435, "price_out": 0.87, "max_out": 131072},
     "MiMo 2.6 Flash (OR)": {"name": "MiMo 2.6 Flash", "id": "xiaomi/mimo-v2.6-flash", "vendor": "openrouter", "prompt": "mimo_flash", "reasoning": True, "full_budget": True, "price_in": 0.14, "price_out": 0.28, "max_out": 131072},
-    "DeepSeek V4 Pro (OR)": {"name": "DeepSeek V4 Pro", "id": "deepseek/deepseek-v4-pro-0813", "vendor": "openrouter", "prompt": "deepseek_pro", "reasoning": True, "full_budget": True, "price_in": 0.66, "price_out": 1.98, "max_out": 131072},
-    "DeepSeek V4.1 Flash (OR)": {"name": "DeepSeek V4.1 Flash", "id": "deepseek/deepseek-v4.1-flash", "vendor": "openrouter", "prompt": "deepseek_flash", "reasoning": True, "full_budget": True, "price_in": 0.30, "price_out": 1.20, "max_out": 131072},
-    "Ember-1 (OR)": {"name": "Ember-1", "id": "fireworks/ember-1", "vendor": "openrouter", "prompt": "ember", "reasoning": True, "price_in": 3.00, "price_out": 15.00, "max_out": 131072},
+    "DeepSeek V4 Pro (OR)": {"name": "DeepSeek V4 Pro", "id": "deepseek/deepseek-v4-pro-0813", "vendor": "openrouter", "prompt": "deepseek_pro", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "high", "price_in": 0.66, "price_out": 1.98, "max_out": 131072},
+    "DeepSeek V4.1 Flash (OR)": {"name": "DeepSeek V4.1 Flash", "id": "deepseek/deepseek-v4.1-flash", "vendor": "openrouter", "prompt": "deepseek_flash", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "high", "price_in": 0.30, "price_out": 1.20, "max_out": 131072},
+    "Ember-1 (OR)": {"name": "Ember-1", "id": "fireworks/ember-1", "vendor": "openrouter", "prompt": "ember", "reasoning": True, "efforts": ["low", "high", "max"], "default_effort": "max", "price_in": 3.00, "price_out": 15.00, "max_out": 131072},
 }
 
 # --- INITIALIZE SESSION STATE ---
@@ -909,8 +911,37 @@ VENDOR_STANDARDS_NOTE = (
 )
 
 # Anthropic effort levels. Controls how deeply the model thinks before answering, and
-# therefore how many thinking tokens it bills for. Ignored by every other vendor.
+# therefore how many thinking tokens it bills for. OpenRouter models with an "efforts" list
+# get the nearest level they support; every other vendor ignores it.
 EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"]
+
+
+def effort_levels(model_key):
+    """The effort levels a model accepts - empty when it has no effort control."""
+    cfg = MODELS[model_key]
+    return EFFORT_LEVELS if cfg['vendor'] == 'anthropic' else cfg.get('efforts', [])
+
+
+def nearest_effort(effort, supported):
+    """Map a level onto the closest one the model supports; a tie goes to the cheaper level.
+    Lets fixed calls like effort="medium" work on a low/high/max model."""
+    if not effort or not supported:
+        return None
+    if effort in supported:
+        return effort
+    rank = EFFORT_LEVELS.index
+    return min(supported, key=lambda lvl: (abs(rank(lvl) - rank(effort)), rank(lvl)))
+
+
+def effort_selectbox(widget, label, model_key, preferred, help):
+    """Effort dropdown showing only the levels this model supports, disabled when it has none."""
+    levels = effort_levels(model_key)
+    if not levels:
+        widget.selectbox(label, EFFORT_LEVELS, index=EFFORT_LEVELS.index(preferred),
+                         disabled=True, help=help)
+        return preferred
+    default = nearest_effort(preferred, levels)
+    return widget.selectbox(label, levels, index=levels.index(default), help=help)
 
 _EDITED_RE = re.compile(r'<edited>(.*?)</edited>', re.DOTALL | re.IGNORECASE)
 _ISSUE_RE = re.compile(
@@ -1150,6 +1181,10 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
                 "max_tokens": max_tokens,
                 "temperature": 1.0
             }
+            if vendor == 'openrouter':
+                or_effort = nearest_effort(effort, m_cfg.get('efforts'))
+                if or_effort:
+                    payload["reasoning"] = {"effort": or_effort}
             if vendor == 'kimi':
                 payload["reasoning_effort"] = "high"
                 del payload["temperature"]
@@ -2448,12 +2483,12 @@ st.session_state.openrouter_key = st.sidebar.text_input("OpenRouter Key", value=
 
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 # Set explicitly: left unset, Claude 5.5 Opus defaults to medium while Claude 5 Sonnet defaults to high.
-writer_is_claude = MODELS[st.session_state.writer_model]['vendor'] == 'anthropic'
-st.session_state.writer_effort = st.sidebar.selectbox(
-    "Writer effort", EFFORT_LEVELS, index=EFFORT_LEVELS.index("high"),
-    disabled=not writer_is_claude,
-    help="Reasoning effort for the dossier, arc outline and chapters (Claude writers only). "
-         "Deeper thinking costs more output tokens per chapter.",
+st.session_state.writer_effort = effort_selectbox(
+    st.sidebar, "Writer effort", st.session_state.writer_model,
+    MODELS[st.session_state.writer_model].get('default_effort', 'high'),
+    help="Reasoning effort for the dossier, arc outline and chapters. Shows the levels the writer "
+         "model supports; greyed out for models without effort control. Deeper thinking costs "
+         "more output tokens per chapter.",
 )
 st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
@@ -2496,22 +2531,20 @@ if do_editor:
         cfg_preview = EDITOR_INTENSITY[editor_intensity]
         st.caption(f"**{cfg_preview['quota']}% sentence quota.** {cfg_preview['posture']}")
 
-        editor_is_claude = MODELS[st.session_state.editor_model]['vendor'] == 'anthropic'
-        st.markdown("**Reasoning effort** (Claude editors only)")
+        editor_has_effort = bool(effort_levels(st.session_state.editor_model))
+        st.markdown("**Reasoning effort**")
         if editor_two_pass:
-            diagnose_effort = st.selectbox(
-                "Diagnostic pass", EFFORT_LEVELS, index=EFFORT_LEVELS.index("low"),
-                disabled=not editor_is_claude,
+            diagnose_effort = effort_selectbox(
+                st, "Diagnostic pass", st.session_state.editor_model, "low",
                 help="The diagnostic pass only has to list problems it can already see. Low effort "
                      "keeps thinking on but shallow, which is the cheap half of the two-pass run.",
             )
-        rewrite_effort = st.selectbox(
-            "Rewrite pass", EFFORT_LEVELS, index=EFFORT_LEVELS.index("high"),
-            disabled=not editor_is_claude,
-            help="Where the actual rewriting happens - keep this at high or xhigh. Deeper thinking "
+        rewrite_effort = effort_selectbox(
+            st, "Rewrite pass", st.session_state.editor_model, "high",
+            help="Where the actual rewriting happens - keep this at high or above. Deeper thinking "
                  "is what produces structural edits rather than word swaps.",
         )
-        if not editor_is_claude:
+        if not editor_has_effort:
             st.caption(f"{st.session_state.editor_model} has no effort parameter; these are ignored.")
 
 st.session_state.editor_mode = editor_mode

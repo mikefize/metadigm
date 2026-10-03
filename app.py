@@ -694,10 +694,30 @@ CACHE_WRITE_MULTIPLIER = 1.25   # 5-minute cache: writes cost 1.25x, reads 0.1x
 CACHE_READ_MULTIPLIER = 0.10
 
 
+COUNTER_KEYS = ("cost", "cache_read", "cache_saved")
+
+
+def reset_cost_counter():
+    """Zero the sidebar's per-story counter. Only its baseline moves - the session totals in
+    `stats` keep running, because history rows are costed as deltas against them."""
+    st.session_state.cost_baseline = {k: st.session_state.stats.get(k, 0) for k in COUNTER_KEYS}
+    st.session_state.cost_reset_pending = False
+
+
+def cost_counter():
+    """Spend since the sidebar counter was last reset."""
+    base = st.session_state.get("cost_baseline") or {}
+    return {k: st.session_state.stats.get(k, 0) - base.get(k, 0) for k in COUNTER_KEYS}
+
+
 def track_cost(in_tok, out_tok, model_config, cache_write=0, cache_read=0):
     """Accumulate spend. With prompt caching, `in_tok` counts only the UNCACHED prefix -
     cache writes and reads are billed separately at their own multipliers, so they have to
     be added explicitly or the running total silently under-reports."""
+    # A finished run leaves its total on screen until the next paid call, whichever screen
+    # that comes from (setup, premise builder, rewrite, re-edit) - that call starts a new count.
+    if st.session_state.get("cost_reset_pending"):
+        reset_cost_counter()
     stats = st.session_state.stats
     stats['input'] += in_tok + cache_write + cache_read
     stats['output'] += out_tok
@@ -2566,14 +2586,21 @@ example_choice = st.sidebar.selectbox(
     help="Optional: a sample story used ONLY as a voice/prose reference. Its plot and content are never used."
 )
 
+counter = cost_counter()
 st.sidebar.metric(
-    "Budget Spent", f"${st.session_state.stats['cost']:.4f}",
-    delta=(f"-${st.session_state.stats['cache_saved']:.4f} from cache"
-           if st.session_state.stats.get('cache_read') else None),
+    "Budget Spent (this story)", f"${counter['cost']:.4f}",
+    delta=(f"-${counter['cache_saved']:.4f} from cache" if counter['cache_read'] else None),
     delta_color="normal",
+    help="Resets automatically with the first API call after a story or re-edit has finished, "
+         "and when you press Start New Story.",
 )
-if st.session_state.stats.get('cache_read'):
-    st.sidebar.caption(f"{st.session_state.stats['cache_read']:,} prompt tokens served from cache.")
+if counter['cache_read']:
+    st.sidebar.caption(f"{counter['cache_read']:,} prompt tokens served from cache.")
+cost_col, reset_col = st.sidebar.columns([3, 2])
+cost_col.caption(f"Session total: ${st.session_state.stats['cost']:.4f}")
+if reset_col.button("Reset", key="reset_cost_counter", use_container_width=True):
+    reset_cost_counter()
+    st.rerun()
 
 st.sidebar.markdown("---")
 try:
@@ -2991,6 +3018,7 @@ elif st.session_state.step == "writing":
                 "gen_chapter_index", "gen_stats_start", EDITOR_CHECKPOINT_KEY]:
         st.session_state.pop(key, None)
 
+    st.session_state.cost_reset_pending = True
     st.session_state.step = "final"
     st.rerun()
 
@@ -3121,6 +3149,7 @@ elif st.session_state.step == "final":
             st.rerun()
     with col2:
         if st.button("✨ Start New Story", use_container_width=True):
+            reset_cost_counter()
             st.session_state.step = "setup"
             st.rerun()
     with col3:
@@ -3626,5 +3655,6 @@ elif st.session_state.step == "history":
                     except Exception as exc:
                         st.session_state.loaded_story_id = None
                         st.warning(f"The re-edit could not be saved to history: {exc}")
+                    st.session_state.cost_reset_pending = True
                     st.session_state.step = "final"
                     st.rerun()

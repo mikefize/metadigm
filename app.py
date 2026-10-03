@@ -597,6 +597,71 @@ def build_standalone_diff_html(entries, title):
     )
 
 
+def render_changes_view(original, final, rejected, file_stem, key):
+    """Raw-vs-edited diff with stats. Shared by Final Cut and the history page; `key`
+    keeps the widgets apart when both could exist in one session."""
+    # Normally the final story; if the edit was rejected for length, show what it did anyway.
+    diff_target = final if (final and final != original) else rejected
+    if not diff_target:
+        st.info("No edited version to compare — the raw draft is the final text.")
+        return
+    with st.spinner("Comparing drafts..."):
+        entries, stats = build_diff_report(original, diff_target)
+    touched = stats["changed_blocks"]
+    total = max(stats["total_blocks"], 1)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Paragraphs touched", f"{touched}/{stats['total_blocks']}", f"{touched/total:.0%}")
+    c2.metric("Words added", f"+{stats['added']:,}")
+    c3.metric("Words cut", f"-{stats['removed']:,}")
+    c4.metric("Word count", f"{stats['edited_words']:,}",
+              f"{stats['edited_words'] - stats['original_words']:+,}")
+    if (not final or final == original) and rejected:
+        st.caption("Comparing the raw draft against the **rejected** edit.")
+    only_changed = st.checkbox("Show changed paragraphs only", value=False, key=f"{key}_only_changed")
+    st.caption("🟥 struck-through = cut from the raw draft · 🟩 highlighted = added by the editor")
+    st.markdown(render_diff_html(entries, only_changed=only_changed), unsafe_allow_html=True)
+    st.download_button(
+        "Download Diff (.html)",
+        build_standalone_diff_html(entries, f"{file_stem} — Raw vs Edited"),
+        file_name=f"{file_stem}_DIFF.html",
+        mime="text/html",
+        key=f"{key}_diff_download",
+    )
+
+
+def render_editor_notes(report, issue_log):
+    """Per-chapter editor results and the diagnostic issue list."""
+    chapter_rows = report.get("chapters", [])
+    if chapter_rows:
+        st.markdown("**Per-chapter result**")
+        icons = {"ok": "✅", "identical": "➖", "error": "❌", "too_short": "⚠️",
+                 "truncated": "✂️", "short_accepted": "📉"}
+        for row in chapter_rows:
+            line = (f"{icons.get(row['status'], '•')} **Ch {row['chapter']} — {row['title']}** "
+                    f"· {row['status']}")
+            if row.get("ratio"):
+                line += f" · {row['ratio']:.0%} of raw length"
+            st.markdown(line)
+            if row.get("message"):
+                st.caption(row["message"])
+        st.markdown("---")
+
+    if issue_log:
+        st.markdown("**What the editor flagged on its diagnostic read**")
+        for block in issue_log:
+            header = block["title"] if not block["chapter"] else f"Ch {block['chapter']} — {block['title']}"
+            with st.expander(f"{header} ({len(block['issues'])} issues)", expanded=False):
+                for quote, fix in block["issues"]:
+                    st.markdown(f"> {quote}")
+                    st.markdown(f"→ {fix}")
+                    st.markdown("")
+    elif report.get("two_pass"):
+        st.info("The diagnostic pass returned no parseable issue list for this run.")
+    else:
+        st.info("Two-pass editing was off, so there is no diagnostic list. "
+                "Enable it in the sidebar under Editor Settings for a rationale trail.")
+
+
 def normalize_kinks(kinks):
     if not kinks:
         return []
@@ -1577,6 +1642,7 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
 
 
 EDITOR_CHECKPOINT_KEY = "editor_checkpoint"
+REEDIT_CHECKPOINT_KEY = "reedit_checkpoint"   # separate, so a re-edit never clobbers a writing run's
 
 
 def _editor_checkpoint(key, raw_story, model_key, mode):
@@ -3230,6 +3296,9 @@ elif st.session_state.step == "final":
     report = st.session_state.get("editor_report", {})
     safe_seed = "".join([c for c in st.session_state.seed if c.isalnum()]).rstrip()
 
+    if st.session_state.get("final_cut_warning"):
+        st.warning(st.session_state.pop("final_cut_warning"))
+
     status = report.get("status", "skipped")
     editor_label = report.get("model", "")
     if report.get("used"):
@@ -3256,10 +3325,6 @@ elif st.session_state.step == "final":
     elif status == "ok" and report.get("message"):
         st.info(report["message"])
 
-    # The edited text to diff against: normally the final story, but if the edit was
-    # rejected for length we still want to see what it actually did.
-    diff_target = final if (final and final != original) else rejected
-
     if report.get("used") and original:
         tab_names = ["✨ Edited Manuscript", "📜 Original Raw Draft", "🔍 Changes", "🗒️ Editor Notes"]
         if rejected:
@@ -3273,61 +3338,9 @@ elif st.session_state.step == "final":
             st.text_area("Raw Draft", original, height=600)
             st.download_button("Download Raw (.txt)", original, file_name=f"{safe_seed}_RAW.txt")
         with tabs[2]:
-            if not diff_target:
-                st.info("No edited version to compare — the raw draft is the final text.")
-            else:
-                with st.spinner("Comparing drafts..."):
-                    entries, stats = build_diff_report(original, diff_target)
-                touched = stats["changed_blocks"]
-                total = max(stats["total_blocks"], 1)
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Paragraphs touched", f"{touched}/{stats['total_blocks']}", f"{touched/total:.0%}")
-                c2.metric("Words added", f"+{stats['added']:,}")
-                c3.metric("Words cut", f"-{stats['removed']:,}")
-                c4.metric("Word count", f"{stats['edited_words']:,}",
-                          f"{stats['edited_words'] - stats['original_words']:+,}")
-                if final == original and rejected:
-                    st.caption("Comparing the raw draft against the **rejected** edit.")
-                only_changed = st.checkbox("Show changed paragraphs only", value=False)
-                st.caption("🟥 struck-through = cut from the raw draft · 🟩 highlighted = added by the editor")
-                st.markdown(render_diff_html(entries, only_changed=only_changed), unsafe_allow_html=True)
-                st.download_button(
-                    "Download Diff (.html)",
-                    build_standalone_diff_html(entries, f"{safe_seed} — Raw vs Edited"),
-                    file_name=f"{safe_seed}_DIFF.html",
-                    mime="text/html",
-                )
+            render_changes_view(original, final, rejected, safe_seed, key="final")
         with tabs[3]:
-            chapter_rows = report.get("chapters", [])
-            if chapter_rows:
-                st.markdown("**Per-chapter result**")
-                icons = {"ok": "✅", "identical": "➖", "error": "❌", "too_short": "⚠️",
-                         "truncated": "✂️", "short_accepted": "📉"}
-                for row in chapter_rows:
-                    line = (f"{icons.get(row['status'], '•')} **Ch {row['chapter']} — {row['title']}** "
-                            f"· {row['status']}")
-                    if row.get("ratio"):
-                        line += f" · {row['ratio']:.0%} of raw length"
-                    st.markdown(line)
-                    if row.get("message"):
-                        st.caption(row["message"])
-                st.markdown("---")
-
-            issue_log = st.session_state.get("editor_issues", [])
-            if issue_log:
-                st.markdown("**What the editor flagged on its diagnostic read**")
-                for block in issue_log:
-                    header = block["title"] if not block["chapter"] else f"Ch {block['chapter']} — {block['title']}"
-                    with st.expander(f"{header} ({len(block['issues'])} issues)", expanded=False):
-                        for quote, fix in block["issues"]:
-                            st.markdown(f"> {quote}")
-                            st.markdown(f"→ {fix}")
-                            st.markdown("")
-            elif report.get("two_pass"):
-                st.info("The diagnostic pass returned no parseable issue list for this run.")
-            else:
-                st.info("Two-pass editing was off, so there is no diagnostic list. "
-                        "Enable it in the sidebar under Editor Settings for a rationale trail.")
+            render_editor_notes(report, st.session_state.get("editor_issues", []))
 
         if rejected:
             with tabs[4]:
@@ -3649,6 +3662,64 @@ elif st.session_state.step == "premise":
                         st.text(stored_skeleton[tag])
 
 # --- UI STEP 5: HISTORY ---
+elif st.session_state.step == "reedit":
+    job = st.session_state.get("reedit_job")
+    row = get_story(job["row_id"]) if job else None
+    if not row:
+        st.session_state.pop("reedit_job", None)
+        st.session_state.step = "history"
+        st.rerun()
+
+    st.title(f"🩹 Re-editing run #{row['id']}")
+    st.caption(f"{row['title']} · {job['model']} · {job['mode']} · {job['intensity']}"
+               + (" · flagged passages only" if job["targeted"] else ""))
+    st.info("If the connection drops, this page picks up at the chapter it was on - finished "
+            "chapters are not re-run or paid for twice.")
+    # Checked before the pass starts: clicking it reruns the script, which stops the pass at
+    # its next status update, and this rerun then sees the click.
+    if st.button("✖ Cancel re-edit"):
+        st.session_state.pop("reedit_job", None)
+        st.session_state.pop(REEDIT_CHECKPOINT_KEY, None)
+        st.session_state.step = "history"
+        st.rerun()
+
+    source_raw = row["raw_story"] or ""
+    cfg = json.loads(row["config_json"] or "{}")
+    example_file = cfg.get("style_example_file", "None")
+    style_example = ""
+    if example_file and example_file != "None":
+        style_example = load_file_content(os.path.join(EXAMPLES_DIR, example_file)) or ""
+
+    bar = st.progress(0.0)
+    txt = st.empty()
+    txt.write("Re-editing...")
+    new_final, new_report, new_rejected, new_issues = run_editor_pass(
+        source_raw, source_raw, job["model"], job["mode"], job["intensity"], job["two_pass"],
+        style_example=style_example, status_cb=txt.write, progress_cb=bar.progress,
+        diagnose_effort=job["diagnose_effort"], rewrite_effort=job["rewrite_effort"],
+        min_ratio=job["min_ratio"], keep_raw_when_short=job["keep_raw_short"],
+        checkpoint_key=REEDIT_CHECKPOINT_KEY, targeted=job["targeted"],
+    )
+    bar.progress(1.0)
+
+    restore_dossier_into_session(row)
+    st.session_state.original_story = source_raw
+    st.session_state.final_story = new_final
+    st.session_state.rejected_edit = new_rejected
+    st.session_state.editor_issues = new_issues
+    st.session_state.editor_report = new_report
+    try:
+        st.session_state.loaded_story_id = persist_current_run(
+            "re-edit", parent_id=row["id"], stats_delta=stats_since(job["baseline"]),
+        )
+    except Exception as exc:
+        st.session_state.loaded_story_id = None
+        st.session_state.final_cut_warning = f"The re-edit could not be saved to history: {exc}"
+    st.session_state.pop("reedit_job", None)
+    st.session_state.cost_reset_pending = True
+    st.session_state.step = "final"
+    st.rerun()
+
 elif st.session_state.step == "history":
     st.title("📚 Story History")
 
@@ -3776,6 +3847,18 @@ elif st.session_state.step == "history":
             with st.expander("Preview (first 2,000 characters)", expanded=False):
                 st.text((row["final_story"] or row["raw_story"] or "")[:2000])
 
+            # A checkbox rather than an expander: expander bodies run even while collapsed, and
+            # the diff is too slow to rebuild on every history rerun. Also, the notes nest expanders.
+            if row["editor_enabled"] and row["raw_story"]:
+                if st.checkbox("🔍 Show what the editor changed", key=f"show_changes_{row['id']}"):
+                    ch_tab, notes_tab = st.tabs(["🔍 Changes", "🗒️ Editor Notes"])
+                    with ch_tab:
+                        render_changes_view(row["raw_story"], row["final_story"] or "",
+                                            row["rejected_edit"] or "", f"run{row['id']}",
+                                            key=f"hist_{row['id']}")
+                    with notes_tab:
+                        render_editor_notes(detail, json.loads(row["editor_issues_json"] or "[]"))
+
             note_col, save_col = st.columns([4, 1])
             note = note_col.text_input("Note", value=row["notes"] or "", key=f"note_{row['id']}",
                                        placeholder="e.g. best pacing so far, editor too soft on ch4")
@@ -3819,42 +3902,22 @@ elif st.session_state.step == "history":
                     st.rerun()
 
             if reedit:
-                source_raw = row["raw_story"] or ""
-                if not source_raw.strip():
+                if not (row["raw_story"] or "").strip():
                     st.error("This run has no raw draft stored, so there is nothing to re-edit.")
                 else:
-                    example_file = cfg.get("style_example_file", "None")
-                    style_example = ""
-                    if example_file and example_file != "None":
-                        style_example = load_file_content(os.path.join(EXAMPLES_DIR, example_file)) or ""
-
-                    baseline = dict(st.session_state.stats)
-                    bar = st.progress(0.0)
-                    txt = st.empty()
-                    txt.write("Re-editing...")
-                    new_final, new_report, new_rejected, new_issues = run_editor_pass(
-                        source_raw, source_raw, st.session_state.editor_model,
-                        editor_mode, editor_intensity, editor_two_pass,
-                        style_example=style_example, status_cb=txt.write, progress_cb=bar.progress,
-                        diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
-                        min_ratio=editor_min_ratio, keep_raw_when_short=editor_keep_raw_short,
-                        targeted=editor_targeted,
-                    )
-                    bar.progress(1.0)
-
-                    restore_dossier_into_session(row)
-                    st.session_state.original_story = source_raw
-                    st.session_state.final_story = new_final
-                    st.session_state.rejected_edit = new_rejected
-                    st.session_state.editor_issues = new_issues
-                    st.session_state.editor_report = new_report
-                    try:
-                        st.session_state.loaded_story_id = persist_current_run(
-                            "re-edit", parent_id=row["id"], stats_delta=stats_since(baseline),
-                        )
-                    except Exception as exc:
-                        st.session_state.loaded_story_id = None
-                        st.warning(f"The re-edit could not be saved to history: {exc}")
-                    st.session_state.cost_reset_pending = True
-                    st.session_state.step = "final"
+                    # The pass runs in its own step, not under this button: a button is only True
+                    # on the one rerun that follows the click, so a websocket reconnect mid-pass
+                    # (routine on Streamlit Cloud during a long silent API call) would drop it and
+                    # land back here with nothing saved. Settings are frozen into the job so a
+                    # resumed pass finishes with the configuration it started with.
+                    st.session_state.reedit_job = {
+                        "row_id": row["id"], "baseline": dict(st.session_state.stats),
+                        "model": st.session_state.editor_model, "mode": editor_mode,
+                        "intensity": editor_intensity, "two_pass": editor_two_pass,
+                        "targeted": editor_targeted, "diagnose_effort": diagnose_effort,
+                        "rewrite_effort": rewrite_effort, "min_ratio": editor_min_ratio,
+                        "keep_raw_short": editor_keep_raw_short,
+                    }
+                    st.session_state.pop(REEDIT_CHECKPOINT_KEY, None)
+                    st.session_state.step = "reedit"
                     st.rerun()

@@ -42,12 +42,18 @@ MODELS = {
     # file, since every OpenRouter model shares the same vendor. "reasoning" marks models whose
     # thinking tokens come out of the max_tokens budget. "full_budget" always requests max_out:
     # for models that think longer than THINKING_ALLOWANCE, a cut-off retry costs more than a high ceiling.
-    # "efforts" lists the reasoning levels OpenRouter accepts for the model (sent as reasoning.effort),
+    # "efforts" lists the reasoning levels the API accepts for the model (OpenRouter: reasoning.effort,
+    # DeepSeek direct: reasoning_effort),
     # "default_effort" is the model's own default, used as the dropdown preset. MiMo has no levels.
     "MiMo 2.6 Pro (OR)": {"name": "MiMo 2.6 Pro", "id": "xiaomi/mimo-v2.6-pro", "vendor": "openrouter", "prompt": "mimo_pro", "reasoning": True, "full_budget": True, "price_in": 0.435, "price_out": 0.87, "max_out": 131072},
     "MiMo 2.6 Flash (OR)": {"name": "MiMo 2.6 Flash", "id": "xiaomi/mimo-v2.6-flash", "vendor": "openrouter", "prompt": "mimo_flash", "reasoning": True, "full_budget": True, "price_in": 0.14, "price_out": 0.28, "max_out": 131072},
     "DeepSeek V4 Pro (OR)": {"name": "DeepSeek V4 Pro", "id": "deepseek/deepseek-v4-pro-0813", "vendor": "openrouter", "prompt": "deepseek_pro", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "high", "price_in": 0.66, "price_out": 1.98, "max_out": 131072},
     "DeepSeek V4.1 Flash (OR)": {"name": "DeepSeek V4.1 Flash", "id": "deepseek/deepseek-v4.1-flash", "vendor": "openrouter", "prompt": "deepseek_flash", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "high", "price_in": 0.30, "price_out": 1.20, "max_out": 131072},
+    # DeepSeek's own API: same models as the OpenRouter entries above (and the same prompt files),
+    # usually much faster. Prices are peak; "offpeak" applies outside DeepSeek's peak window
+    # (see deepseek_peak_now). Cache hits bill at "cache_read_mult" of the input price.
+    "DeepSeek V4 Pro (direct)": {"name": "DeepSeek V4 Pro", "id": "deepseek-v4-pro", "vendor": "deepseek", "prompt": "deepseek_pro", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "high", "price_in": 1.32, "price_out": 3.96, "offpeak": {"price_in": 0.66, "price_out": 1.98}, "cache_read_mult": 0.0333, "max_out": 131072},
+    "DeepSeek V4.1 Flash (direct)": {"name": "DeepSeek V4.1 Flash", "id": "deepseek-flash", "vendor": "deepseek", "prompt": "deepseek_flash", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "high", "price_in": 0.30, "price_out": 1.20, "offpeak": {"price_in": 0.15, "price_out": 0.60}, "cache_read_mult": 0.02, "max_out": 131072},
     "Ember-1 (OR)": {"name": "Ember-1", "id": "fireworks/ember-1", "vendor": "openrouter", "prompt": "ember", "reasoning": True, "efforts": ["low", "high", "max"], "default_effort": "max", "price_in": 3.00, "price_out": 15.00, "max_out": 131072},
 }
 
@@ -775,6 +781,21 @@ def cost_counter():
     return {k: st.session_state.stats.get(k, 0) - base.get(k, 0) for k in COUNTER_KEYS}
 
 
+def deepseek_peak_now():
+    """DeepSeek bills double 01:00-04:00 and 06:00-10:00 UTC, Monday to Friday. Chinese public
+    holidays are off-peak too; they are not modelled, so those days over-report slightly."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return now.weekday() < 5 and (1 <= now.hour < 4 or 6 <= now.hour < 10)
+
+
+def current_prices(model_config):
+    """(price_in, price_out) per 1M tokens right now, honouring an off-peak tariff."""
+    offpeak = model_config.get('offpeak')
+    if offpeak and not deepseek_peak_now():
+        return offpeak['price_in'], offpeak['price_out']
+    return model_config['price_in'], model_config['price_out']
+
+
 def track_cost(in_tok, out_tok, model_config, cache_write=0, cache_read=0):
     """Accumulate spend. With prompt caching, `in_tok` counts only the UNCACHED prefix -
     cache writes and reads are billed separately at their own multipliers, so they have to
@@ -786,15 +807,17 @@ def track_cost(in_tok, out_tok, model_config, cache_write=0, cache_read=0):
     stats = st.session_state.stats
     stats['input'] += in_tok + cache_write + cache_read
     stats['output'] += out_tok
-    billable_in = in_tok + cache_write * CACHE_WRITE_MULTIPLIER + cache_read * CACHE_READ_MULTIPLIER
-    c_in = (billable_in / 1_000_000) * model_config['price_in']
-    c_out = (out_tok / 1_000_000) * model_config['price_out']
+    price_in, price_out = current_prices(model_config)
+    read_mult = model_config.get('cache_read_mult', CACHE_READ_MULTIPLIER)
+    billable_in = in_tok + cache_write * CACHE_WRITE_MULTIPLIER + cache_read * read_mult
+    c_in = (billable_in / 1_000_000) * price_in
+    c_out = (out_tok / 1_000_000) * price_out
     stats['cost'] += (c_in + c_out)
 
     if cache_read or cache_write:
         # What those tokens would have cost at full price, minus what they actually cost.
-        saved = ((cache_read * (1 - CACHE_READ_MULTIPLIER) - cache_write * (CACHE_WRITE_MULTIPLIER - 1))
-                 / 1_000_000) * model_config['price_in']
+        saved = ((cache_read * (1 - read_mult) - cache_write * (CACHE_WRITE_MULTIPLIER - 1))
+                 / 1_000_000) * price_in
         stats['cache_read'] += cache_read
         stats['cache_saved'] += saved
 
@@ -1418,18 +1441,20 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
             flag_truncation('MAX_TOKENS' in finish or finish.endswith('2'))
             return text
 
-        elif vendor in ['mistral', 'xai', 'kimi', 'openrouter']:
+        elif vendor in ['mistral', 'xai', 'kimi', 'openrouter', 'deepseek']:
             endpoints = {
                 'mistral': "https://api.mistral.ai/v1/chat/completions",
                 'xai': "https://api.x.ai/v1/chat/completions",
                 'kimi': "https://api.moonshot.ai/v1/chat/completions",
-                'openrouter': "https://openrouter.ai/api/v1/chat/completions"
+                'openrouter': "https://openrouter.ai/api/v1/chat/completions",
+                'deepseek': "https://api.deepseek.com/chat/completions"
             }
             api_keys = {
                 'mistral': st.session_state.mistral_key,
                 'xai': st.session_state.xai_key,
                 'kimi': st.session_state.kimi_key,
-                'openrouter': st.session_state.openrouter_key
+                'openrouter': st.session_state.openrouter_key,
+                'deepseek': st.session_state.deepseek_key
             }
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_keys[vendor]}"}
             payload = {
@@ -1442,6 +1467,11 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
                 or_effort = nearest_effort(effort, m_cfg.get('efforts'))
                 if or_effort:
                     payload["reasoning"] = {"effort": or_effort}
+            if vendor == 'deepseek':
+                # Thinking is on by default; the effort goes in DeepSeek's own top-level field.
+                ds_effort = nearest_effort(effort, m_cfg.get('efforts'))
+                if ds_effort:
+                    payload["reasoning_effort"] = ds_effort
             if vendor == 'kimi':
                 payload["reasoning_effort"] = "high"
                 del payload["temperature"]
@@ -1453,8 +1483,14 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
             if response.status_code != 200:
                 return f"API ERROR: HTTP {response.status_code} - {response.text}"
             data = response.json()
-            if 'usage' in data:
-                track_cost(data['usage'].get('prompt_tokens', 0), data['usage'].get('completion_tokens', 0), m_cfg)
+            usage = data.get('usage')
+            if usage:
+                prompt_tok = usage.get('prompt_tokens', 0)
+                # DeepSeek caches repeated prefixes (the system prompt) automatically and bills
+                # hits at a few percent of the input price; it reports the split itself.
+                cache_hit = usage.get('prompt_cache_hit_tokens', 0) if vendor == 'deepseek' else 0
+                track_cost(prompt_tok - cache_hit, usage.get('completion_tokens', 0), m_cfg,
+                           cache_read=cache_hit)
             choice = data['choices'][0]
             flag_truncation(choice.get('finish_reason') == 'length')
             # Reasoning models on OpenRouter return content None when thinking used up the budget.
@@ -2751,6 +2787,7 @@ st.session_state.mistral_key = st.sidebar.text_input("Mistral Key", value=get_se
 st.session_state.xai_key = st.sidebar.text_input("xAI (Grok) Key", value=get_secret("XAI_API_KEY"), type="password")
 st.session_state.kimi_key = st.sidebar.text_input("Kimi Key", value=get_secret("KIMI_API_KEY"), type="password")
 st.session_state.openrouter_key = st.sidebar.text_input("OpenRouter Key", value=get_secret("OPENROUTER_API_KEY"), type="password")
+st.session_state.deepseek_key = st.sidebar.text_input("DeepSeek Key", value=get_secret("DEEPSEEK_API_KEY"), type="password")
 
 st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
 # Set explicitly: left unset, Claude 5.5 Opus defaults to medium while Claude 5 Sonnet defaults to high.

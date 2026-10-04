@@ -112,6 +112,45 @@ def clean_artifacts(text):
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
+
+# --- TTS EXPORT ---
+# Text-to-speech engines read markup aloud ("asterisk", "hashtag"). The manuscript keeps its
+# markdown - chapter splitting and the editor depend on the ### headings - so the cleanup only
+# happens on the way out, as a separate download.
+_TTS_SCENE_BREAK_RE = re.compile(r'^[ \t]*([*\-_#~=•·][ \t]*){3,}$', re.MULTILINE)
+_TTS_HEADING_RE = re.compile(r'^[ \t]*#{1,6}[ \t]*(.*?)[ \t#]*$', re.MULTILINE)
+# Asterisks mark emphasis anywhere; underscores only at word edges, so snake_case survives.
+_TTS_EMPHASIS_RE = re.compile(r'(\*{1,3})(?=\S)(.+?)(?<=\S)\1|(?<!\w)(_{1,3})(?=\S)(.+?)(?<=\S)\3(?!\w)',
+                              re.DOTALL)
+_TTS_LIST_RE = re.compile(r'^[ \t]*(?:[-*+•][ \t]+|>[ \t]?)', re.MULTILINE)
+
+
+def tts_clean(text):
+    """Plain prose for a text-to-speech engine: no markdown, no stray symbols, and a full stop
+    after each heading so the voice pauses before the chapter starts."""
+    if not text:
+        return ""
+    text = clean_artifacts(text.replace('\r\n', '\n'))
+    text = _TTS_SCENE_BREAK_RE.sub('', text)                        # *** / --- / * * * scene breaks
+
+    def _heading(match):
+        title = match.group(1).strip()
+        return f"{title}." if title and title[-1] not in '.!?:;…"\'”' else title
+    text = _TTS_HEADING_RE.sub(_heading, text)
+
+    text = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', text)           # [link](url) -> link
+    text = re.sub(r'</?[A-Za-z][^>]*>', '', text)                    # leftover tags
+    for _ in range(2):                                               # ***bold italic*** nests
+        text = _TTS_EMPHASIS_RE.sub(lambda m: m.group(2) if m.group(1) else m.group(4), text)
+    text = _TTS_LIST_RE.sub('', text)                                # list bullets, quote markers
+    # Whatever markup is left is unpaired - drop it. Underscores only outside words.
+    text = re.sub(r'[*#`~|]+', '', text)
+    text = re.sub(r'(?<!\w)_+|_+(?!\w)', '', text)
+    text = re.sub(r'[ \t]{2,}', ' ', text)
+    text = re.sub(r'[ \t]+\n', '\n', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
 def get_secret(key_name):
     try: return st.secrets[key_name]
     except: return ""
@@ -2789,25 +2828,32 @@ st.session_state.kimi_key = st.sidebar.text_input("Kimi Key", value=get_secret("
 st.session_state.openrouter_key = st.sidebar.text_input("OpenRouter Key", value=get_secret("OPENROUTER_API_KEY"), type="password")
 st.session_state.deepseek_key = st.sidebar.text_input("DeepSeek Key", value=get_secret("DEEPSEEK_API_KEY"), type="password")
 
-st.session_state.writer_model = st.sidebar.selectbox("Writer Model", list(MODELS.keys()), index=0)
+DEFAULT_WRITER_MODEL = "Claude 5.5 Opus"
+DEFAULT_EDITOR_MODEL = "DeepSeek V4.1 Flash (direct)"
+_model_names = list(MODELS.keys())
+st.session_state.writer_model = st.sidebar.selectbox(
+    "Writer Model", _model_names,
+    index=_model_names.index(DEFAULT_WRITER_MODEL) if DEFAULT_WRITER_MODEL in MODELS else 0)
 # Set explicitly: left unset, Claude 5.5 Opus defaults to medium while Claude 5 Sonnet defaults to high.
 st.session_state.writer_effort = effort_selectbox(
     st.sidebar, "Writer effort", st.session_state.writer_model,
-    MODELS[st.session_state.writer_model].get('default_effort', 'high'),
+    MODELS[st.session_state.writer_model].get('default_effort', 'low'),
     help="Reasoning effort for the dossier, arc outline and chapters. Shows the levels the writer "
          "model supports; greyed out for models without effort control. Deeper thinking costs "
          "more output tokens per chapter.",
 )
-st.session_state.editor_model = st.sidebar.selectbox("Editor Model", list(MODELS.keys()), index=3)
+st.session_state.editor_model = st.sidebar.selectbox(
+    "Editor Model", _model_names,
+    index=_model_names.index(DEFAULT_EDITOR_MODEL) if DEFAULT_EDITOR_MODEL in MODELS else 0)
 do_editor = st.sidebar.checkbox("Enable Editor Pass", value=True)
 
 editor_mode = "Per Chapter"
-editor_intensity = "Aggressive"
+editor_intensity = "Ruthless"
 editor_two_pass = True
-editor_targeted = False
-diagnose_effort = "low"
+editor_targeted = True
+diagnose_effort = "max"
 rewrite_effort = "high"
-editor_min_ratio = 0.5
+editor_min_ratio = 0.6
 editor_keep_raw_short = True
 if do_editor:
     with st.sidebar.expander("Editor Settings", expanded=False):
@@ -2817,7 +2863,7 @@ if do_editor:
                  "rewriting than a whole manuscript, and one bad chapter costs one chapter."
         )
         editor_intensity = st.select_slider(
-            "Intensity", options=list(EDITOR_INTENSITY.keys()), value="Aggressive",
+            "Intensity", options=list(EDITOR_INTENSITY.keys()), value="Ruthless",
             help="Sets the rewrite quota the editor has to hit. Check the Changes tab afterwards "
                  "to see whether it actually did."
         )
@@ -2827,13 +2873,13 @@ if do_editor:
                  "Much more aggressive than a single polish pass, at double the editor calls."
         )
         editor_targeted = st.checkbox(
-            "Rewrite flagged passages only", value=False, disabled=not editor_two_pass,
+            "Rewrite flagged passages only", value=True, disabled=not editor_two_pass,
             help="Only the paragraphs the diagnostic pass quoted a problem in are rewritten; every other "
                  "paragraph stays exactly as written. Best behind a strong writer. Intensity then only sets "
                  "how many problems the diagnostic pass may flag, not a rewrite quota. Needs two-pass.",
         ) and editor_two_pass
         editor_min_ratio = st.slider(
-            "Minimum edited length", min_value=30, max_value=100, value=50, step=5, format="%d%%",
+            "Minimum edited length", min_value=30, max_value=100, value=60, step=5, format="%d%%",
             help="An edit much shorter than the original was summarised rather than edited. At 50%, "
                  "anything at least half the original length is accepted.",
         ) / 100.0
@@ -2854,7 +2900,7 @@ if do_editor:
         st.markdown("**Reasoning effort**")
         if editor_two_pass:
             diagnose_effort = effort_selectbox(
-                st, "Diagnostic pass", st.session_state.editor_model, "low",
+                st, "Diagnostic pass", st.session_state.editor_model, "max",
                 help="The diagnostic pass only has to list problems it can already see. Low effort "
                      "keeps thinking on but shallow, which is the cheap half of the two-pass run.",
             )
@@ -2878,7 +2924,11 @@ st.session_state.editor_keep_raw_short = editor_keep_raw_short
 st.session_state.show_prompt_debug = st.sidebar.checkbox("Show Prompt Debug", value=st.session_state.get("show_prompt_debug", False))
 
 style_files = [f for f in os.listdir(CONFIG_DIR) if f.startswith('style_') and f.endswith('.txt')] if os.path.exists(CONFIG_DIR) else []
-style_choice = st.sidebar.selectbox("Style Profile", style_files if style_files else ["style_gritty.txt"])
+DEFAULT_STYLE_FILE = "style_pulp.txt"
+style_options = style_files if style_files else ["style_gritty.txt"]
+style_choice = st.sidebar.selectbox(
+    "Style Profile", style_options,
+    index=style_options.index(DEFAULT_STYLE_FILE) if DEFAULT_STYLE_FILE in style_options else 0)
 
 example_files = [f for f in os.listdir(EXAMPLES_DIR) if f.endswith('.txt') and f.upper() != 'README.TXT'] if os.path.exists(EXAMPLES_DIR) else []
 example_choice = st.sidebar.selectbox(
@@ -3371,6 +3421,9 @@ elif st.session_state.step == "final":
         with tabs[0]:
             st.text_area("Polished Story", final, height=600)
             st.download_button("Download Edited (.txt)", final, file_name=f"{safe_seed}_EDITED.txt")
+            st.download_button("🔊 Download for TTS (.txt)", tts_clean(final), file_name=f"{safe_seed}_TTS.txt",
+                               help="Same text without markdown symbols (*, #, scene-break lines), "
+                                    "so a text-to-speech engine does not read them aloud.")
         with tabs[1]:
             st.text_area("Raw Draft", original, height=600)
             st.download_button("Download Raw (.txt)", original, file_name=f"{safe_seed}_RAW.txt")
@@ -3386,6 +3439,10 @@ elif st.session_state.step == "final":
     else:
         st.text_area("Story", final or original, height=600)
         st.download_button("Download (.txt)", final or original, file_name=f"{safe_seed}.txt")
+        st.download_button("🔊 Download for TTS (.txt)", tts_clean(final or original),
+                           file_name=f"{safe_seed}_TTS.txt",
+                           help="Same text without markdown symbols (*, #, scene-break lines), "
+                                "so a text-to-speech engine does not read them aloud.")
 
     loaded_id = st.session_state.get("loaded_story_id")
     if loaded_id:
@@ -3922,7 +3979,7 @@ elif st.session_state.step == "history":
                 st.session_state.step = "setup"
                 st.rerun()
 
-            b1, b2, b3 = st.columns(3)
+            b1, b2, b3, b4 = st.columns(4)
             reedit = b1.button("🩹 Re-edit raw draft", use_container_width=True,
                                help="Runs the editor again over this run's raw draft using the editor "
                                     "settings currently in the sidebar. Saved as a new run.")
@@ -3930,6 +3987,9 @@ elif st.session_state.step == "history":
                                file_name=f"run{row['id']}_EDITED.txt", use_container_width=True)
             b3.download_button("⬇️ Raw (.txt)", row["raw_story"] or "",
                                file_name=f"run{row['id']}_RAW.txt", use_container_width=True)
+            b4.download_button("🔊 TTS (.txt)", tts_clean(row["final_story"] or row["raw_story"] or ""),
+                               file_name=f"run{row['id']}_TTS.txt", use_container_width=True,
+                               help="The edited text without markdown symbols, for text-to-speech.")
 
             if st.checkbox("Enable delete", key=f"del_{row['id']}"):
                 if st.button(f"🗑️ Delete run #{row['id']} permanently", type="secondary"):

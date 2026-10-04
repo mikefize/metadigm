@@ -1211,7 +1211,11 @@ def build_rewrite_prompt(cfg, block_text, label, issues_raw="", prev_tail="", he
 # the diagnostic read quoted a problem in, and every other paragraph stays byte-identical.
 
 _PARA_SPLIT_RE = re.compile(r'(\n[ \t]*\n\s*)')
-_TARGET_P_RE = re.compile(r'<p\s+id\s*=\s*["\']?(\d+)["\']?\s*>(.*?)</p>', re.DOTALL | re.IGNORECASE)
+# Models echo the [P12] labels from the input into the id, so "P12" and "[P12]" are accepted too.
+_TARGET_P_RE = re.compile(r'<p\s+id\s*=\s*["\']?\s*\[?\s*P?\s*(\d+)\s*\]?\s*["\']?\s*>(.*?)</p>',
+                          re.DOTALL | re.IGNORECASE)
+# Fallback for replies that drop the tags and answer in the input's own "[P12] text" form.
+_TARGET_LABEL_RE = re.compile(r'^[ \t]*\[P(\d+)\][ \t]*(.*?)(?=^[ \t]*\[P\d+\]|\Z)', re.DOTALL | re.MULTILINE)
 _QUOTE_FOLD = str.maketrans({'“': '"', '”': '"', '„': '"', '‘': "'", '’': "'",
                              '—': '-', '–': '-', '…': '...'})
 # A replacement this far off the original length was rewritten wholesale or gutted, not fixed.
@@ -1294,6 +1298,7 @@ def build_targeted_rewrite_prompt(paragraphs, targets, label):
         "",
         "OUTPUT FORMAT: for every paragraph listed under PARAGRAPHS TO FIX, in order:",
         '<p id="N">the corrected paragraph, without its [PN] label</p>',
+        'The id is the bare number: [P12] is answered as <p id="12">...</p>, never <p id="P12">.',
         "Nothing else - no unlisted paragraphs, no preamble, no commentary.",
     ])
 
@@ -1340,6 +1345,21 @@ def run_targeted_rewrite(block_text, label, info, model_key, style_example="", e
     # Each paragraph is closed on its own, so a cut-off response still yields the ones
     # finished before the cut; the unfinished one simply has no closing tag and is skipped.
     replies = {int(pid) - 1: text for pid, text in _TARGET_P_RE.findall(response)}
+    if not replies:
+        replies = {int(pid) - 1: text.strip() for pid, text in _TARGET_LABEL_RE.findall(response)
+                   if int(pid) - 1 in targets}
+    if not replies:
+        # Not one paragraph could be read back. Say so loudly and keep the reply for inspection,
+        # instead of reporting "kept as written" as if the editor had simply declined.
+        info.update(
+            status="error", rejected=response.strip(),
+            message=info["message"] + f"Targeted: the editor's reply for {len(targets)} flagged paragraph(s) "
+                    "was not in the expected <p id=\"N\"> format, so nothing could be applied and the raw "
+                    "text was kept"
+                    + (" (the response was also cut off)" if truncated else "")
+                    + ". The reply is in the Rejected Edit tab. ",
+        )
+        return None, info
     changed, missing, refused = 0, 0, 0
     low, high = TARGETED_PARA_RATIO
     for i in sorted(targets):

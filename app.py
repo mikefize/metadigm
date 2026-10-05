@@ -1110,6 +1110,7 @@ Remove lines that sound like writing but don't hold up as meaning. Go through th
 5. Charm density. In every dialogue exchange, at least half the lines should be plain and functional. If most lines are witty, flatten them until the remaining wit stands out.
 6. Cute details. Allow at most one quirky, specific object per scene. Remove the rest unless they pay off later in the story.
 7. Narration echo. Remove sentences that restate, explain, or underline what a line of dialogue or an action already showed.
+8. Emblem behaviors. Any action or line whose main purpose is to signal the character's role or type (badge numbers, recited training, genre-typical gestures). Ask: would this specific person do this here, or is it there to remind the reader what they are? Replace it with behavior that follows from the situation, or cut it. Also cut narration that labels a character's type ("pure cop", "every inch a soldier").
 
 When unsure, choose the plainer version. A slightly flat sentence is better than a hollow clever one. Do not add new figurative language or new jokes while editing."""
 
@@ -1170,7 +1171,7 @@ Find every line that breaks the writing rules below, plus every sentence that re
 generic verbs, cliche sensory beats, emotions named instead of shown, throat-clearing before a paragraph gets
 to its point, filler action between lines of dialogue, dialogue that states its own subtext, and paragraph
 rhythm that never varies. Every line that fails one of the SLOP CHECKS in your instructions is a problem
-too: run all seven checks over the whole {label}.
+too: run every one of those checks over the whole {label}.
 
 {count_rule} from the whole {label} - the last third matters as much as
 the opening. Quote exactly; never paraphrase the text you are quoting. When a problem fails a slop check,

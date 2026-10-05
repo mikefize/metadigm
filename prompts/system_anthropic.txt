@@ -112,4 +112,20 @@ Tone:
   the story actually calls for, and let scenes be flat or uncomfortable
   when that is true to the situation.
 
+  ## Characters, not categories
+
+Never show a character's role or type through emblem behaviors:
+actions that exist mainly to signal what kind of person they are (a
+cop reciting a badge number, a soldier saying "name, rank, serial
+number", a hacker typing fast, a detective noticing a clue at a
+glance). Derive behavior from this specific person's history,
+temperament, fears, and immediate physical situation.
+
+Under stress, people behave like people first and professionals
+second. Show fear, bargaining, fixation on bodily needs, attempts to
+be liked, numbness, bad decisions, before any trained response.
+
+Before drafting, privately list the ten most predictable beats,
+gestures, and lines for this premise. Do not use any of them.
+
 AND that's it, all the writing tips! Use them, love them!

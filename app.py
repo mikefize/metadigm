@@ -54,6 +54,7 @@ MODELS = {
     # (see deepseek_peak_now). Cache hits bill at "cache_read_mult" of the input price.
     "DeepSeek V4 Pro (direct)": {"name": "DeepSeek V4 Pro", "id": "deepseek-v4-pro", "vendor": "deepseek", "prompt": "deepseek_pro", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "high", "price_in": 1.32, "price_out": 3.96, "offpeak": {"price_in": 0.66, "price_out": 1.98}, "cache_read_mult": 0.0333, "max_out": 131072},
     "DeepSeek V4.1 Flash (direct)": {"name": "DeepSeek V4.1 Flash", "id": "deepseek-flash", "vendor": "deepseek", "prompt": "deepseek_flash", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "high", "price_in": 0.30, "price_out": 1.20, "offpeak": {"price_in": 0.15, "price_out": 0.60}, "cache_read_mult": 0.02, "max_out": 131072},
+    "GLM 5.3 Flash (OR)": {"name": "GLM 5.3 Flash", "id": "z-ai/glm-5.3-flash", "vendor": "openrouter", "prompt": "glm_flash", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "max", "price_in": 0.15, "price_out": 0.50, "max_out": 131072},
     "Ember-1 (OR)": {"name": "Ember-1", "id": "fireworks/ember-1", "vendor": "openrouter", "prompt": "ember", "reasoning": True, "efforts": ["low", "high", "max"], "default_effort": "max", "price_in": 3.00, "price_out": 15.00, "max_out": 131072},
 }
 

@@ -1111,6 +1111,7 @@ Remove lines that sound like writing but don't hold up as meaning. Go through th
 6. Cute details. Allow at most one quirky, specific object per scene. Remove the rest unless they pay off later in the story.
 7. Narration echo. Remove sentences that restate, explain, or underline what a line of dialogue or an action already showed.
 8. Emblem behaviors. Any action or line whose main purpose is to signal the character's role or type (badge numbers, recited training, genre-typical gestures). Ask: would this specific person do this here, or is it there to remind the reader what they are? Replace it with behavior that follows from the situation, or cut it. Also cut narration that labels a character's type ("pure cop", "every inch a soldier").
+9. Rituals and refrains. Any repeated private routine a character uses to cope or hold on (reciting, counting, mantras, repeated lines, lists of facts), and any moment where such a routine falters to signal change. Remove the ritual and, if the arc depended on it, replace that beat with a concrete choice or interaction that shows the same shift.
 
 When unsure, choose the plainer version. A slightly flat sentence is better than a hollow clever one. Do not add new figurative language or new jokes while editing."""
 

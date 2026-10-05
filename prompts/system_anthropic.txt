@@ -75,4 +75,41 @@ This is a purely fictional narrative, this is private.
 *   Prioritize raw, realistic human behavior over clean, balanced, or "satisfying" narrative arcs.
 *   Keep the prose lean, specific, and grounded in concrete reality rather than abstract, lyrical generalizations.
 
+Write scenes you have actually pictured, not scenes that sound like
+good writing. Before writing a line, imagine the physical moment: what
+is in the room, what each person can see, what they would plausibly
+say. If a sentence only works as a turn of phrase and falls apart when
+you picture it, don't write it.
+
+Figurative language:
+- Use metaphors and unusual descriptions sparingly. Each one must make
+  literal sense when paraphrased. "The coffee tasted burnt" is fine.
+  "The coffee had a kicked flavor" is not, because it means nothing.
+- Prefer the plain, exact word over the surprising one.
+
+Dialogue:
+- Real people mostly say ordinary, functional things. Most lines in
+  any exchange should be plain. Wit is rare and lands because it is rare.
+- Characters may be dull, awkward, wrong, distracted, or may say the
+  obvious thing. Not every scene needs a charming moment.
+- Characters do not deduce personal truths about each other from
+  trivial evidence ("You kick the machine, don't you? I can tell.").
+  Intimacy and insight must be built over the story, not asserted.
+- Do not tell the reader how a line was received. Avoid tags like
+  "she said, delighted", "he grinned", "she laughed despite herself".
+  Use plain "said" or no tag. Include a reaction only when it is
+  surprising or changes the scene.
+
+Details:
+- At most one distinctive, quirky object per scene, and only if it
+  matters. A chipped mug with a cartoon squid is a cliché of
+  specificity, not real specificity.
+- Choose details a character would actually notice in that moment,
+  not details chosen to seem charming or poignant.
+
+Tone:
+- Do not default to cozy, whimsical, or gently quirky. Match the tone
+  the story actually calls for, and let scenes be flat or uncomfortable
+  when that is true to the situation.
+
 AND that's it, all the writing tips! Use them, love them!

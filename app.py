@@ -971,7 +971,7 @@ EDITOR_RULES_BLOCK = """        - No Metaphors!
 
 ## 4. Execution Directives
 *   Prioritize raw, realistic human behavior over clean, balanced, or "satisfying" narrative arcs.
-*   Keep the prose lean, specific, and grounded in concrete, lyrical generalizations.
+*   Keep the prose lean, specific, and grounded in concrete reality rather than abstract, lyrical generalizations.
 
 Example for writing:
 Bad Style (Do NOT write like this): "A cold shiver ran down his spine, a testament to the lingering darkness that danced in the room like a silent watcher."
@@ -1097,6 +1097,23 @@ _ISSUE_RE = re.compile(
 )
 
 
+# Checks for prose that sounds like writing but does not hold up as meaning. Part of every
+# editor system prompt (diagnose, full rewrite, targeted rewrite), so lines that fail them are
+# both flagged and fixed. Kept free of output-format instructions - each pass sets its own.
+SLOP_CHECKS = """# SLOP CHECKS
+Remove lines that sound like writing but don't hold up as meaning. Go through the text line by line and apply every check below.
+
+1. Literal test. For every metaphor, simile, or unusual adjective, paraphrase it in plain words. If the paraphrase is nonsense or a category error (a flavor that is "kicked", a silence that is "orange"), and it is not an established idiom, replace it with the plain statement or delete it.
+2. Out-loud test. For every line of dialogue, ask: would a real person say this, aloud, to this person, in this situation? If it sounds composed or quotable, rewrite it as something a person would actually say, or cut it.
+3. Reaction tags. Delete tags and beats that tell the reader how a line landed (delighted, amused, grinning, laughing, smiling, "despite herself"). Keep one only if the reaction is unexpected and matters.
+4. Unearned insight. Any moment where a character reads another character's habits, feelings, or history from trivial evidence: remove it or replace it with an ordinary question or remark.
+5. Charm density. In every dialogue exchange, at least half the lines should be plain and functional. If most lines are witty, flatten them until the remaining wit stands out.
+6. Cute details. Allow at most one quirky, specific object per scene. Remove the rest unless they pay off later in the story.
+7. Narration echo. Remove sentences that restate, explain, or underline what a line of dialogue or an action already showed.
+
+When unsure, choose the plainer version. A slightly flat sentence is better than a hollow clever one. Do not add new figurative language or new jokes while editing."""
+
+
 def build_editor_system(cfg):
     """System prompt for the rewrite pass.
 
@@ -1109,12 +1126,13 @@ def build_editor_system(cfg):
         "Total length stays within roughly 10% of the input. That is a constraint on the finished text, NOT a "
         "reason to keep the input's sentences - rewrite freely and land on the same length.\n\n"
         f"{EDITOR_RULES_BLOCK}\n\n"
+        f"{SLOP_CHECKS}\n\n"
         f"{VENDOR_STANDARDS_NOTE}"
     )
 
 
 def build_diagnostic_system():
-    return f"{DIAGNOSTIC_SYSTEM}\n\n{EDITOR_RULES_BLOCK}\n\n{VENDOR_STANDARDS_NOTE}"
+    return f"{DIAGNOSTIC_SYSTEM}\n\n{EDITOR_RULES_BLOCK}\n\n{SLOP_CHECKS}\n\n{VENDOR_STANDARDS_NOTE}"
 
 
 def extract_edited(text):
@@ -1151,10 +1169,13 @@ def build_diagnose_prompt(cfg, block_text, label, targeted=False):
 Find every line that breaks the writing rules below, plus every sentence that reads as AI-generated prose:
 generic verbs, cliche sensory beats, emotions named instead of shown, throat-clearing before a paragraph gets
 to its point, filler action between lines of dialogue, dialogue that states its own subtext, and paragraph
-rhythm that never varies.
+rhythm that never varies. Every line that fails one of the SLOP CHECKS in your instructions is a problem
+too: run all seven checks over the whole {label}.
 
 {count_rule} from the whole {label} - the last third matters as much as
-the opening. Quote exactly; never paraphrase the text you are quoting.
+the opening. Quote exactly; never paraphrase the text you are quoting. When a problem fails a slop check,
+start its fix with the check's name in brackets, e.g. <fix>[Reaction tag] Delete "she said, grinning".</fix>
+If the fix is to cut the line, say so - a cut is a valid fix.
 
 OUTPUT FORMAT - nothing but this list, one entry per problem, no preamble and no closing remarks:
 <issue><quote>the offending sentence or fragment, copied verbatim</quote><fix>the concrete change to make</fix></issue>
@@ -1264,6 +1285,7 @@ def build_targeted_system():
         "EDITING POSTURE: Targeted fixes. You change what the diagnostic read flagged and nothing else - a "
         "sentence nobody flagged is a sentence you keep.\n\n"
         f"{EDITOR_RULES_BLOCK}\n\n"
+        f"{SLOP_CHECKS}\n\n"
         f"{VENDOR_STANDARDS_NOTE}"
     )
 
@@ -1289,6 +1311,8 @@ def build_targeted_rewrite_prompt(paragraphs, targets, label):
         "- One paragraph in, one paragraph out. Do not merge, split, add or drop paragraphs, and do not return "
         "paragraphs that are not listed.",
         "- Keep each paragraph close to its original length unless the fix is a cut.",
+        '- If a fix removes the paragraph entirely (a pure reaction beat, a narration echo), answer '
+        '<p id="N">[CUT]</p> instead of leaving it empty.',
         "",
         _INVARIANT_RULES,
         "",
@@ -1361,7 +1385,7 @@ def run_targeted_rewrite(block_text, label, info, model_key, style_example="", e
                     + ". The reply is in the Rejected Edit tab. ",
         )
         return None, info
-    changed, missing, refused = 0, 0, 0
+    changed, missing, refused, cut = 0, 0, 0, 0
     low, high = TARGETED_PARA_RATIO
     for i in sorted(targets):
         if i not in replies:
@@ -1369,6 +1393,17 @@ def run_targeted_rewrite(block_text, label, info, model_key, style_example="", e
             continue
         new = clean_artifacts(re.sub(r'^\s*\[P\d+\]\s*|\s*\[P\d+\]\s*$', '', replies[i]))
         original = paragraphs[i].strip()
+        if new.upper().strip(' .') == "[CUT]":
+            # A deliberate deletion, which the length check below would otherwise refuse.
+            # Its separator goes with it, so no blank gap is left behind.
+            parts[2 * i] = ""
+            if 2 * i + 1 < len(parts):
+                parts[2 * i + 1] = ""
+            elif i > 0:
+                parts[2 * i - 1] = ""
+            cut += 1
+            changed += 1
+            continue
         if not new or not (low <= len(new) / max(len(original), 1) <= high):
             refused += 1
             continue
@@ -1379,7 +1414,9 @@ def run_targeted_rewrite(block_text, label, info, model_key, style_example="", e
     edited = "".join(parts).strip()
     info["targeted"]["changed"] = changed
     info["ratio"] = len(edited) / max(len(block_text.strip()), 1)
-    message = f"Targeted: rewrote {changed} of {total} paragraphs ({len(info['issues'])} issues). " + unmatched_note
+    message = (f"Targeted: rewrote {changed} of {total} paragraphs"
+               + (f", {cut} of them cut entirely" if cut else "")
+               + f" ({len(info['issues'])} issues). " + unmatched_note)
     if missing:
         message += (f"{missing} flagged paragraph(s) did not come back"
                     + (" because the response was cut off" if truncated else "") + " and were kept as written. ")

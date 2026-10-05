@@ -2085,9 +2085,20 @@ def generate_dossier(seed, attempt, config):
 
     CHARACTER & ATMOSPHERE DIRECTIVE:
     Analyze the inputs above to establish a believable protagonist and conflict.
-    1. Describe their baseline life.
+    1. Describe their baseline life - briefly. See BASELINE RULES below.
     2. Define the catalyst event that brings them into contact with the mechanism.
     3. Describe the internal friction in subtle terms: how the initial changes subtly clash with their personal boundaries or self-perception without making it an overbearing drama.
+
+    BASELINE RULES:
+    The baseline is background the writer works from, not material to showcase. Every detail you put in it
+    will show up in the story again and again, so include only what the story actually needs.
+    - 3 to 4 plain sentences, under 80 words. A fact sheet, not prose.
+    - Cover: age range, job or daily situation, living situation, and one or two personality traits or
+      boundaries that the transformation will push against. Nothing else.
+    - No quirky signature details: no collections, named pets, favourite mugs, specific foods or drinks,
+      brands, hobbies lists, rituals, catchphrases or habitual gestures.
+    - No backstory wounds, past relationships or childhood explanations unless the inputs ask for them.
+    - No sensory description, no metaphors, no lines written to sound charming or poignant.
     """
 
     if user_baseline or user_catalyst or user_conflict or user_blurb:
@@ -2108,7 +2119,8 @@ def generate_dossier(seed, attempt, config):
 
     prompt += f"\nOUTPUT FORMAT (STRICT XML - NO OTHER TEXT):\n"
     prompt += (
-        "<protagonist_baseline>Describe their baseline life, status, and subtle personality nuances/boundaries.</protagonist_baseline>\n"
+        "<protagonist_baseline>3-4 plain sentences: daily situation, status, and the one or two traits/boundaries "
+        "the transformation will push against. Follow the BASELINE RULES.</protagonist_baseline>\n"
         "<catalyst>The situation or event that triggers the transformation process.</catalyst>\n"
         "<psychological_conflict>The subtle internal friction as the changes interact with their personal boundaries.</psychological_conflict>\n"
         "<blurb>A 3-sentence narrative hook outlining the story premise.</blurb>\n"
@@ -2255,7 +2267,7 @@ def build_chapter_prompt(d, chapter_index, total_chapters, arc_phase, arc_instr,
     global_bible = f"""
 # GLOBAL STORY BIBLE
 **PREMISE:** {d.get('blurb')}
-**CHARACTER PROFILE & SUBTLE NUANCES:** {d.get('protagonist_baseline')}
+**CHARACTER BASELINE (background for consistency - do not showcase it; bring a detail in only when the scene needs it, never as a recurring motif):** {d.get('protagonist_baseline')}
 **INTERNAL FRICTION:** {d.get('psychological_conflict')}
 **GENRE:** {d.get('genre')} | **POV:** {d.get('pov')}
 **CHARACTERS:** {prot_details} | **ANTAGONIST:** {d.get('antagonist')}

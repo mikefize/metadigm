@@ -90,6 +90,108 @@ def load_list(filename):
     with open(path, 'r', encoding='utf-8') as f:
         return [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
+# --- CHARACTER NAMES ---
+# Names the model would otherwise invent come from config/names_*.txt. Each story gets a small
+# random pool rather than the whole list: handed a long list, a model keeps picking the same few
+# entries near the top, and the full list would ride along in every chapter prompt. The pool is
+# drawn once per story and stored in the dossier, so casting, dossier, outline and every chapter
+# (including a rewrite from the stored dossier) all name characters from the same set.
+NAME_FILES = {"female": "names_female.txt", "male": "names_male.txt", "last": "names_last.txt"}
+NAME_POOL_SIZE = {"female": 8, "male": 8, "last": 10}
+
+
+def name_list(kind):
+    """All configured names of one kind - [] when the file is missing, not load_list's placeholder."""
+    if not os.path.exists(os.path.join(CONFIG_DIR, NAME_FILES[kind])):
+        return []
+    return load_list(NAME_FILES[kind])
+
+
+def random_full_name(gender="Female"):
+    """A first name matching the gender plus a surname, straight from the lists - no model involved."""
+    if gender == "Male":
+        firsts = name_list("male")
+    elif gender == "Female":
+        firsts = name_list("female")
+    else:
+        firsts = name_list("female") + name_list("male")
+    lasts = name_list("last")
+    return " ".join(part for part in (random.choice(firsts) if firsts else "",
+                                      random.choice(lasts) if lasts else "") if part) or "Protagonist"
+
+
+def draw_name_pool():
+    pool = {}
+    for kind, size in NAME_POOL_SIZE.items():
+        names = name_list(kind)
+        if names:
+            pool[kind] = random.sample(names, min(size, len(names)))
+    return pool
+
+
+def session_name_pool():
+    """The pool for the story currently being set up. Kept until that story is finished, so the
+    premise builder's casting sheet and the dossier draw from the same names."""
+    if not st.session_state.get("name_pool"):
+        st.session_state.name_pool = draw_name_pool()
+    return st.session_state.name_pool
+
+
+def story_name_pool(d):
+    """The dossier's pool; dossiers saved before pools existed get one on first use."""
+    if not d.get("name_pool"):
+        d["name_pool"] = session_name_pool()
+    return d["name_pool"]
+
+
+def _name_in(name, text):
+    # Case-sensitive on purpose: names are capitalised, and "will", "max" or "mark" are not.
+    return bool(re.search(rf'\b{re.escape(name)}\b', text or ""))
+
+
+def taken_names(cast_names, story_text=""):
+    """Names already given to someone: the cast as entered, plus every name from the name lists
+    that already occurs in the outline or the story so far - that is how side characters get
+    named. Scanning the whole story, not just the last chapter, is what keeps a chapter-2 side
+    character's name from being handed to someone new in chapter 5."""
+    taken = [n.strip() for n in cast_names if n and n.strip()]
+    for name in name_list("female") + name_list("male") + name_list("last"):
+        if _name_in(name, story_text) and not any(_name_in(name, t) for t in taken):
+            taken.append(name)
+    return taken
+
+
+def dossier_cast_names(d):
+    """Protagonist names plus the antagonist's, when the dossier's antagonist line starts with one."""
+    names = [p.get('name', '') for p in d.get('protagonists', [])]
+    antag = re.split(r'\s+[-–]\s+|\s*[(,:]', str(d.get('antagonist', '')).strip(), maxsplit=1)[0].strip()
+    if antag and antag.upper() != "NONE" and "invented" not in antag.lower() and len(antag) <= 40:
+        names.append(antag)
+    return names
+
+
+def name_pool_block(pool, taken=()):
+    """Prompt block naming what is taken and offering the pool minus anything already in use,
+    so one name never ends up on two characters."""
+    taken = [t for t in taken if t]
+    taken_text = " ".join(taken)
+    lines = []
+    for kind, label in (("female", "Female first names"), ("male", "Male first names"), ("last", "Surnames")):
+        names = [n for n in (pool or {}).get(kind, []) if not _name_in(n, taken_text)]
+        if names:
+            lines.append(f"- {label}: {', '.join(names)}")
+
+    parts = []
+    if taken:
+        parts.append("NAMES ALREADY TAKEN - each belongs to exactly one character. Never give any of them, "
+                     "as a first name or a surname, to anyone else: " + ", ".join(taken))
+    if lines:
+        parts.append("NAME POOL - whenever a character without a name needs one (a side character, an unnamed "
+                     "antagonist, anyone you introduce), take it from these lists. Use each name for one "
+                     "character only and do not invent names outside the pool.\n" + "\n".join(lines))
+    return "\n\n".join(parts)
+
+
 def load_file_content(filepath):
     if not os.path.exists(filepath): return None
     with open(filepath, 'r', encoding='utf-8') as f: return f.read()
@@ -451,6 +553,7 @@ DOSSIER_DEFAULTS = {
     "style_guide": "Write normally.", "style_example": "", "num_chapters": 7,
     "target_words": 10000, "main_idea": "", "pacing": "Steady Build",
     "transform_onset": "Mid-Story", "add_epilogue": False, "arc_proposal": "", "custom_note": "",
+    "name_pool": {},
 }
 
 
@@ -2009,14 +2112,17 @@ def generate_dossier(seed, attempt, config):
     if style_example_file and style_example_file != 'None':
         style_example = load_file_content(os.path.join(EXAMPLES_DIR, style_example_file)) or ""
 
-    prots = config.get('protagonists', [])
+    # Copied, so a name drawn for a blank field stays out of the setup form ("blank = random" keeps
+    # meaning random on a reroll) but does reach the dossier, outline and chapters.
+    prots = [dict(p) for p in config.get('protagonists', [])]
     if not prots:
-        p_name = f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
-        prots = [{"name": p_name, "gender": "Female", "info": ""}]
+        prots = [{"name": random_full_name("Female"), "gender": "Female", "info": ""}]
 
     prot_lines = []
     for p in prots:
-        pname = p['name'] or f"{random.choice(load_list('names_first.txt'))} {random.choice(load_list('names_last.txt'))}"
+        if not p.get('name'):
+            p['name'] = random_full_name(p.get('gender', 'Female'))
+        pname = p['name']
         pinfo = f", {p['info']}" if p.get('info') else ""
         prot_lines.append(f"{pname} (Gender: {p['gender']}{pinfo})")
     char_str = "; ".join(prot_lines)
@@ -2103,6 +2209,14 @@ def generate_dossier(seed, attempt, config):
     - No sensory description, no metaphors, no lines written to sound charming or poignant.
     """
 
+    name_pool = session_name_pool()
+    cast_names = [p['name'] for p in prots]
+    if isinstance(antag_cfg, dict) and antag_cfg.get('include', True) and antag_cfg.get('name'):
+        cast_names.append(antag_cfg['name'])
+    pool_block = name_pool_block(name_pool, taken_names(cast_names, main_idea))
+    if pool_block:
+        prompt += f"\n{pool_block}\n"
+
     if user_baseline or user_catalyst or user_conflict or user_blurb:
         prompt += "\nUSER-PROVIDED PREMISE COMPONENTS:\n"
         if user_baseline:
@@ -2181,8 +2295,15 @@ def generate_dossier(seed, attempt, config):
         "main_idea": main_idea,
         "pacing": config.get('pacing', 'Steady Build'),
         "transform_onset": config.get('transform_onset', 'Mid-Story'),
-        "add_epilogue": config.get('add_epilogue', False)
+        "add_epilogue": config.get('add_epilogue', False),
+        "name_pool": name_pool,
     }
+
+def _dossier_text(d):
+    """The dossier prose a side character may already have been named in."""
+    return " ".join(str(d.get(k) or '') for k in ('antagonist', 'blurb', 'catalyst', 'protagonist_baseline',
+                                                  'psychological_conflict', 'main_idea'))
+
 
 def generate_arc_proposal(d, model_key):
     num_ch = d.get('num_chapters', 7)
@@ -2216,6 +2337,8 @@ STORY:
 
 STRUCTURE - {template}:
 {directive}
+
+{name_pool_block(story_name_pool(d), taken_names(dossier_cast_names(d), _dossier_text(d)))}
 
 RULES:
 1. One sentence per chapter. Two at most. Say only what happens.
@@ -2262,7 +2385,8 @@ def render_state_log(state_log):
     return "\n".join(lines)
 
 
-def build_chapter_prompt(d, chapter_index, total_chapters, arc_phase, arc_instr, full_outline, last_chapter_text, state_log):
+def build_chapter_prompt(d, chapter_index, total_chapters, arc_phase, arc_instr, full_outline, last_chapter_text, state_log,
+                         story_so_far=""):
     prots = d.get('protagonists', [])
     prot_details = "\n".join([f"- {p.get('name', 'Unnamed')} (Gender: {p.get('gender', 'Female')}) | Info: {p.get('info', 'None')}" for p in prots]) if prots else f"- {d.get('name', 'Protagonist')}"
 
@@ -2279,6 +2403,15 @@ def build_chapter_prompt(d, chapter_index, total_chapters, arc_phase, arc_instr,
 # OVERALL CHAPTER OUTLINE
 {full_outline}
 """
+    # Names already used - cast, dossier, outline, every chapter so far - are listed as taken and
+    # drop out of the pool on offer.
+    pool_block = name_pool_block(
+        story_name_pool(d),
+        taken_names(dossier_cast_names(d),
+                    " ".join([_dossier_text(d), full_outline or "", story_so_far or last_chapter_text or ""])),
+    )
+    if pool_block:
+        global_bible += f"\n{pool_block}\n"
 
     progress_ratio = (chapter_index + 1) / total_chapters
     onset = d.get('transform_onset', 'Mid-Story')
@@ -2538,6 +2671,11 @@ what those earlier beats were always going to produce - not as a swerve in the l
 
     if recast_female:
         prompt += RECAST_FEMALE_RULE
+        # The recast lead's new name is the one name this step has to invent.
+        female_pool = session_name_pool().get("female", [])
+        if female_pool:
+            prompt += ("- Take her first name from this list, choosing the one that best fits the original's "
+                       f"culture and era: {', '.join(female_pool)}.\n")
 
     # The "keep the original names" constraint below has to bend for the one name the recast changes,
     # or the two directives contradict each other and the model picks whichever it read last.
@@ -2625,9 +2763,13 @@ def generate_fused_premise(summary, skeleton, motif_lines, method_list, deviatio
 # degrades both, and this way the fusion prompt keeps the output contract it was tuned on.
 
 def build_casting_prompt(premise, skeleton, motif_lines, genre_options, motif_options, body_options,
-                         method_options, recast_female=False):
+                         method_options, recast_female=False, name_pool=None):
     def as_list(options):
         return "\n".join(f"  - {o}" for o in options) or "  (none available)"
+
+    pool_block = name_pool_block(name_pool, taken_names([], premise))
+    pool_rule = ("\n- Anyone the sheet needs who has no name in the premise gets one from the NAME POOL below."
+                 if pool_block else "")
 
     recast_note = ("""
 - The lead was deliberately recast as female during the adaptation. Take her name and gender from the
@@ -2677,7 +2819,9 @@ transform_onset: {" | ".join(SETUP_ONSETS)}   (how early the change starts bitin
 - The antagonist is whoever holds the leverage in the premise. Set include to false when the opposing
   force is a system or a condition rather than a person who can appear on the page.
 - Give body_details only when change_type is Physical or Both, and keep "remark" to a few words.
-- Choose nothing that the premise does not support. An empty list beats an invented entry.{recast_note}
+- Choose nothing that the premise does not support. An empty list beats an invented entry.{recast_note}{pool_rule}
+
+{pool_block}
 
 OUTPUT FORMAT - a single JSON object inside the tag, and nothing else:
 <cast>
@@ -2829,6 +2973,7 @@ def generate_setup_cast(premise, skeleton, motif_lines, model_key, num_chapters=
         premise, skeleton or {}, motif_lines,
         load_list('genres.txt'), load_list('fetishes.txt'),
         load_list('body_parts.txt'), load_list('mc_methods.txt'), recast_female,
+        name_pool=session_name_pool(),
     )
     res = call_api(prompt, model_key, max_tokens=4000, effort="low")
     if not res or res.startswith("API ERROR"):
@@ -3352,7 +3497,8 @@ elif st.session_state.step == "writing":
             arc_phase=phase, arc_instr=instr,
             full_outline=proposal,
             last_chapter_text=last_chapter_text,
-            state_log=state_log
+            state_log=state_log,
+            story_so_far=raw_story
         )
 
         # Size the ceiling from the chapter this call is supposed to produce (~6 chars a word)
@@ -3440,6 +3586,8 @@ elif st.session_state.step == "writing":
     for key in ["gen_full_narrative", "gen_raw_story", "gen_state_log", "gen_last_chapter_text",
                 "gen_chapter_index", "gen_stats_start", EDITOR_CHECKPOINT_KEY]:
         st.session_state.pop(key, None)
+    # This story's pool lives on in its dossier; the next story set up in this session draws its own.
+    st.session_state.pop("name_pool", None)
 
     st.session_state.cost_reset_pending = True
     st.session_state.step = "final"
@@ -3528,6 +3676,7 @@ elif st.session_state.step == "final":
     with col2:
         if st.button("✨ Start New Story", use_container_width=True):
             reset_cost_counter()
+            st.session_state.pop("name_pool", None)
             st.session_state.step = "setup"
             st.rerun()
     with col3:

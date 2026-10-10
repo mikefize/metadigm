@@ -31,8 +31,11 @@ DB_PATH = os.path.join(DATA_DIR, 'history.db')
 MODELS = {
     "Grok 4.50": {"name": "Grok 4.50", "id": "grok-4.5", "vendor": "xai", "price_in": 2.00, "price_out": 6.00},
     "Grok 4.20": {"name": "Grok 4.20", "id": "grok-4.20-0309-reasoning", "vendor": "xai", "price_in": 1.25, "price_out": 2.50},
-    "Claude 5.5 Sonnet": {"name": "Claude 5.5 Sonnet", "id": "claude-sonnet-5-5", "vendor": "anthropic", "price_in": 2.00, "price_out": 10.00, "max_out": 128000},
-    "Claude 5.5 Opus": {"name": "Claude 5.5 Opus", "id": "claude-opus-5-5", "vendor": "anthropic", "price_in": 4.00, "price_out": 20.00, "max_out": 128000},
+    # Cache hits on Opus/Sonnet 5.5 bill at 5% of the input price, not the usual 10%.
+    "Claude 5.5 Sonnet": {"name": "Claude 5.5 Sonnet", "id": "claude-sonnet-5-5", "vendor": "anthropic", "prompt": "claude_sonnet", "price_in": 2.00, "price_out": 10.00, "cache_read_mult": 0.05, "max_out": 128000},
+    "Claude 5.5 Opus": {"name": "Claude 5.5 Opus", "id": "claude-opus-5-5", "vendor": "anthropic", "prompt": "claude_opus", "price_in": 4.00, "price_out": 20.00, "cache_read_mult": 0.05, "max_out": 128000},
+    # Haiku 5.5 bills a request whose prompt exceeds 100k tokens at a 5x higher rate ("long_context").
+    "Claude 5.5 Haiku": {"name": "Claude 5.5 Haiku", "id": "claude-haiku-5-5", "vendor": "anthropic", "prompt": "claude_haiku", "price_in": 0.10, "price_out": 0.50, "long_context": {"threshold": 100000, "price_in": 0.50, "price_out": 2.50}, "max_out": 128000},
     "Gemini 3.1 Pro": {"name": "Gemini 3 Pro", "id": "gemini-3.1-pro-preview", "vendor": "google", "price_in": 2.00, "price_out": 12.00, "max_out": 65536},
     "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.50, "price_out": 3.00, "max_out": 65536},
     "Gemini 3.1 Flash": {"name": "Gemini 3.1 Flash", "id": "gemini-3.1-flash-lite-preview", "vendor": "google", "price_in": 0.25, "price_out": 1.50, "max_out": 65536},
@@ -931,8 +934,12 @@ def deepseek_peak_now():
     return now.weekday() < 5 and (1 <= now.hour < 4 or 6 <= now.hour < 10)
 
 
-def current_prices(model_config):
-    """(price_in, price_out) per 1M tokens right now, honouring an off-peak tariff."""
+def current_prices(model_config, prompt_tokens=0):
+    """(price_in, price_out) per 1M tokens for this request, honouring a long-prompt tier and an
+    off-peak tariff."""
+    long_ctx = model_config.get('long_context')
+    if long_ctx and prompt_tokens > long_ctx['threshold']:
+        return long_ctx['price_in'], long_ctx['price_out']
     offpeak = model_config.get('offpeak')
     if offpeak and not deepseek_peak_now():
         return offpeak['price_in'], offpeak['price_out']
@@ -950,7 +957,7 @@ def track_cost(in_tok, out_tok, model_config, cache_write=0, cache_read=0):
     stats = st.session_state.stats
     stats['input'] += in_tok + cache_write + cache_read
     stats['output'] += out_tok
-    price_in, price_out = current_prices(model_config)
+    price_in, price_out = current_prices(model_config, in_tok + cache_write + cache_read)
     read_mult = model_config.get('cache_read_mult', CACHE_READ_MULTIPLIER)
     billable_in = in_tok + cache_write * CACHE_WRITE_MULTIPLIER + cache_read * read_mult
     c_in = (billable_in / 1_000_000) * price_in
@@ -1543,7 +1550,12 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
         max_tokens = model_cap if m_cfg.get('full_budget') else min(max_tokens, model_cap)
 
     sys_prompt_path = os.path.join('prompts', f"system_{m_cfg.get('prompt', vendor)}.txt")
-    base_sys_prompt = load_file_content(sys_prompt_path) or "You are a creative writer."
+    base_sys_prompt = load_file_content(sys_prompt_path) or ""
+    if not base_sys_prompt.strip() and m_cfg.get('prompt'):
+        # A model-specific file that is missing or still empty falls back to the vendor's shared one,
+        # so a model can be split off its vendor's prompt without going promptless in the meantime.
+        base_sys_prompt = load_file_content(os.path.join('prompts', f'system_{vendor}.txt')) or ""
+    base_sys_prompt = base_sys_prompt.strip() and base_sys_prompt or "You are a creative writer."
 
     editor_prompt = editor_system or EDITOR_SYSTEM_BASE
 

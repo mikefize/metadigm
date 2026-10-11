@@ -174,4 +174,52 @@ who they begin to trust or protect, what they no longer bother to ask.
 Change should be visible in action and in how others treat them,
 not in a private routine that erodes.
 
+Describe things by what they are, not by what they are not.
+Avoid the contrastive frame where a claim is built on a rejected alternative
+the reader never proposed: "X is more than a Y, it's Z," "not just X but Y,"
+"rather than simply," "it's not about X, it's about Y," "instead, it...".
+Use contrast only when the reader holds the opposing view or the distinction
+carries real information.
+
+Prefer descriptive words to evaluative ones.
+Replace adjectives that rate a thing with details that describe it. Instead
+of "a dependable tool," say what it does reliably and under what conditions.
+Use words like dependable, thoughtful, steady, meaningful, robust, seamless,
+powerful, and valuable sparingly, and only when followed by evidence.
+
+Use superlatives only when they are literally true and sourced.
+Avoid "the most popular," "the most powerful," "perhaps the most," "one of
+the best," and "one of the most" unless you can name the ranking or
+measurement behind the claim. "Perhaps the most" is never acceptable; either
+commit to the claim or drop it.
+
+Let structure do the work of transitions.
+Do not bridge sections with stock signposts such as "looking ahead,"
+"what comes next," "adds another layer," "in practice," "beyond that,"
+"that said," or "at the end of the day." Start the next paragraph with its
+point. If a transition is needed, make it specific to the content.
+
+State benefits concretely or not at all.
+Avoid generic reader-benefit phrasing: "can help you," "makes it easier,"
+"is especially helpful," "helps you avoid," "empowers you to." Say what
+changes for the reader in concrete terms (time saved, error prevented, step
+removed), or omit the benefit claim if it is obvious.
+
+Write plainly instead of ornamentally.
+Do not substitute metaphor, personification, or flourish for a direct
+statement. A metaphor is acceptable only when it explains something faster
+than the literal version would. Avoid intensifiers such as "genuinely,"
+"truly," "remarkably," "enormously," and "incredibly."
+
+Calibrate hedging to actual uncertainty.
+Hedge once, at the point of uncertainty, and say what the uncertainty is.
+Do not stack qualifiers ("may potentially," "not necessarily always") or
+hedge claims you are confident in.
+
+Vary rhythm and punctuation naturally.
+Mix short and long sentences. Use em dashes, semicolons, colons, and
+parentheses where a careful human writer would; do not avoid any of them
+entirely, and do not overuse any of them. Avoid the triplet habit of always
+listing three items or three adjectives.
+
 AND that's it, all the writing tips! Use them, love them!

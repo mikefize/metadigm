@@ -1088,7 +1088,7 @@ Bad Style (Do NOT write like this): "A cold shiver ran down his spine, a testame
 Good Style (Write like this): "He felt cold. The room was dark and silent."
 
 Bad Style (Do NOT write like this): "She was a beacon of hope, her presence underscoring the pivotal moment in his life."
-Good Style (Write like this): "She was there. He noticed her, and it mattered."
+Good Style (Write like this): "She was there. He noticed her and stopped talking."
 
 Bad Style (Do NOT write like this): "She recited the rules of the company."
 Good Style (Write like this): "She repeated the rules. She didn't care if he remembered them."
@@ -1226,6 +1226,33 @@ Remove lines that sound like writing but don't hold up as meaning. Go through th
 When unsure, choose the plainer version. A slightly flat sentence is better than a hollow clever one. Do not add new figurative language or new jokes while editing."""
 
 
+# Machine-prose tells, adapted from a non-fiction detection list to fiction: categories that only
+# make sense in essays or marketing copy (reader-benefit language, cited rankings) are dropped,
+# dialogue is NOT exempt the way "quoted material" is in non-fiction, and categories that overlap
+# the rules or slop checks say so instead of restating them. Severity steers what the diagnose
+# pass keeps when it has more problems than its cap allows.
+TELL_PATTERNS = """# TELL PATTERNS
+## How to judge
+- Judge by density, not presence. A tell is overuse relative to normal human writing. One instance is usually not worth flagging; flag a single instance only when the pattern is marked HIGH, or when it sits in a prominent position (chapter title, first or last sentence of a chapter or scene).
+- Flag the function, not just the string. Catch paraphrases of each pattern ("and that was what mattered" is the same move as "it mattered").
+- Dialogue is not exempt - judge it with the out-loud test - but one pattern a character plainly uses as their own way of talking is allowed. Exempt proper nouns, and text the story quotes as an object (a sign, a letter, a label).
+- Do not flag a pattern that is the clearest available way to say the thing. When in doubt, mark it LOW.
+- A rewrite must not introduce any other pattern from this list, the slop checks or the writing rules.
+
+## Categories
+1. IMPORTANCE_FLAG (HIGH) - narration telling the reader something matters instead of showing why: "it mattered", "that was what mattered", "and that was important", "more than anything", "crucially".
+2. CONTRASTIVE_FRAME (HIGH) - defining something against an alternative nobody proposed: "not just X but Y", "it wasn't X, it was Y", "more than a Y", "not only about", "rather than simply". Same family as the negative-parallelism rule.
+3. EVALUATIVE_ADJECTIVE (MEDIUM) - adjectives that rate instead of describe, with no concrete detail behind them: steady, thoughtful, meaningful, dependable, powerful, perfect, beautiful, incredible. Flag when 3+ fall within roughly 500 words, or when one carries the whole sentence.
+4. HOLLOW_SUPERLATIVE (HIGH) - "the most X she had ever felt", "perhaps the most", "one of the most", "like nothing before", "unparalleled". "Perhaps the most" is always flagged.
+5. STOCK_TRANSITION (MEDIUM) - generic signposts in narration between beats or scenes: "that said", "beyond that", "in the end", "at the end of the day", "when it came to", "and yet".
+6. MANNERED_PROSE (MEDIUM) - metaphor, personification or flourish standing in for a direct statement. Test: would the literal version be shorter and just as clear? If yes, flag. Works together with slop check 1 (literal test): that one catches figures that make no sense, this one catches figures that make sense but add nothing.
+7. INTENSIFIER (LOW; MEDIUM at 2+ within roughly 300 words) - genuinely, truly, remarkably, incredibly, utterly, completely, "so much".
+8. HEDGE_STACK (MEDIUM) - narration qualifying the same perception twice or more: "almost as if", "seemed to somehow", "something like", "a kind of", "she thought perhaps". One hedge is fine; stacked hedges are not.
+9. LEGACY_TELL (HIGH) - the classic markers, beyond the banned-words list: delve, tapestry, testament to, landscape (figurative), ever-evolving, a dance of, symphony of, "in a world where".
+10. FORMULAIC_CLOSE (MEDIUM; HIGH as the last paragraph of a chapter) - an ending that sums up, states what it meant, draws the lesson, asks a rhetorical question, or foreshadows: "Nothing would ever be the same", "She didn't know it yet, but", "It was only the beginning", "Ultimately". End on an action or an open moment instead. Same family as the zero-moralizing rule.
+11. RHYTHM_UNIFORMITY (LOW, judged over the whole text) - most sentences falling in one narrow length band, paragraphs all the same size, or lists that keep landing on three items. Fix by varying length and breaking a triplet, not by adding punctuation for its own sake."""
+
+
 def build_editor_system(cfg):
     """System prompt for the rewrite pass.
 
@@ -1239,12 +1266,14 @@ def build_editor_system(cfg):
         "reason to keep the input's sentences - rewrite freely and land on the same length.\n\n"
         f"{EDITOR_RULES_BLOCK}\n\n"
         f"{SLOP_CHECKS}\n\n"
+        f"{TELL_PATTERNS}\n\n"
         f"{VENDOR_STANDARDS_NOTE}"
     )
 
 
 def build_diagnostic_system():
-    return f"{DIAGNOSTIC_SYSTEM}\n\n{EDITOR_RULES_BLOCK}\n\n{SLOP_CHECKS}\n\n{VENDOR_STANDARDS_NOTE}"
+    return (f"{DIAGNOSTIC_SYSTEM}\n\n{EDITOR_RULES_BLOCK}\n\n{SLOP_CHECKS}\n\n{TELL_PATTERNS}\n\n"
+            f"{VENDOR_STANDARDS_NOTE}")
 
 
 def extract_edited(text):
@@ -1282,12 +1311,15 @@ Find every line that breaks the writing rules below, plus every sentence that re
 generic verbs, cliche sensory beats, emotions named instead of shown, throat-clearing before a paragraph gets
 to its point, filler action between lines of dialogue, dialogue that states its own subtext, and paragraph
 rhythm that never varies. Every line that fails one of the SLOP CHECKS in your instructions is a problem
-too: run every one of those checks over the whole {label}.
+too: run every one of those checks over the whole {label}. Then scan for the TELL PATTERNS, judged by
+density as their instructions say.
 
 {count_rule} from the whole {label} - the last third matters as much as
-the opening. Quote exactly; never paraphrase the text you are quoting. When a problem fails a slop check,
-start its fix with the check's name in brackets, e.g. <fix>[Reaction tag] Delete "she said, grinning".</fix>
-If the fix is to cut the line, say so - a cut is a valid fix.
+the opening. Quote exactly; never paraphrase the text you are quoting. When a problem fails a slop check
+or matches a tell pattern, start its fix with that name in brackets, plus the severity for a tell pattern,
+e.g. <fix>[Reaction tag] Delete "she said, grinning".</fix> or <fix>[IMPORTANCE_FLAG · HIGH] Cut "and it
+mattered" - the scene already shows it.</fix> If you find more problems than you may list, keep slop-check
+failures and HIGH tells first and drop LOW ones. If the fix is to cut the line, say so - a cut is a valid fix.
 
 OUTPUT FORMAT - nothing but this list, one entry per problem, no preamble and no closing remarks:
 <issue><quote>the offending sentence or fragment, copied verbatim</quote><fix>the concrete change to make</fix></issue>
@@ -1398,6 +1430,7 @@ def build_targeted_system():
         "sentence nobody flagged is a sentence you keep.\n\n"
         f"{EDITOR_RULES_BLOCK}\n\n"
         f"{SLOP_CHECKS}\n\n"
+        f"{TELL_PATTERNS}\n\n"
         f"{VENDOR_STANDARDS_NOTE}"
     )
 

@@ -1,0 +1,60 @@
+# Words and phrases the editor's automatic pre-scan flags in every chapter, before the model reads it.
+# Every hit becomes an issue for the rewrite, whether or not the model would have noticed it.
+#
+# One entry per line. Matching ignores case and only matches whole words.
+#   delve*                     a trailing * also matches word endings (delves, delving)
+#   perhaps the most           phrases work as written
+#   re:the way (she|he) always a line starting with "re:" is a regular expression
+#   tapestry | LEGACY_TELL     optional label after " | " - shown in Editor Notes (default: LEXICON)
+# Lines starting with # are ignored.
+
+# --- Banned words from the editor rules ("harness" left out: in this genre it is usually literal) ---
+catalogu* | LEXICON
+catalogi* | LEXICON
+delve* | LEGACY_TELL
+tapestry | LEGACY_TELL
+testament | LEGACY_TELL
+beacon | LEXICON
+pivotal | LEXICON
+underscor* | LEXICON
+symbiosis | LEXICON
+landscape | LEXICON
+ever-evolving | LEGACY_TELL
+a dance of | LEGACY_TELL
+symphony of | LEGACY_TELL
+in a world where | LEGACY_TELL
+
+# --- Clichés named in the editor rules ---
+ozone | LEXICON
+lazy circle* | LEXICON
+blown wide | LEXICON
+forehead against | LEXICON
+re:\bthere (she|he|they) (is|are)\b | LEXICON
+think of it as | LEXICON
+much like a | LEXICON
+you're insufferable | LEXICON
+
+# --- Tell patterns that are fixed phrases ---
+perhaps the most | HOLLOW_SUPERLATIVE
+one of the most | HOLLOW_SUPERLATIVE
+unparalleled | HOLLOW_SUPERLATIVE
+more than anything | IMPORTANCE_FLAG
+crucially | IMPORTANCE_FLAG
+importantly | IMPORTANCE_FLAG
+nothing would ever be the same | FORMULAIC_CLOSE
+it was only the beginning | FORMULAIC_CLOSE
+re:\blittle did (she|he|they|I) know\b | FORMULAIC_CLOSE
+re:\b(she|he|they|I) didn't know it yet\b | FORMULAIC_CLOSE
+re:\bdespite (herself|himself|themselves|myself)\b | REACTION_TAG
+
+# --- From the writer system prompt ---
+devastating | LEXICON
+sandalwood | LEXICON
+re:\b(taste[ds]?|tasting) (of|like) copper\b | LEXICON
+coppery | LEXICON
+fluorescent | LEXICON
+flourescent | LEXICON
+re:\b(humming|flickering|buzzing) (lights?|bulbs?|tubes?)\b | LEXICON
+re:\blights? (hummed|flickered|buzzed)\b | LEXICON
+gasp* | LEXICON
+re:\bthe way (she|he|it|they|I) always (does|did|do)\b | LEXICON

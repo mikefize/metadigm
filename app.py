@@ -1253,6 +1253,113 @@ TELL_PATTERNS = """# TELL PATTERNS
 11. RHYTHM_UNIFORMITY (LOW, judged over the whole text) - most sentences falling in one narrow length band, paragraphs all the same size, or lists that keep landing on three items. Fix by varying length and breaking a triplet, not by adding punctuation for its own sake."""
 
 
+# --- PRE-SCAN ---
+# A large share of tells are plain strings or simple shapes. Code finds every one of those, which a
+# model reading for forty rules at once does not, so they are flagged before the model diagnoses
+# anything and it can spend its list on what a pattern cannot catch. The word list lives in
+# config/editor_lexicon.txt so it can grow without touching code; only the structural patterns
+# below are hard-wired.
+LEXICON_FILE = "editor_lexicon.txt"
+_SCAN_STRUCTURAL = [
+    # "It wasn't anger - it was hunger": same subject on both sides, so "It wasn't locked, she was
+    # sure" does not count.
+    (re.compile(r"\b(?P<s>it|this|that|he|she|they|I)\s+(?:wasn['’]t|was not|isn['’]t|is not|weren['’]t)\s+"
+                r"(?:just\s+|only\s+|merely\s+)?[^.!?\n]{1,60}?[,;:—–-]+\s*(?P=s)\s+(?:was|is|were)\b", re.I),
+     "CONTRASTIVE_FRAME", "HIGH"),
+    (re.compile(r"\bnot (?:just|only|merely|simply) [^.!?\n]{1,60}?,?\s+but\b", re.I), "CONTRASTIVE_FRAME", "HIGH"),
+    (re.compile(r"\b(?:that|it|this) (?:was what |was all that )?mattered\b", re.I), "IMPORTANCE_FLAG", "HIGH"),
+    (re.compile(r"\bthe (?:most|best|worst) \w+(?: \w+)? (?:she|he|they|I) (?:had|['’]d) ever\b", re.I),
+     "HOLLOW_SUPERLATIVE", "HIGH"),
+]
+# Flagged only where two or more share a paragraph - one intensifier is ordinary prose.
+_INTENSIFIER_RE = re.compile(r"\b(?:genuinely|truly|remarkably|incredibly|utterly|completely|absolutely|"
+                             r"enormously|deeply)\b", re.I)
+_lexicon_cache = {"mtime": None, "patterns": []}
+
+
+def lexicon_patterns():
+    """[(compiled regex, label, severity)] from config/editor_lexicon.txt, reloaded when the file changes."""
+    path = os.path.join(CONFIG_DIR, LEXICON_FILE)
+    mtime = os.path.getmtime(path) if os.path.exists(path) else None
+    if mtime == _lexicon_cache["mtime"]:
+        return _lexicon_cache["patterns"]
+    patterns = []
+    for line in (load_list(LEXICON_FILE) if mtime else []):
+        entry, _, label = line.partition(" | ")
+        entry, label = entry.strip(), (label.strip() or "LEXICON").upper()
+        if not entry:
+            continue
+        if entry.startswith("re:"):
+            source = entry[3:]
+        else:
+            stem = entry[:-1] if entry.endswith("*") else entry
+            # Straight and curly apostrophes alike, so "you're" also matches "you’re".
+            source = (r"(?<!\w)" + re.escape(stem).replace("'", "['’]")
+                      + (r"\w*" if entry.endswith("*") else "") + r"(?!\w)")
+        try:
+            patterns.append((re.compile(source, re.I), label, "HIGH"))
+        except re.error:
+            continue   # a broken line in the file must not take the editor down
+    _lexicon_cache.update(mtime=mtime, patterns=patterns)
+    return patterns
+
+
+def _sentence_around(paragraph, start, end):
+    """The sentence holding a match, as an exact substring of the paragraph - so the targeted
+    rewrite can locate it - trimmed to a window around the match when the sentence runs long."""
+    left = 0
+    for m in re.finditer(r'[.!?…]["”’)]*\s+', paragraph[:start]):
+        left = m.end()
+    m = re.search(r'[.!?…]["”’)]*(?=\s|$)', paragraph[end:])
+    right = end + m.end() if m else len(paragraph)
+    if right - left > 300:
+        left, right = max(left, start - 120), min(right, end + 120)
+    return paragraph[left:right].strip()
+
+
+def scan_tells(text):
+    """Deterministic pre-scan. Returns [(quote, fix)] in the same shape as the diagnose pass."""
+    hits = {}
+    for paragraph in re.split(r'\n\s*\n', text or ""):
+        if not paragraph.strip() or paragraph.lstrip().startswith('#'):
+            continue
+        found = []
+        for rx, label, severity in lexicon_patterns() + _SCAN_STRUCTURAL:
+            found += [(m.start(), m.end(), label, severity, m.group(0)) for m in rx.finditer(paragraph)]
+        intensifiers = list(_INTENSIFIER_RE.finditer(paragraph))
+        if len(intensifiers) >= 2:
+            found += [(m.start(), m.end(), "INTENSIFIER", "MEDIUM", m.group(0)) for m in intensifiers]
+        for start, end, label, severity, term in found:
+            entries = hits.setdefault(_sentence_around(paragraph, start, end), [])
+            if (label, term.lower()) not in [(l, t.lower()) for l, _, t in entries]:
+                entries.append((label, severity, term))
+    issues = []
+    for quote, entries in hits.items():
+        tags = "; ".join(f'[{label} · {severity}] "{term}"' for label, severity, term in entries)
+        issues.append((quote, f"{tags} - found by the automatic scan. Rewrite the sentence without it, "
+                              "or cut it, following the rules."))
+    return issues
+
+
+def merge_issues(*issue_lists):
+    """Combine issue lists, folding entries that quote the same text into one with both fixes."""
+    merged = {}
+    for issues in issue_lists:
+        for quote, fix in issues:
+            key = " ".join(quote.split()).lower()
+            if key in merged:
+                if fix not in merged[key][1]:
+                    merged[key] = (merged[key][0], merged[key][1] + " | " + fix)
+            else:
+                merged[key] = (quote, fix)
+    return list(merged.values())
+
+
+def format_issues(issues):
+    """Issues back into the <issue> list format the rewrite prompt quotes from."""
+    return "\n".join(f"<issue><quote>{q}</quote><fix>{f}</fix></issue>" for q, f in issues)
+
+
 def build_editor_system(cfg):
     """System prompt for the rewrite pass.
 
@@ -1271,9 +1378,22 @@ def build_editor_system(cfg):
     )
 
 
-def build_diagnostic_system():
-    return (f"{DIAGNOSTIC_SYSTEM}\n\n{EDITOR_RULES_BLOCK}\n\n{SLOP_CHECKS}\n\n{TELL_PATTERNS}\n\n"
-            f"{VENDOR_STANDARDS_NOTE}")
+# The diagnose read is split into focused passes. One pass checking ~40 rules at once finds the
+# obvious few and skims the rest; each pass here carries only its own list. Only the rules pass
+# gets the writer's house standards appended (third field), since those are rules of the same kind.
+DIAGNOSE_PASSES = [
+    ("rules", "writing rules", True),
+    ("slop", "slop checks", False),
+    ("tells", "tell patterns", False),
+]
+
+
+def build_diagnostic_system(focus="rules"):
+    if focus == "slop":
+        return f"{DIAGNOSTIC_SYSTEM}\n\n{SLOP_CHECKS}"
+    if focus == "tells":
+        return f"{DIAGNOSTIC_SYSTEM}\n\n{TELL_PATTERNS}"
+    return f"{DIAGNOSTIC_SYSTEM}\n\n{EDITOR_RULES_BLOCK}\n\n{VENDOR_STANDARDS_NOTE}"
 
 
 def extract_edited(text):
@@ -1293,7 +1413,22 @@ def parse_issues(diagnosis_text):
     return [(q.strip(), f.strip()) for q, f in _ISSUE_RE.findall(diagnosis_text or "")]
 
 
-def build_diagnose_prompt(cfg, block_text, label, targeted=False):
+_DIAGNOSE_FOCUS = {
+    "rules": """Find every line that breaks the writing rules or the house standards in your instructions, plus every
+sentence that reads as AI-generated prose: generic verbs, cliche sensory beats, emotions named instead of
+shown, throat-clearing before a paragraph gets to its point, filler action between lines of dialogue,
+dialogue that states its own subtext, and paragraph rhythm that never varies.""",
+    "slop": """Run every one of the SLOP CHECKS in your instructions over the whole {label}, line by line, check by check.
+Look for nothing else - other problems are covered by separate passes. Start each fix with the check's
+name in brackets, e.g. <fix>[Reaction tag] Delete "she said, grinning".</fix>""",
+    "tells": """Scan the whole {label} for the TELL PATTERNS in your instructions, judged by density as they say. Look
+for nothing else - other problems are covered by separate passes. Start each fix with the category and
+severity in brackets, e.g. <fix>[IMPORTANCE_FLAG · HIGH] Cut "and it mattered" - the scene already shows
+it.</fix> If you find more than you may list, keep HIGH ones and drop LOW ones first.""",
+}
+
+
+def build_diagnose_prompt(cfg, block_text, label, targeted=False, focus="rules", prescanned=()):
     words = len(block_text.split())
     sentences = max(1, words // 15)
     min_issues = max(5, min(30, round(sentences * cfg['quota'] / 200)))
@@ -1305,26 +1440,25 @@ def build_diagnose_prompt(cfg, block_text, label, targeted=False):
                       "as written. Take them")
     else:
         count_rule = f"Find at least {min_issues} problems, and take them"
+
+    prescanned_block = ""
+    if prescanned:
+        shown = [" ".join(q.split())[:150] for q, _ in prescanned[:40]]
+        prescanned_block = (
+            "\nALREADY FLAGGED by an automatic word scan - these get fixed anyway, so do not list them again. "
+            "Spend your list on what a word scan cannot catch:\n" + "\n".join(f"- {q}" for q in shown) + "\n"
+        )
+
     return f"""TASK: Diagnostic read of one {label}. Do NOT rewrite anything in this pass.
 
-Find every line that breaks the writing rules below, plus every sentence that reads as AI-generated prose:
-generic verbs, cliche sensory beats, emotions named instead of shown, throat-clearing before a paragraph gets
-to its point, filler action between lines of dialogue, dialogue that states its own subtext, and paragraph
-rhythm that never varies. Every line that fails one of the SLOP CHECKS in your instructions is a problem
-too: run every one of those checks over the whole {label}. Then scan for the TELL PATTERNS, judged by
-density as their instructions say.
-
+{_DIAGNOSE_FOCUS.get(focus, _DIAGNOSE_FOCUS["rules"]).format(label=label)}
+{prescanned_block}
 {count_rule} from the whole {label} - the last third matters as much as
-the opening. Quote exactly; never paraphrase the text you are quoting. When a problem fails a slop check
-or matches a tell pattern, start its fix with that name in brackets, plus the severity for a tell pattern,
-e.g. <fix>[Reaction tag] Delete "she said, grinning".</fix> or <fix>[IMPORTANCE_FLAG · HIGH] Cut "and it
-mattered" - the scene already shows it.</fix> If you find more problems than you may list, keep slop-check
-failures and HIGH tells first and drop LOW ones. If the fix is to cut the line, say so - a cut is a valid fix.
+the opening. Quote exactly; never paraphrase the text you are quoting. If the fix is to cut the line,
+say so - a cut is a valid fix.
 
 OUTPUT FORMAT - nothing but this list, one entry per problem, no preamble and no closing remarks:
 <issue><quote>the offending sentence or fragment, copied verbatim</quote><fix>the concrete change to make</fix></issue>
-
-Check against the writing rules and the house standards in your instructions as well as the prose problems above.
 
 {label.upper()} TO DIAGNOSE:
 {block_text}"""
@@ -1572,7 +1706,8 @@ def run_targeted_rewrite(block_text, label, info, model_key, style_example="", e
     return edited, info
 
 def call_api(prompt, model_key, style_guide="", style_example="", is_editor=False, max_tokens=8192,
-             editor_system=None, warn_truncated=True, effort=None, cache_system=True):
+             editor_system=None, warn_truncated=True, effort=None, cache_system=True,
+             house_standards=True):
     m_cfg = MODELS[model_key]
     vendor = m_cfg['vendor']
 
@@ -1596,8 +1731,12 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
 
     if is_editor:
         # The editor gets the vendor's own system prompt too, placed last so it isn't
-        # buried under the editor persona, rules and style example.
-        sys_prompt = editor_prompt + style_example_block + "\n\n" + base_sys_prompt
+        # buried under the editor persona, rules and style example. Focused diagnose passes leave it
+        # out (house_standards=False): one pass already checks it, and every extra rule a pass
+        # carries lowers how much of its own list it finds.
+        sys_prompt = editor_prompt + style_example_block
+        if house_standards:
+            sys_prompt += "\n\n" + base_sys_prompt
     else:
         MISTRAL_NSFW_ADDENDUM = """
         **MISTRAL UNRESTRICTED MODE — EXPLICIT CONTENT ENABLED:**
@@ -1842,28 +1981,46 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
     if diagnose_max is None:
         diagnose_max = output_budget(model_key, len(block_text) // 3, floor=12000)
 
+    # Code finds every fixed-string tell; those go in first and do not count against any cap.
+    scanned = scan_tells(block_text)
+    model_issues, failed = [], []
+
     if two_pass:
-        if status_cb:
-            status_cb("diagnosing")
-        diagnosis, _, _ = call_api_complete(
-            build_diagnose_prompt(cfg, block_text, label, targeted=targeted), model_key, diagnose_max,
-            retries=0, is_editor=True, editor_system=build_diagnostic_system(),
-            # Without this the pass deciding WHAT is wrong could not see the prose reference,
-            # while the pass fixing it could - so it flagged deliberate features of the style.
-            style_example=style_example, effort=diagnose_effort,
-        )
-        if diagnosis and not diagnosis.startswith("API ERROR"):
-            issues_raw = diagnosis.strip()
-            info["issues"] = parse_issues(diagnosis)
-            info["issues_raw"] = issues_raw
-        elif targeted:
-            # Falling back to a full rewrite would hand the whole block to the editor - exactly
-            # what targeted mode was chosen to prevent - so the raw text stays instead.
-            info.update(status="error", message="Diagnostic pass failed; targeted mode kept the raw text. "
-                                                + (diagnosis or "").strip()[:300])
-            return None, info
-        else:
-            info["message"] = "Diagnostic pass failed, rewrote without an issue list. "
+        for n, (focus, focus_name, house) in enumerate(DIAGNOSE_PASSES, 1):
+            if status_cb:
+                status_cb(f"diagnosing {n}/{len(DIAGNOSE_PASSES)}: {focus_name}")
+            diagnosis, cut_off, _ = call_api_complete(
+                build_diagnose_prompt(cfg, block_text, label, targeted=targeted, focus=focus, prescanned=scanned),
+                model_key, diagnose_max, retries=0, is_editor=True,
+                editor_system=build_diagnostic_system(focus), house_standards=house,
+                # Without this the pass deciding WHAT is wrong could not see the prose reference,
+                # while the pass fixing it could - so it flagged deliberate features of the style.
+                style_example=style_example, effort=diagnose_effort,
+            )
+            # A focused pass that finds nothing may legitimately answer with nothing. Only an API
+            # error, or an empty answer because thinking ran out the budget, counts as a failure.
+            if (diagnosis or "").startswith("API ERROR") or (not (diagnosis or "").strip() and cut_off):
+                failed.append(focus_name)
+            else:
+                model_issues += parse_issues(diagnosis)
+
+        if len(failed) == len(DIAGNOSE_PASSES) and not scanned:
+            if targeted:
+                # Falling back to a full rewrite would hand the whole block to the editor - exactly
+                # what targeted mode was chosen to prevent - so the raw text stays instead.
+                info.update(status="error", message="Every diagnostic pass failed; targeted mode kept the raw "
+                                                    "text. " + (diagnosis or "").strip()[:300])
+                return None, info
+            info["message"] = "Every diagnostic pass failed, rewrote without an issue list. "
+        elif failed:
+            info["message"] = f"Diagnostic pass failed: {', '.join(failed)}; the other passes were used. "
+
+    issues = merge_issues(scanned, model_issues)
+    if issues:
+        issues_raw = format_issues(issues)
+        info.update(issues=issues, issues_raw=issues_raw)
+    if scanned:
+        info["message"] += f"Word scan flagged {len(scanned)} sentence(s). "
 
     if targeted:
         return run_targeted_rewrite(block_text, label, info, model_key, style_example=style_example,

@@ -37,7 +37,7 @@ MODELS = {
     # Haiku 5.5 bills a request whose prompt exceeds 100k tokens at a 5x higher rate ("long_context").
     "Claude 5.5 Haiku": {"name": "Claude 5.5 Haiku", "id": "claude-haiku-5-5", "vendor": "anthropic", "prompt": "claude_haiku", "price_in": 0.10, "price_out": 0.50, "long_context": {"threshold": 100000, "price_in": 0.50, "price_out": 2.50}, "max_out": 128000},
     "Gemini 3.1 Pro": {"name": "Gemini 3 Pro", "id": "gemini-3.1-pro-preview", "vendor": "google", "price_in": 2.00, "price_out": 12.00, "max_out": 65536},
-    "Gemini 3 Flash": {"name": "Gemini 3 Flash", "id": "gemini-3-flash-preview", "vendor": "google", "price_in": 0.50, "price_out": 3.00, "max_out": 65536},
+    "Gemini 3.1 Flash Lite": {"name": "Gemini 3.1 Flash Lite", "id": "gemini-3.1-flash-lite", "vendor": "google", "price_in": 0.25, "price_out": 1,50, "max_out": 65536},
     "Gemini 3.1 Flash": {"name": "Gemini 3.1 Flash", "id": "gemini-3.1-flash-lite-preview", "vendor": "google", "price_in": 0.25, "price_out": 1.50, "max_out": 65536},
     "Mistral Large": {"id": "mistral-large-latest", "vendor": "mistral", "price_in": 0.50, "price_out": 1.50},
     "Kimi K2.6": {"name": "Kimi K2.6", "id": "kimi-k2.6", "vendor": "kimi", "price_in": 0.95, "price_out": 4.00, "max_out": 200000},

@@ -99,6 +99,26 @@ Dialogue:
   "she said, delighted", "he grinned", "she laughed despite herself".
   Use plain "said" or no tag. Include a reaction only when it is
   surprising or changes the scene.
+  - Do not have characters name each other's habits.
+  Avoid dialogue where one character labels another's tic or recurring
+  behavior with shorthand like "the hand thing," "you're doing the face,"
+  "the voice again," or "your tell." This device signals shared history
+  cheaply and has become a recognizable pattern in generated fiction.
+  Convey familiarity through what the characters do instead: a character
+  can silently reach over and still the other's hand, change the subject,
+  or simply notice and say nothing. If a habit truly needs naming, give it
+  a name that only these two people would use, rooted in a specific shared
+  event.
+  - Use stock nervous gestures sparingly.
+  Avoid the familiar inventory of anxiety beats: wiping palms on jeans,
+  a jaw tightening or working, a breath they didn't know they were holding,
+  fingers drumming, a thumb tracing a scar, swallowing hard. One physical
+  beat per scene is usually enough. Prefer a gesture particular to this
+  character and this situation over a generic one, and prefer letting
+  dialogue or action reveal nerves over describing the body.
+  - Leave subtext as subtext.
+  When a gesture or line already implies an emotion, do not have another
+  character or the narrator explain it. Trust the reader.
 
 Details:
 - At most one distinctive, quirky object per scene, and only if it

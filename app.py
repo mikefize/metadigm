@@ -1250,8 +1250,9 @@ TELL_PATTERNS = """# TELL PATTERNS
 8. HEDGE_STACK (MEDIUM) - narration qualifying the same perception twice or more: "almost as if", "seemed to somehow", "something like", "a kind of", "she thought perhaps". One hedge is fine; stacked hedges are not.
 9. LEGACY_TELL (HIGH) - the classic markers, beyond the banned-words list: delve, tapestry, testament to, landscape (figurative), ever-evolving, a dance of, symphony of, "in a world where".
 10. FORMULAIC_CLOSE (MEDIUM; HIGH as the last paragraph of a chapter) - an ending that sums up, states what it meant, draws the lesson, asks a rhetorical question, or foreshadows: "Nothing would ever be the same", "She didn't know it yet, but", "It was only the beginning", "Ultimately". End on an action or an open moment instead. Same family as the zero-moralizing rule.
-11. RHYTHM_UNIFORMITY (LOW, judged over the whole text) - most sentences falling in one narrow length band, paragraphs all the same size, or lists that keep landing on three items. Fix by varying length and breaking a triplet, not by adding punctuation for its own sake."""
-
+11. RHYTHM_UNIFORMITY (LOW, judged over the whole text) - most sentences falling in one narrow length band, paragraphs all the same size, or lists that keep landing on three items. Fix by varying length and breaking a triplet, not by adding punctuation for its own sake.
+13. HABIT_LABEL (HIGH, fiction only) A character naming another character's tic or recurring behavior with generic shorthand. Signals: "the [noun] thing," "you're doing the [noun]," "the [noun] again," "your tell," "that thing you do." Always flag. Suggested rewrite: remove the label and let the other character respond through action, or cut the exchange.
+14. STOCK_BODY_BEAT (MEDIUM, HIGH if 3+ per scene) Generic physical signals of emotion. Signals: palms wiped on jeans or thighs, jaw tightening/working/clenching, breath held without knowing, swallowing hard, fingers drumming, knuckles whitening, a muscle ticking in the jaw, stomach dropping. Flag clusters, and flag any beat immediately followed by dialogue that explains it."""
 
 # --- PRE-SCAN ---
 # A large share of tells are plain strings or simple shapes. Code finds every one of those, which a

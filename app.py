@@ -1805,12 +1805,27 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
                 "HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_DANGEROUS_CONTENT"
             ]]
             resp = model.generate_content(prompt, generation_config={"temperature": 1.0, "max_output_tokens": max_tokens}, safety_settings=safe)
+            usage = getattr(resp, 'usage_metadata', None)
+            if usage:
+                # Thinking is billed as output but reported separately from the visible text;
+                # leaving it out made Gemini look several times cheaper than it is.
+                track_cost(usage.prompt_token_count,
+                           (usage.candidates_token_count or 0) + (getattr(usage, 'thoughts_token_count', 0) or 0),
+                           m_cfg)
+            # Blocks get the SAFETY_BLOCK marker so call_api_complete can retry them: a blocked
+            # answer is sampled again on the next try and often goes through.
             if hasattr(resp, 'prompt_feedback') and resp.prompt_feedback.block_reason:
-                return f"API ERROR: Blocked by Google Safety Filter ({resp.prompt_feedback.block_reason})."
+                return f"API ERROR: SAFETY_BLOCK - Google blocked the prompt ({resp.prompt_feedback.block_reason})."
+            try:
+                finish_name = getattr(resp.candidates[0].finish_reason, 'name', str(resp.candidates[0].finish_reason))
+            except Exception:
+                finish_name = ''
+            if finish_name in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"):
+                return f"API ERROR: SAFETY_BLOCK - Google stopped the answer ({finish_name})."
             try:
                 text = resp.text
             except ValueError:
-                return "API ERROR: Generation halted mid-stream."
+                return f"API ERROR: Gemini returned no text (finish reason: {finish_name or 'unknown'})."
             raw = getattr(resp, 'text', None)
             if raw is None:
                 try:
@@ -1819,7 +1834,6 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
                     raw = str(resp)
             st.session_state.last_raw_response = raw
             st.session_state.last_api_payload = json.dumps({"model": m_cfg['id'], "system_instruction": sys_prompt, "prompt": prompt, "generation_config": {"temperature": 1.0, "max_output_tokens": max_tokens}}, indent=2)
-            if resp.usage_metadata: track_cost(resp.usage_metadata.prompt_token_count, resp.usage_metadata.candidates_token_count, m_cfg)
             try:
                 finish = str(getattr(resp.candidates[0], 'finish_reason', '')).upper()
             except Exception:
@@ -1919,8 +1933,12 @@ def output_budget(model_key, expected_chars, floor=16000):
     return max(floor, min(model_output_cap(model_key), needed))
 
 
+SAFETY_RETRIES = 2   # extra attempts after a provider safety block, before giving up on the call
+
+
 def call_api_complete(prompt, model_key, max_tokens, retries=1, status_cb=None, **kwargs):
-    """call_api, retried with a doubled ceiling when the response is cut off by max_tokens.
+    """call_api, retried with a doubled ceiling when the response is cut off by max_tokens,
+    and retried as-is after a safety block (a blocked answer often goes through when sampled again).
 
     Returns (text, was_truncated, budget_used).
     """
@@ -1931,6 +1949,12 @@ def call_api_complete(prompt, model_key, max_tokens, retries=1, status_cb=None, 
     text, truncated = "", False
     for attempt in range(retries + 1):
         text = call_api(prompt, model_key, max_tokens=budget, warn_truncated=False, **kwargs)
+        for block_try in range(1, SAFETY_RETRIES + 1):
+            if not (text or "").startswith("API ERROR: SAFETY_BLOCK"):
+                break
+            if status_cb:
+                status_cb(f"blocked by the safety filter, retrying ({block_try}/{SAFETY_RETRIES})")
+            text = call_api(prompt, model_key, max_tokens=budget, warn_truncated=False, **kwargs)
         truncated = bool(st.session_state.get("last_truncated"))
         if not truncated or (text or "").startswith("API ERROR"):
             break
@@ -1992,6 +2016,8 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
             diagnosis, cut_off, _ = call_api_complete(
                 build_diagnose_prompt(cfg, block_text, label, targeted=targeted, focus=focus, prescanned=scanned),
                 model_key, diagnose_max, retries=0, is_editor=True,
+                status_cb=(lambda msg, _n=n, _f=focus_name: status_cb(
+                    f"diagnosing {_n}/{len(DIAGNOSE_PASSES)}: {_f} - {msg}")) if status_cb else None,
                 editor_system=build_diagnostic_system(focus), house_standards=house,
                 # Without this the pass deciding WHAT is wrong could not see the prose reference,
                 # while the pass fixing it could - so it flagged deliberate features of the style.

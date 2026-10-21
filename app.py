@@ -1252,7 +1252,17 @@ TELL_PATTERNS = """# TELL PATTERNS
 10. FORMULAIC_CLOSE (MEDIUM; HIGH as the last paragraph of a chapter) - an ending that sums up, states what it meant, draws the lesson, asks a rhetorical question, or foreshadows: "Nothing would ever be the same", "She didn't know it yet, but", "It was only the beginning", "Ultimately". End on an action or an open moment instead. Same family as the zero-moralizing rule.
 11. RHYTHM_UNIFORMITY (LOW, judged over the whole text) - most sentences falling in one narrow length band, paragraphs all the same size, or lists that keep landing on three items. Fix by varying length and breaking a triplet, not by adding punctuation for its own sake.
 13. HABIT_LABEL (HIGH, fiction only) A character naming another character's tic or recurring behavior with generic shorthand. Signals: "the [noun] thing," "you're doing the [noun]," "the [noun] again," "your tell," "that thing you do." Always flag. Suggested rewrite: remove the label and let the other character respond through action, or cut the exchange.
-14. STOCK_BODY_BEAT (MEDIUM, HIGH if 3+ per scene) Generic physical signals of emotion. Signals: palms wiped on jeans or thighs, jaw tightening/working/clenching, breath held without knowing, swallowing hard, fingers drumming, knuckles whitening, a muscle ticking in the jaw, stomach dropping. Flag clusters, and flag any beat immediately followed by dialogue that explains it."""
+14. STOCK_BODY_BEAT (MEDIUM, HIGH if 3+ per scene) Generic physical signals of emotion. Signals: palms wiped on jeans or thighs, jaw tightening/working/clenching, breath held without knowing, swallowing hard, fingers drumming, knuckles whitening, a muscle ticking in the jaw, stomach dropping. Flag clusters, and flag any beat immediately followed by dialogue that explains it.
+15. AMBIENT_VIGNETTE (HIGH, fiction only) A cutaway to bystanders or background activity unconnected to the POV character's state, the scene's tension, or the story's themes. Signals: unnamed strangers (a man, a girl, a couple, a waiter) doing small domestic or comic actions; overheard snippets; counting details ("for the third time"); placement immediately after a charged line of dialogue. Test: could the passage be moved to another scene in the same setting unchanged? If yes, flag. Suggested rewrite: cut, or replace with a detail the POV character would notice because of what they are feeling.
+16. ERRAND_EXIT (MEDIUM, fiction only) A character leaves on a minor task to create a pause. Signals: another customer orders, a phone rings, someone goes to fetch something, followed by the remaining character alone, then the first character's return with a neutral line.
+17. FILLER_ACTION (LOW, MEDIUM if 3+ consecutive) Flat sequential micro-actions with no characterizing function.
+18. ABSENT_AUDIENCE_TAG (MEDIUM, HIGH if 2+ per story) Dialogue tag addressing no one. Signals: "to nobody," "to no one in particular," "to no one," "to the empty room/house/kitchen/car," "to the air," "to herself" when the character is already shown alone. Suggested rewrite: remove the tag or replace with an action beat.
+19. UNNEEDED_MOTIVE (MEDIUM, HIGH for stock phrases) Clauses explaining why a character does something the action already conveys. Signals: "because it felt like," "because it was easier than," "as if that would help," "for something to do."
+20. STAKES_GLOSS (MEDIUM) A concrete detail followed by a clause translating its significance. Signals: "which was [comparison to income, rent, groceries, time]."
+21. CUMULATIVE_RUNON (MEDIUM, HIGH if 2+ per scene) Sentences of 40+ words chaining 3+ clauses with "and," "because," "which" to signal emotional overwhelm.
+22. COY_REFERENT (MEDIUM) Withholding the name of something the POV character knows ("the one she wanted," "the thing in the drawer") when nothing in the text justifies the withholding.
+23. DEFLATING_KICKER (LOW, MEDIUM if 2+ per page) Flat, understated closing clauses used to land a beat, often with a shift from precise to vague.
+24. STOCK_HOUR (LOW) "Two/three in the morning" as shorthand for distress or insomnia."""
 
 # --- PRE-SCAN ---
 # A large share of tells are plain strings or simple shapes. Code finds every one of those, which a
@@ -1271,7 +1281,16 @@ _SCAN_STRUCTURAL = [
     (re.compile(r"\b(?:that|it|this) (?:was what |was all that )?mattered\b", re.I), "IMPORTANCE_FLAG", "HIGH"),
     (re.compile(r"\bthe (?:most|best|worst) \w+(?: \w+)? (?:she|he|they|I) (?:had|['’]d) ever\b", re.I),
      "HOLLOW_SUPERLATIVE", "HIGH"),
+    # "to herself" is left to the model: it is only a tell when the character is already alone.
+    (re.compile(r"\bto (?:nobody|no one(?: in particular)?|the air|the empty (?:room|house|kitchen|car|apartment|flat))\b",
+                re.I), "ABSENT_AUDIENCE_TAG", "MEDIUM"),
+    (re.compile(r"\bbecause it (?:felt like|was easier than)\b|\bas if (?:that|it) would help\b|\bfor something to do\b",
+                re.I), "UNNEEDED_MOTIVE", "HIGH"),
+    (re.compile(r"\b(?:two|three|2|3)(?::\d\d)? in the morning\b", re.I), "STOCK_HOUR", "LOW"),
 ]
+# CUMULATIVE_RUNON: 40+ words chained by 3+ of these. HIGH once a scene has two.
+_RUNON_JOIN_RE = re.compile(r"\b(?:and|because|which)\b", re.I)
+_RUNON_SENTENCE_RE = re.compile(r'[^.!?…]+(?:[.!?…]+["”’)]*|$)')
 # Flagged only where two or more share a paragraph - one intensifier is ordinary prose.
 _INTENSIFIER_RE = re.compile(r"\b(?:genuinely|truly|remarkably|incredibly|utterly|completely|absolutely|"
                              r"enormously|deeply)\b", re.I)
@@ -1320,20 +1339,36 @@ def _sentence_around(paragraph, start, end):
 
 def scan_tells(text):
     """Deterministic pre-scan. Returns [(quote, fix)] in the same shape as the diagnose pass."""
+    found = []   # (paragraph, start, end, label, severity, term)
+    # Scene by scene, so CUMULATIVE_RUNON can count per scene. The break regex has a capture
+    # group, so split() also returns the break characters - those are skipped as blank or '#'.
+    for scene in _TTS_SCENE_BREAK_RE.split(text or ""):
+        runons = []
+        for paragraph in re.split(r'\n\s*\n', scene or ""):
+            if not paragraph.strip() or paragraph.lstrip().startswith('#'):
+                continue
+            for rx, label, severity in lexicon_patterns() + _SCAN_STRUCTURAL:
+                found += [(paragraph, m.start(), m.end(), label, severity, m.group(0))
+                          for m in rx.finditer(paragraph)]
+            intensifiers = list(_INTENSIFIER_RE.finditer(paragraph))
+            if len(intensifiers) >= 2:
+                found += [(paragraph, m.start(), m.end(), "INTENSIFIER", "MEDIUM", m.group(0))
+                          for m in intensifiers]
+            for m in _RUNON_SENTENCE_RE.finditer(paragraph):
+                words = len(m.group(0).split())
+                if words >= 40 and len(_RUNON_JOIN_RE.findall(m.group(0))) >= 3:
+                    runons.append((paragraph, m.start(), m.end(), f"{words} words"))
+        severity = "HIGH" if len(runons) >= 2 else "MEDIUM"
+        found += [(p, s, e, "CUMULATIVE_RUNON", severity, term) for p, s, e, term in runons]
+    # The rule is "HIGH if 2+ per story"; a chapter is the most this scan sees at once.
+    if sum(f[3] == "ABSENT_AUDIENCE_TAG" for f in found) >= 2:
+        found = [f[:4] + ("HIGH",) + f[5:] if f[3] == "ABSENT_AUDIENCE_TAG" else f for f in found]
+
     hits = {}
-    for paragraph in re.split(r'\n\s*\n', text or ""):
-        if not paragraph.strip() or paragraph.lstrip().startswith('#'):
-            continue
-        found = []
-        for rx, label, severity in lexicon_patterns() + _SCAN_STRUCTURAL:
-            found += [(m.start(), m.end(), label, severity, m.group(0)) for m in rx.finditer(paragraph)]
-        intensifiers = list(_INTENSIFIER_RE.finditer(paragraph))
-        if len(intensifiers) >= 2:
-            found += [(m.start(), m.end(), "INTENSIFIER", "MEDIUM", m.group(0)) for m in intensifiers]
-        for start, end, label, severity, term in found:
-            entries = hits.setdefault(_sentence_around(paragraph, start, end), [])
-            if (label, term.lower()) not in [(l, t.lower()) for l, _, t in entries]:
-                entries.append((label, severity, term))
+    for paragraph, start, end, label, severity, term in found:
+        entries = hits.setdefault(_sentence_around(paragraph, start, end), [])
+        if (label, term.lower()) not in [(l, t.lower()) for l, _, t in entries]:
+            entries.append((label, severity, term))
     issues = []
     for quote, entries in hits.items():
         tags = "; ".join(f'[{label} · {severity}] "{term}"' for label, severity, term in entries)

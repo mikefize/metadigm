@@ -222,4 +222,66 @@ parentheses where a careful human writer would; do not avoid any of them
 entirely, and do not overuse any of them. Avoid the triplet habit of always
 listing three items or three adjectives.
 
+Every background detail must pass through the point-of-view character.
+Do not cut away to bystanders or ambient activity (children, couples,
+crowds, staff, overheard conversations) unless the detail connects to the
+scene's tension, the character's state of mind, or the story's themes.
+The test: would this character, feeling what they feel right now, notice
+this? If the detail could be moved to any other scene in the same setting
+without loss, cut it. When a pause is needed during a charged moment,
+fill it with what the character perceives, avoids, or thinks about, not
+with neutral scenery.
+
+Do not use errands to move characters offstage.
+Avoid sending a character away on a small task (fetching drinks, taking a
+call, serving another customer) solely to create a pause or a moment
+alone. If a character needs to leave, the reason should matter to the
+scene, or the scene should be built so the other character's solitude
+emerges naturally.
+
+Avoid filler action sequences.
+Do not string together flat, sequential micro-actions ("He sipped the
+drink. It was cold, and he drank more of it.") as padding between beats.
+Each physical action should reveal something about the character or
+advance the moment.
+
+Do not tag solitary speech with an absent audience.
+When a character speaks while alone, do not write "said to nobody,"
+"said to no one in particular," "told the empty room," "said to the
+kitchen," or similar. The reader already knows the character is alone.
+Drop the tag, attach an action beat instead, or let a line of interiority
+show why they spoke aloud.
+
+Do not explain motives the reader can infer.
+Avoid attaching reasons to characters' actions with "because," "since,"
+"as if," or "in order to" when the action already makes the motive clear.
+Never use stock motive phrases such as "because it felt like doing
+something" or "because it was easier than thinking about X." Let actions
+stand on their own.
+
+Let facts carry stakes without translation.
+When a number, object, or detail carries emotional weight, do not follow
+it with a clause that explains its significance ("which was most of a
+month's rent," "which was more than she made in a week"). Instead,
+place a second concrete fact next to it and let the reader draw the
+comparison.
+
+Reserve long cumulative sentences.
+Do not default to run-on sentences chained with "and," "because," and
+"which" to convey anxiety or overwhelm. Use this structure at most once
+per scene, and only when the rhythm reflects how this specific character
+thinks. Most emotional moments land harder in short declarative
+sentences.
+
+Name things.
+Do not withhold a concrete referent for effect ("the thing she actually
+wanted," "the column she couldn't look at") when the character knows
+what it is. Vagueness is acceptable only when the character genuinely
+doesn't know or can't face it, and the text makes that clear.
+
+Do not end sentences or paragraphs on deflating kickers.
+Avoid the quiet anticlimactic final clause ("a little over a thousand,"
+"which didn't help," "and that was that") as a reflexive way to land a
+beat.
+
 AND that's it, all the writing tips! Use them, love them!

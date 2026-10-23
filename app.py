@@ -58,6 +58,10 @@ MODELS = {
     "DeepSeek V4 Pro (direct)": {"name": "DeepSeek V4 Pro", "id": "deepseek-v4-pro", "vendor": "deepseek", "prompt": "deepseek_pro", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "high", "price_in": 1.32, "price_out": 3.96, "offpeak": {"price_in": 0.66, "price_out": 1.98}, "cache_read_mult": 0.0333, "max_out": 131072},
     "DeepSeek V4.1 Flash (direct)": {"name": "DeepSeek V4.1 Flash", "id": "deepseek-flash", "vendor": "deepseek", "prompt": "deepseek_flash", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "high", "price_in": 0.30, "price_out": 1.20, "offpeak": {"price_in": 0.15, "price_out": 0.60}, "cache_read_mult": 0.02, "max_out": 131072},
     "GLM 5.3 Flash (OR)": {"name": "GLM 5.3 Flash", "id": "z-ai/glm-5.3-flash", "vendor": "openrouter", "prompt": "glm_flash", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "max", "price_in": 0.15, "price_out": 0.50, "max_out": 131072},
+    # Z.ai's own API. Thinking cannot be switched off on GLM 5.3; the effort goes in a top-level
+    # reasoning_effort field (low/high/max, default max). Cache hits bill at "cache_read_mult".
+    "GLM 5.3 (direct)": {"name": "GLM 5.3", "id": "glm-5.3", "vendor": "zai", "prompt": "glm_pro", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "max", "price_in": 1.40, "price_out": 4.40, "cache_read_mult": 0.186, "max_out": 131072},
+    "GLM 5.3 Flash (direct)": {"name": "GLM 5.3 Flash", "id": "glm-5.3-flash", "vendor": "zai", "prompt": "glm_flash", "reasoning": True, "full_budget": True, "efforts": ["low", "high", "max"], "default_effort": "max", "price_in": 0.15, "price_out": 0.50, "cache_read_mult": 0.20, "max_out": 131072},
     "Ember-1 (OR)": {"name": "Ember-1", "id": "fireworks/ember-1", "vendor": "openrouter", "prompt": "ember", "reasoning": True, "efforts": ["low", "high", "max"], "default_effort": "max", "price_in": 3.00, "price_out": 15.00, "max_out": 131072},
 }
 
@@ -1877,20 +1881,22 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
             flag_truncation('MAX_TOKENS' in finish or finish.endswith('2'))
             return text
 
-        elif vendor in ['mistral', 'xai', 'kimi', 'openrouter', 'deepseek']:
+        elif vendor in ['mistral', 'xai', 'kimi', 'openrouter', 'deepseek', 'zai']:
             endpoints = {
                 'mistral': "https://api.mistral.ai/v1/chat/completions",
                 'xai': "https://api.x.ai/v1/chat/completions",
                 'kimi': "https://api.moonshot.ai/v1/chat/completions",
                 'openrouter': "https://openrouter.ai/api/v1/chat/completions",
-                'deepseek': "https://api.deepseek.com/chat/completions"
+                'deepseek': "https://api.deepseek.com/chat/completions",
+                'zai': "https://api.z.ai/api/paas/v4/chat/completions"
             }
             api_keys = {
                 'mistral': st.session_state.mistral_key,
                 'xai': st.session_state.xai_key,
                 'kimi': st.session_state.kimi_key,
                 'openrouter': st.session_state.openrouter_key,
-                'deepseek': st.session_state.deepseek_key
+                'deepseek': st.session_state.deepseek_key,
+                'zai': st.session_state.zai_key
             }
             headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_keys[vendor]}"}
             payload = {
@@ -1903,8 +1909,8 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
                 or_effort = nearest_effort(effort, m_cfg.get('efforts'))
                 if or_effort:
                     payload["reasoning"] = {"effort": or_effort}
-            if vendor == 'deepseek':
-                # Thinking is on by default; the effort goes in DeepSeek's own top-level field.
+            if vendor in ('deepseek', 'zai'):
+                # Thinking is on by default; the effort goes in a top-level field on both APIs.
                 ds_effort = nearest_effort(effort, m_cfg.get('efforts'))
                 if ds_effort:
                     payload["reasoning_effort"] = ds_effort
@@ -1924,7 +1930,12 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
                 prompt_tok = usage.get('prompt_tokens', 0)
                 # DeepSeek caches repeated prefixes (the system prompt) automatically and bills
                 # hits at a few percent of the input price; it reports the split itself.
-                cache_hit = usage.get('prompt_cache_hit_tokens', 0) if vendor == 'deepseek' else 0
+                # Z.ai does the same and reports hits the OpenAI way.
+                cache_hit = 0
+                if vendor == 'deepseek':
+                    cache_hit = usage.get('prompt_cache_hit_tokens', 0) or 0
+                elif vendor == 'zai':
+                    cache_hit = (usage.get('prompt_tokens_details') or {}).get('cached_tokens', 0) or 0
                 track_cost(prompt_tok - cache_hit, usage.get('completion_tokens', 0), m_cfg,
                            cache_read=cache_hit)
             choice = data['choices'][0]
@@ -3308,6 +3319,7 @@ st.session_state.xai_key = st.sidebar.text_input("xAI (Grok) Key", value=get_sec
 st.session_state.kimi_key = st.sidebar.text_input("Kimi Key", value=get_secret("KIMI_API_KEY"), type="password")
 st.session_state.openrouter_key = st.sidebar.text_input("OpenRouter Key", value=get_secret("OPENROUTER_API_KEY"), type="password")
 st.session_state.deepseek_key = st.sidebar.text_input("DeepSeek Key", value=get_secret("DEEPSEEK_API_KEY"), type="password")
+st.session_state.zai_key = st.sidebar.text_input("Z.ai (GLM) Key", value=get_secret("ZAI_API_KEY"), type="password")
 
 DEFAULT_WRITER_MODEL = "Claude 5.5 Opus"
 DEFAULT_EDITOR_MODEL = "DeepSeek V4.1 Flash (direct)"

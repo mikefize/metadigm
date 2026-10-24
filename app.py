@@ -86,13 +86,6 @@ if "last_sys_prompt" not in st.session_state: st.session_state.last_sys_prompt =
 if "last_user_prompt" not in st.session_state: st.session_state.last_user_prompt = ""
 if "last_raw_response" not in st.session_state: st.session_state.last_raw_response = ""
 if "last_api_payload" not in st.session_state: st.session_state.last_api_payload = ""
-# Premise Builder (optional source-adaptation step; see PREMISE BUILDER section)
-if "premise_source" not in st.session_state: st.session_state.premise_source = ""
-if "premise_skeleton" not in st.session_state: st.session_state.premise_skeleton = None
-if "premise_skeleton_hash" not in st.session_state: st.session_state.premise_skeleton_hash = ""
-if "premise_result" not in st.session_state: st.session_state.premise_result = None
-if "premise_cast" not in st.session_state: st.session_state.premise_cast = None
-if "premise_return_step" not in st.session_state: st.session_state.premise_return_step = "setup"
 
 # --- UTILS ---
 def load_list(filename):
@@ -141,8 +134,8 @@ def draw_name_pool():
 
 
 def session_name_pool():
-    """The pool for the story currently being set up. Kept until that story is finished, so the
-    premise builder's casting sheet and the dossier draw from the same names."""
+    """The pool for the story currently being set up. Kept until that story is handed to its
+    writing job, so a reroll of the dossier draws from the same names."""
     if not st.session_state.get("name_pool"):
         st.session_state.name_pool = draw_name_pool()
     return st.session_state.name_pool
@@ -272,44 +265,44 @@ def get_secret(key_name):
 
 
 # --- CALL RUNTIME ---
-# call_api is used from two places: the UI script (dossier, outline, premise builder) and the
+# call_api is used from two places: the UI script (dossier, outline) and the
 # background job threads that write and edit whole stories. A job thread has no Streamlit session,
-# so everything a call needs from "outside" - API keys, where spend is counted, where debug output
-# and warnings go - comes from a runtime object instead of st.session_state directly.
+# so where spend is counted and where debug output and warnings go comes from a runtime object
+# instead of st.session_state directly.
 
-# Session-state field holding each vendor's key, as the sidebar fills it.
-VENDOR_KEY_FIELDS = {
-    "anthropic": "anthropic_key", "google": "google_key", "mistral": "mistral_key", "xai": "xai_key",
-    "kimi": "kimi_key", "openrouter": "openrouter_key", "deepseek": "deepseek_key", "zai": "zai_key",
+# Secret (or environment variable) holding each vendor's API key.
+VENDOR_KEY_SECRETS = {
+    "anthropic": "ANTHROPIC_API_KEY", "google": "GOOGLE_API_KEY", "mistral": "MISTRAL_API_KEY",
+    "xai": "XAI_API_KEY", "kimi": "KIMI_API_KEY", "openrouter": "OPENROUTER_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY", "zai": "ZAI_API_KEY",
 }
+
+
+def api_key(vendor):
+    name = VENDOR_KEY_SECRETS.get(vendor, "")
+    return (get_secret(name) or os.environ.get(name) or "").strip() if name else ""
+
 
 _worker_ctx = threading.local()
 
 
 class SessionRuntime:
-    """Calls made by the UI script: keys from the sidebar, spend into the session counter."""
+    """Calls made by the UI script: spend into the session counter, warnings onto the page."""
 
     @property
     def state(self):
         return st.session_state
-
-    def key(self, vendor):
-        return st.session_state.get(VENDOR_KEY_FIELDS.get(vendor, ""), "") or ""
 
     def warn(self, message):
         st.warning(message)
 
 
 class JobRuntime:
-    """Calls made by a job thread: keys handed over when the job started, spend into the job."""
+    """Calls made by a job thread: spend into the job, warnings into its log."""
 
-    def __init__(self, keys, stats, warn):
+    def __init__(self, stats, warn):
         self.state = {"stats": stats}
-        self._keys = keys
         self._warn = warn
-
-    def key(self, vendor):
-        return self._keys.get(vendor, "") or ""
 
     def warn(self, message):
         self._warn(message)
@@ -424,7 +417,8 @@ def _open_connection():
     remote = turso_config()
     if not remote:
         os.makedirs(DATA_DIR, exist_ok=True)
-        return sqlite3.connect(DB_PATH, timeout=15)
+        # Shared between the UI and job threads through _DB_POOL, which serialises access.
+        return sqlite3.connect(DB_PATH, timeout=15, check_same_thread=False)
     import libsql          # lazy: a local-only install never needs this package present
     url, token = remote
     return libsql.connect(url, auth_token=token) if token else libsql.connect(url)
@@ -458,46 +452,99 @@ def init_history_db():
     return "turso" if using_remote_db() else DB_PATH
 
 
+@st.cache_resource(show_spinner=False)
+def db_pool():
+    """One connection per server process, shared by every session, rerun and job thread. Opening a
+    connection per query cost about 120 ms extra on every Turso query - the connection is lazy, so
+    each one paid its own handshake on its first statement."""
+    return {"lock": threading.RLock(), "conn": None, "target": None}
+
+
+# Taken once per script run, so job threads (which must not call Streamlit's caches) reach the same
+# pool through this module's globals.
+_DB_POOL = db_pool()
+
+
+def _pooled_connection():
+    target = turso_config() or DB_PATH
+    if _DB_POOL["conn"] is None or _DB_POOL["target"] != target:
+        _drop_pooled_connection()
+        _DB_POOL["conn"], _DB_POOL["target"] = _open_connection(), target
+    return _DB_POOL["conn"]
+
+
+def _drop_pooled_connection():
+    conn, _DB_POOL["conn"] = _DB_POOL["conn"], None
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 def _db(sql, params=(), fetch=None):
     # The UI creates the tables before any job can start, so a job thread skips the cached
     # init - Streamlit's caches expect to be called from a script run.
     if not in_worker():
         init_history_db()
-    conn = _open_connection()
-    try:
-        cur = conn.execute(sql, params)
-        if fetch == 'one':
-            row = cur.fetchone()
-            result = _rows_as_dicts(cur, [row])[0] if row is not None else None
-        elif fetch == 'all':
-            result = _rows_as_dicts(cur, cur.fetchall())
-        else:
-            result = cur.lastrowid
-        conn.commit()
-        return result
-    finally:
-        conn.close()
+    # A long-idle remote connection can be dropped by the server. Reads are retried once on a fresh
+    # connection; writes are not, since the first attempt may have gone through.
+    retry_ok = sql.lstrip().upper().startswith(("SELECT", "PRAGMA"))
+    with _DB_POOL["lock"]:
+        for attempt in (1, 2):
+            conn = _pooled_connection()
+            try:
+                cur = conn.execute(sql, params)
+                if fetch == 'one':
+                    row = cur.fetchone()
+                    result = _rows_as_dicts(cur, [row])[0] if row is not None else None
+                elif fetch == 'all':
+                    result = _rows_as_dicts(cur, cur.fetchall())
+                else:
+                    result = cur.lastrowid
+                conn.commit()
+                return result
+            except Exception:
+                _drop_pooled_connection()
+                if attempt == 2 or not retry_ok:
+                    raise
 
 
 def history_columns():
-    conn = _open_connection()
-    try:
-        return [row[1] for row in conn.execute("PRAGMA table_info(stories)").fetchall()]
-    finally:
-        conn.close()
+    return [row["name"] for row in _db("PRAGMA table_info(stories)", fetch='all')]
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def db_summary():
+    """The counts every page's sidebar shows, in one query, cached briefly. They used to be three
+    separate uncached queries on every click. Failures are not cached, so a broken connection
+    still shows up on the next rerun."""
+    return dict(_db(
+        "SELECT (SELECT COUNT(*) FROM stories) AS runs, "
+        "(SELECT COALESCE(SUM(cost), 0) FROM stories) AS cost, "
+        "(SELECT COALESCE(SUM(final_words), 0) FROM stories) AS words, "
+        "(SELECT COUNT(*) FROM jobs WHERE status IN ('running', 'cancelling')) AS active_jobs",
+        fetch='one'))
+
+
+def refresh_summary():
+    """After a write from the UI, so the sidebar does not show the old counts for 15 seconds."""
+    if not in_worker():
+        db_summary.clear()
 
 
 def history_backend_status():
-    """(label, detail, ok) for the sidebar. Verified with a real query rather than by connecting:
-    libsql.connect() is lazy, so a wrong URL or an expired token stays invisible until a statement
-    runs - which would otherwise be the moment a finished story is being saved."""
-    if not using_remote_db():
-        return ("Local file", "Resets whenever Streamlit Cloud restarts the app.", True)
+    """(label, detail, ok, summary) for the sidebar. Verified with a real query rather than by
+    connecting: libsql.connect() is lazy, so a wrong URL or an expired token stays invisible until a
+    statement runs - which would otherwise be the moment a finished story is being saved."""
     try:
-        runs = history_totals()[0]
-        return ("Turso (hosted)", f"{runs:,} runs stored off-container.", True)
+        summary = db_summary()
     except Exception as exc:
-        return ("Turso unreachable", str(exc)[:300], False)
+        label = "Turso unreachable" if using_remote_db() else "Local file unreadable"
+        return (label, str(exc)[:300], False, {"runs": 0, "cost": 0.0, "words": 0, "active_jobs": 0})
+    if not using_remote_db():
+        return ("Local file", "Resets whenever Streamlit Cloud restarts the app.", True, summary)
+    return ("Turso (hosted)", f"{summary['runs']:,} runs stored off-container.", True, summary)
 
 
 def save_story(record):
@@ -529,6 +576,7 @@ def get_story(story_id):
 
 def delete_story(story_id):
     _db("DELETE FROM stories WHERE id = ?", (story_id,))
+    refresh_summary()
 
 
 def export_history_payload():
@@ -569,13 +617,8 @@ def import_history_payload(raw_text):
         record.setdefault("origin", "imported")
         save_story(record)
         imported += 1
+    refresh_summary()
     return imported, skipped
-
-
-def history_totals():
-    row = _db("SELECT COUNT(*) AS runs, COALESCE(SUM(cost), 0) AS cost, "
-              "COALESCE(SUM(final_words), 0) AS words FROM stories", fetch='one')
-    return (row["runs"], row["cost"], row["words"]) if row else (0, 0.0, 0)
 
 
 def _dossier_for_storage(dossier):
@@ -1039,7 +1082,7 @@ def track_cost(in_tok, out_tok, model_config, cache_write=0, cache_read=0):
     cache writes and reads are billed separately at their own multipliers, so they have to
     be added explicitly or the running total silently under-reports."""
     # A finished run leaves its total on screen until the next paid call, whichever screen
-    # that comes from (setup, premise builder, rewrite, re-edit) - that call starts a new count.
+    # that comes from (setup, casting, rewrite) - that call starts a new count.
     # A job thread counts into its own stats and never has this flag.
     state = runtime().state
     if state.get("cost_reset_pending"):
@@ -1887,7 +1930,7 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
 
     try:
         if vendor == 'anthropic':
-            client = anthropic.Anthropic(api_key=rt.key('anthropic'), timeout=1800.0)
+            client = anthropic.Anthropic(api_key=api_key('anthropic'), timeout=1800.0)
             # The system block is identical across every call in a run (persona + rules +
             # style reference), so caching it turns ~7 full-price sends into 1 write and 6
             # reads at a tenth of the price. Caching is a PREFIX match: the moment anything
@@ -1926,7 +1969,7 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
             return extract_anthropic_message_text(resp)
 
         elif vendor == 'google':
-            genai.configure(api_key=rt.key('google'))
+            genai.configure(api_key=api_key('google'))
             model = genai.GenerativeModel(model_name=m_cfg['id'], system_instruction=sys_prompt)
             safe = [{"category": c, "threshold": "BLOCK_NONE"} for c in [
                 "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_SEXUALLY_EXPLICIT",
@@ -1978,7 +2021,7 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
                 'deepseek': "https://api.deepseek.com/chat/completions",
                 'zai': "https://api.z.ai/api/paas/v4/chat/completions"
             }
-            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {rt.key(vendor)}"}
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key(vendor)}"}
             payload = {
                 "model": m_cfg['id'],
                 "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": prompt}],
@@ -2809,398 +2852,19 @@ OUTPUT AT THE VERY END ON NEW LINES:
 """
     return global_bible + "\n" + pacing_rules + "\n" + task_block
 
-# --- PREMISE BUILDER (SOURCE ADAPTATION) ---
-# An optional front-end for ONE field: main_idea on the setup screen. It takes a summary of an
-# existing film/show/book and folds selected motifs into it. Nothing downstream knows or cares
-# that a premise arrived this way, and the whole step can be skipped.
-#
-# Why two calls instead of one: asked in a single shot to "rewrite this summary with these
-# kinks", a model APPENDS - you get the original plot back with a paragraph of motif bolted
-# onto the end. Splitting it forces the model to name the load-bearing joints of the source
-# plot first, then substitute INTO them. Substitution rather than addition is the whole
-# mechanism behind "integrated without deviating from the plot".
-
-PREMISE_SKELETON_TAGS = [
-    "logline", "protagonist", "want", "antagonist_force",
-    "power_dynamic", "setting", "escalation", "ending", "joints",
-]
-
-# How far the source plot is allowed to move. A 0-100 slider does nothing useful here - the
-# model just varies adjective density. Levels that each define what may CHANGE steer hard.
-DEVIATION_LEVELS = {
-    "1 · Subtext": {
-        "caption": "Every plot beat survives untouched. The motifs are undertone only.",
-        "rule": (
-            "SUBTEXT ONLY. Every beat, reveal and outcome of the source survives unchanged and in the same "
-            "order. The motifs may only colour how things are described, what a character privately notices, "
-            "and what the atmosphere implies. Nothing overt happens on the motifs. Where a motif will not fit "
-            "without altering a beat, leave it as implication rather than bending the plot."
-        ),
-    },
-    "2 · Thread": {
-        "caption": "Main plot intact; the motifs own one subplot or one character's arc.",
-        "rule": (
-            "ONE THREAD. The main plot - its beats, their order, and the ending - stays as it is. The motifs "
-            "take over exactly one subplot or one supporting character's arc, which may be re-purposed freely. "
-            "That thread must touch the main plot at least twice, but must never redirect it."
-        ),
-    },
-    "3 · Engine": {
-        "caption": "Same beats, same structure, same ending — but the motifs are now what CAUSES them.",
-        "rule": (
-            "RE-CAUSED. Keep the act structure, the sequence of major beats, and who ends up where. Change "
-            "WHY each beat happens: the motifs become the causal engine underneath the existing plot. A "
-            "reader who knows the source should recognise every beat and be unable to point at one that was "
-            "added. Prefer replacing an existing plot element with a motif over introducing a new element."
-        ),
-    },
-    "4 · Reskin": {
-        "caption": "Only the setting, cast, tone and central relationship survive. Plot rebuilt around the motifs.",
-        "rule": (
-            "REBUILD. Keep the setting, the cast and their relationships, the tone, and the central dramatic "
-            "question. Everything else is yours: beats, escalation and ending are rebuilt so the motifs drive "
-            "the story from the first page. The result must still feel like it belongs in the source's world."
-        ),
-    },
-}
-
-# Mainstream sources almost always resolve upward, so adapting one faithfully imports an ending
-# this engine rarely wants. This overrides the final beat only - never the road to it.
-ENDING_MODES = {
-    "Follow the source": {
-        "caption": "Resolve the way the original does.",
-        "rule": "",
-    },
-    "Protagonist loses": {
-        "caption": "The transformation wins. No rescue, no reversal, no last-minute clarity.",
-        "rule": (
-            "THE PROTAGONIST LOSES. The transformation completes, holds, and wins. There is no rescue, no "
-            "reversal, no eleventh-hour moment of clarity, and no comeuppance for whoever set it in motion. "
-            "Write it as a completion rather than a tragedy: by the final beat the protagonist no longer "
-            "wants what they wanted on page one, and is not fighting it. If the source ends in a victory, "
-            "that victory is what fails here."
-        ),
-    },
-    "Protagonist resists": {
-        "caption": "They come through it — changed and marked, but still themselves.",
-        "rule": (
-            "THE PROTAGONIST COMES THROUGH IT. They end the story still recognisably themselves, having "
-            "broken, escaped or outlasted the mechanism. The change is real and it leaves marks they will "
-            "carry, so this is a survival rather than a restoration - nothing is put back the way it was."
-        ),
-    },
-    "Ambiguous": {
-        "caption": "The change holds and the cost is visible; deliberately unresolved.",
-        "rule": (
-            "LEAVE IT UNRESOLVED. The change holds and its cost is fully visible, but whether the protagonist "
-            "has been ruined or remade is left genuinely open - both readings must be supportable from the "
-            "same final beat. Do not resolve it with a closing line that tips the balance either way."
-        ),
-    },
-}
-
-# Most mainstream sources lead with a man, and this engine's motif vocabulary is written for a female
-# lead, so adapting a source faithfully usually imports the wrong protagonist. The recast happens at
-# fusion, never during analysis: the skeleton keeps describing the source as it really is, which is why
-# toggling this only costs a re-fuse rather than a fresh analysis pass.
-RECAST_FEMALE_RULE = """
-RECAST THE PROTAGONIST AS FEMALE. The lead is a woman in this version.
-- Give her a name from the same culture, era and social register as the original's. Pick a name a real
-  person would carry, not a feminised spelling of the source's (no Michael -> Michelle).
-- Change pronouns and gendered nouns throughout, and adjust only what the recast actually forces:
-  spouses and love interests, honorifics, titles, and any beat whose mechanics depend on the lead's sex.
-  Every other character keeps the gender the source gave them.
-- Do not soften her. Her competence, rank, temper, appetites and agency are exactly what the original
-  character had. She is not more cautious, more nurturing, more emotional or more decorative than he was,
-  and nothing he accomplished becomes something done for her here.
-- Where a beat genuinely depends on the lead being male - a men-only institution, an inheritance, a
-  conscription - re-cause that beat instead of deleting it. The beat survives; its reason changes.
-"""
-
-# The exact option values the setup screen's widgets accept. They live here rather than inline in
-# the setup UI because the premise builder now writes into that snapshot: a value outside these
-# lists either falls back silently (selectboxes) or raises outright (the body-focus sliders).
+# --- SETUP OPTIONS ---
+# The exact option values the setup screen's widgets accept. A stored value outside these lists - from
+# an older history row, say - either falls back silently (selectboxes) or raises outright (the
+# body-focus sliders), so restored values go through _pick first.
 SETUP_GENDERS = ["Female", "Male", "Non-binary"]
 SETUP_CHANGE_TYPES = ["Physical", "Mental", "Both", "None"]
 SETUP_INTENSITIES = ["Subtle", "Pronounced", "Extreme"]
 SETUP_POV = ["Third Person (She/He)", "First Person (I)", "Second Person (You)", "Antagonist Perspective"]
 SETUP_PACING = ["Fast & Explicit", "Steady Build", "Agonizing Slow Burn"]
-SETUP_ONSETS = ["Early", "Mid", "Late"]
-
-MOTIF_PROMINENCE = {
-    1: "Garnish - present as flavour and implication only; must not own a plot beat.",
-    2: "Thread - recurs across several scenes and shapes a character, but is not the spine.",
-    3: "Pillar - load-bearing; at least one major beat exists because of this motif.",
-}
-
-# The slider shows these words directly rather than 1/2/3 behind a format_func, so what the
-# widget stores is what the user read. normalize_kinks still wants the number.
-PROMINENCE_LABELS = {"Garnish": 1, "Thread": 2, "Pillar": 3}
-
-
-def build_skeleton_prompt(summary):
-    """Stage A: reduce the source to structure. Cheap, and stable across motif tweaks."""
-    return f"""TASK: Break the story summary below into its structural skeleton. You are not judging,
-continuing, or rewriting it - you are stripping it down to the load-bearing parts so it can be
-adapted later.
-
-Keep the real names, places and specifics from the summary. Where the summary is vague, infer the
-most probable reading rather than leaving a field empty, and keep the inference conservative.
-
-SOURCE SUMMARY:
-\"\"\"
-{summary.strip()}
-\"\"\"
-
-The <joints> field is the important one. A joint is an element of THIS plot that could be swapped
-for something else without the story falling apart - the object everyone wants, the reason a
-character has power over another, the institution in the background, the nature of the threat, the
-thing the protagonist is running from. List 4-6 of them, most substitutable first, each as
-"element - the job it does in the plot".
-
-OUTPUT FORMAT (STRICT XML - NO OTHER TEXT):
-<logline>One sentence: who wants what, and what stands in the way.</logline>
-<protagonist>Name, role, situation at the start, and the flaw or need they carry.</protagonist>
-<want>What the protagonist is actually chasing, and what they need underneath that.</want>
-<antagonist_force>The person, system or condition opposing them, and the leverage it holds.</antagonist_force>
-<power_dynamic>Who holds power over whom, in what currency, and how that shifts across the story.</power_dynamic>
-<setting>Place, period, social texture, and the rules of this world.</setting>
-<escalation>The 4-6 major beats in order, one short line each.</escalation>
-<ending>How it resolves and what state the protagonist is left in.</ending>
-<joints>The substitutable elements, one per line.</joints>
-"""
-
-
-def build_fusion_prompt(summary, skeleton, motif_lines, method_list, deviation_key, ending_key, notes,
-                        recast_female=False):
-    """Stage B: substitute the motifs into the joints found in stage A, then write the premise."""
-    level = DEVIATION_LEVELS[deviation_key]
-    ending_rule = ENDING_MODES.get(ending_key, {}).get("rule", "")
-    skeleton_block = "\n".join(
-        f"<{tag}>{skeleton.get(tag, '')}</{tag}>" for tag in PREMISE_SKELETON_TAGS if skeleton.get(tag)
-    )
-    motif_block = "\n".join(motif_lines) if motif_lines else "None specified - work from the mechanism and notes alone."
-    method_block = ", ".join(method_list) if method_list else "Not specified - choose whatever the plot already supports."
-
-    prompt = f"""TASK: Adapt the source story below into a premise for an erotic transformation story, with
-the given motifs built into it. This premise becomes the top-level concept another model writes
-the full story from, so it must read as one coherent story, not as a summary with additions.
-
-SOURCE SKELETON (from the original):
-{skeleton_block}
-
-ORIGINAL SUMMARY (for detail and texture - the skeleton above is the authority on structure):
-\"\"\"
-{summary.strip()}
-\"\"\"
-
-MOTIFS TO BUILD IN:
-{motif_block}
-
-TRANSFORMATION MECHANISM: {method_block}
-
-DEVIATION LEVEL - {deviation_key}:
-{level['rule']}
-"""
-    if ending_rule:
-        prompt += f"""
-ENDING DIRECTIVE - {ending_key}. This overrides the deviation level wherever the two conflict, and it
-overrides the source's own ending outright:
-{ending_rule}
-Reach it by changing the fewest possible links in the chain of cause and effect you have already built.
-Everything before the final beat stays as the deviation level allows, and the new ending must read as
-what those earlier beats were always going to produce - not as a swerve in the last paragraph.
-"""
-
-    if recast_female:
-        prompt += RECAST_FEMALE_RULE
-        # The recast lead's new name is the one name this step has to invent.
-        female_pool = session_name_pool().get("female", [])
-        if female_pool:
-            prompt += ("- Take her first name from this list, choosing the one that best fits the original's "
-                       f"culture and era: {', '.join(female_pool)}.\n")
-
-    # The "keep the original names" constraint below has to bend for the one name the recast changes,
-    # or the two directives contradict each other and the model picks whichever it read last.
-    names_rule = (
-        "- Keep the original places, world and supporting names. Only the protagonist's name changes, and "
-        "only as the RECAST directive requires. This is an adaptation of THIS story, not a story like it."
-        if recast_female else
-        "- Keep the original names, places and world. This is an adaptation of THIS story, not a story like it."
-    )
-
-    prompt += f"""
-# METHOD (follow this order - do not skip to the premise)
-1. Read the <joints> in the skeleton. Those are the elements of this plot that can carry weight.
-2. For each motif, find the joint it can REPLACE. The motif should take over a job the plot already
-   needed doing - the thing everyone wants, the source of one character's hold over another, the
-   institution in the background, the nature of the threat. A motif that arrives as a new element
-   alongside the plot has been added, not integrated, and is a failure.
-3. Only then write the premise, from the substitutions you just made.
-
-# HARD CONSTRAINTS
-{names_rule}
-- Do not narrate, do not write scenes, and do not open with "In a world where". Write the premise as a
-  publisher's concept note: what the story is, in the present tense.
-- Do not use the words "explores", "delves", "journey", "unravels" or "little did they know".
-- Every element you introduce must be traceable to a substitution you listed. No free additions.
-- The transformation must be something that HAPPENS TO or THROUGH the protagonist across the plot,
-  not a state they already start in.
-"""
-    if notes.strip():
-        prompt += f"\nUSER DIRECTION (overrides your own choices where they conflict):\n{notes.strip()}\n"
-
-    prompt += """
-OUTPUT FORMAT (STRICT XML - NO OTHER TEXT):
-<substitutions>
-One line per substitution, formatted as: SOURCE ELEMENT -> WHAT IT BECOMES [motif responsible]
-One line per motif at minimum. Be concrete about the source element - name it as the source names it.
-</substitutions>
-<premise>
-The premise itself: 180-260 words of continuous prose, present tense, no headings or bullets. Name the
-protagonist, the mechanism acting on them, what escalates, and where it ends up.
-</premise>
-<changes>
-What a reader of the original would notice as different, one bullet per line. If a beat survived but is
-now caused by something else, say so. Be honest here - this is how the user checks your work.
-</changes>
-"""
-    return prompt
-
-
-def generate_source_skeleton(summary, model_key):
-    """Stage A call. Returns {tag: text} or {"error": ...}."""
-    res = call_api(build_skeleton_prompt(summary), model_key, max_tokens=3000, effort="low")
-    if not res or res.startswith("API ERROR"):
-        return {"error": res or "Empty API response."}
-    skeleton = {tag: extract_tag(res, tag) for tag in PREMISE_SKELETON_TAGS}
-    if not any(skeleton.values()):
-        return {"error": "The model did not return a usable skeleton. Try a longer summary or another model."}
-    skeleton["raw_response"] = res
-    return skeleton
-
-
-def generate_fused_premise(summary, skeleton, motif_lines, method_list, deviation_key, ending_key,
-                           notes, model_key, recast_female=False):
-    """Stage B call. Returns {"premise", "substitutions", "changes"} or {"error": ...}."""
-    prompt = build_fusion_prompt(summary, skeleton, motif_lines, method_list, deviation_key,
-                                 ending_key, notes, recast_female)
-    res = call_api(prompt, model_key, max_tokens=6000, effort="medium")
-    if not res or res.startswith("API ERROR"):
-        return {"error": res or "Empty API response."}
-    premise = extract_tag(res, "premise")
-    if not premise:
-        return {"error": "The model returned no <premise> block. Check the raw response in Prompt Debug."}
-    return {
-        "premise": premise,
-        "substitutions": extract_tag(res, "substitutions"),
-        "changes": extract_tag(res, "changes"),
-        "raw_response": res,
-    }
-
-
-# --- STAGE C: CASTING SHEET ---
-# Turns the finished premise into the setup screen's own fields. It is a separate call rather than
-# extra tags on the fusion output because the two jobs pull in opposite directions: fusion wants
-# prose judgement, this wants values copied verbatim out of fixed lists. Bolting them together
-# degrades both, and this way the fusion prompt keeps the output contract it was tuned on.
-
-def build_casting_prompt(premise, skeleton, motif_lines, genre_options, motif_options, body_options,
-                         method_options, recast_female=False, name_pool=None):
-    def as_list(options):
-        return "\n".join(f"  - {o}" for o in options) or "  (none available)"
-
-    pool_block = name_pool_block(name_pool, taken_names([], premise))
-    pool_rule = ("\n- Anyone the sheet needs who has no name in the premise gets one from the NAME POOL below."
-                 if pool_block else "")
-
-    recast_note = ("""
-- The lead was deliberately recast as female during the adaptation. Take her name and gender from the
-  PREMISE - the source context below still describes the original man."""
-                   if recast_female else "")
-
-    return f"""TASK: Fill in a production sheet for the story premise below. You are not writing prose here -
-you are choosing values, and most of them must be copied verbatim from the lists provided.
-
-PREMISE (the authority - if it contradicts anything else here, it wins):
-\"\"\"
-{premise.strip()}
-\"\"\"
-
-SOURCE CONTEXT (from the original the premise was adapted from):
-<protagonist>{skeleton.get('protagonist', '')}</protagonist>
-<antagonist_force>{skeleton.get('antagonist_force', '')}</antagonist_force>
-<power_dynamic>{skeleton.get('power_dynamic', '')}</power_dynamic>
-<setting>{skeleton.get('setting', '')}</setting>
-
-MOTIFS THE USER ALREADY CHOSE (carry these through as the protagonist's kinks unless the premise
-plainly outgrew one):
-{chr(10).join(motif_lines) if motif_lines else "  (none)"}
-
-# VALUE LISTS - copy the wording EXACTLY, character for character
-Genre (pick the one closest to the premise's tone):
-{as_list(genre_options)}
-Transformation Mechanism (pick what the premise actually uses):
-{as_list(method_options)}
-Kinks (0-4 per protagonist, each with strength 1-3):
-{as_list(motif_options)}
-Body Focus (0-3 per protagonist, physical changes only):
-{as_list(body_options)}
-
-# FIXED CHOICES
-gender: {" | ".join(SETUP_GENDERS)}
-change_type: {" | ".join(SETUP_CHANGE_TYPES)}
-intensity: {" | ".join(SETUP_INTENSITIES)}
-pov: {" | ".join(SETUP_POV)}
-pacing: {" | ".join(SETUP_PACING)}
-transform_onset: {" | ".join(SETUP_ONSETS)}   (how early the change starts biting)
-
-# RULES
-- Protagonists are the people the premise puts through the change. Use the names the premise uses.
-  One is normal; add a second only if the premise genuinely carries two. Never more than four.
-- "info" is one short line - age, job, and the personality note that makes them a person. No prose.
-- The antagonist is whoever holds the leverage in the premise. Set include to false when the opposing
-  force is a system or a condition rather than a person who can appear on the page.
-- Give body_details only when change_type is Physical or Both, and keep "remark" to a few words.
-- Choose nothing that the premise does not support. An empty list beats an invented entry.{recast_note}{pool_rule}
-
-{pool_block}
-
-OUTPUT FORMAT - a single JSON object inside the tag, and nothing else:
-<cast>
-{{
-  "pov": "...",
-  "genre": "...",
-  "mc_method": "...",
-  "pacing": "...",
-  "transform_onset": "Early | Mid | Late",
-  "antagonist": {{"include": true, "name": "...", "gender": "...", "info": "..."}},
-  "protagonists": [
-    {{"name": "...", "gender": "...", "info": "...", "change_type": "...",
-      "kinks": [{{"name": "...", "strength": 2}}],
-      "body_details": [{{"part": "...", "intensity": "...", "remark": "..."}}]}}
-  ]
-}}
-</cast>
-"""
-
-
-def parse_cast_json(text):
-    """Pull the JSON object out of <cast>. Models wrap it in fences or trail commentary often
-    enough that going straight to json.loads on the tag body is not reliable."""
-    body = extract_tag(text, "cast") or text or ""
-    body = re.sub(r'```(?:json)?\s*(.*?)\s*```', r'\1', body, flags=re.DOTALL | re.IGNORECASE).strip()
-    start, end = body.find('{'), body.rfind('}')
-    if start == -1 or end <= start:
-        return None
-    try:
-        return json.loads(body[start:end + 1])
-    except json.JSONDecodeError:
-        return None
 
 
 def _pick(value, options, fallback):
-    """Case-insensitive match onto an allowed option, since models re-case and re-punctuate."""
+    """Case-insensitive match onto an allowed option."""
     if isinstance(value, str):
         cleaned = value.strip()
         for opt in options:
@@ -3212,168 +2876,6 @@ def _pick(value, options, fallback):
             if cleaned and opt.lower().startswith(cleaned.lower().rstrip(' .')):
                 return opt
     return fallback
-
-
-def sanitize_cast_for_setup(cast, num_chapters=7, force_female_lead=False):
-    """Coerce model output onto values the setup widgets actually accept.
-
-    This is not belt-and-braces: the body-focus intensity slider is passed straight into
-    st.select_slider(value=...), which RAISES on an unknown value and would strand the user on a
-    broken setup screen. The selectboxes fail more quietly by falling back to their first option,
-    which is just as wrong. So nothing reaches the snapshot unchecked."""
-    cast = cast if isinstance(cast, dict) else {}
-    genre_options = load_list('genres.txt')
-    method_options = load_list('mc_methods.txt')
-    kink_options = load_list('fetishes.txt')
-    body_options = load_list('body_parts.txt')
-
-    onset_label = _pick(cast.get('transform_onset'), SETUP_ONSETS, "Mid")
-    total = max(1, int(num_chapters or 7))
-    onset_chapter = {
-        "Early": min(total, 2),
-        "Mid": max(1, min(total, (total + 1) // 2)),
-        "Late": max(1, total - 1),
-    }[onset_label]
-
-    # Note the order: filter first, then cap. Capping first would let a hallucinated kink or a
-    # duplicate spend one of the four slots the setup screen allows.
-    protagonists = []
-    for entry in (cast.get('protagonists') or []):
-        if len(protagonists) >= 4:
-            break
-        if not isinstance(entry, dict):
-            continue
-        change_type = _pick(entry.get('change_type'), SETUP_CHANGE_TYPES, "Both")
-
-        kinks = []
-        for k in (entry.get('kinks') or []):
-            if len(kinks) >= 4:
-                break
-            name = _pick(k.get('name') if isinstance(k, dict) else k, kink_options, None)
-            if not name or any(existing['name'] == name for existing in kinks):
-                continue
-            strength = k.get('strength', 2) if isinstance(k, dict) else 2
-            kinks.append({"name": name, "strength": _clamp_int(strength, 1, 3, 2)})
-
-        body_details = []
-        if change_type in ("Physical", "Both"):
-            for b in (entry.get('body_details') or []):
-                if len(body_details) >= 3:
-                    break
-                if not isinstance(b, dict):
-                    continue
-                part = _pick(b.get('part'), body_options, None)
-                if not part or any(existing['part'] == part for existing in body_details):
-                    continue
-                body_details.append({
-                    "part": part,
-                    "intensity": _pick(b.get('intensity'), SETUP_INTENSITIES, "Pronounced"),
-                    "remark": str(b.get('remark') or '').strip()[:80],
-                })
-
-        protagonists.append({
-            "name": str(entry.get('name') or '').strip()[:60],
-            "gender": _pick(entry.get('gender'), SETUP_GENDERS, "Female"),
-            "info": str(entry.get('info') or '').strip()[:200],
-            "change_type": change_type,
-            "kinks": kinks,
-            "body_details": body_details,
-        })
-
-    # The premise already reads as female, so this only catches a model that drifted back to the
-    # source's lead. Index 0 is the lead, by the same convention generate_dossier uses.
-    if force_female_lead and protagonists:
-        protagonists[0]["gender"] = "Female"
-
-    antag_raw = cast.get('antagonist')
-    antag_raw = antag_raw if isinstance(antag_raw, dict) else {}
-    if antag_raw.get('include', True):
-        antagonist = {
-            "include": True,
-            "name": str(antag_raw.get('name') or '').strip()[:60],
-            "gender": _pick(antag_raw.get('gender'), SETUP_GENDERS, "Female"),
-            "info": str(antag_raw.get('info') or '').strip()[:200],
-        }
-    else:
-        antagonist = {"include": False}
-
-    return {
-        "pov": _pick(cast.get('pov'), SETUP_POV, SETUP_POV[0]),
-        "genre": _pick(cast.get('genre'), genre_options, None),
-        "mc_method": _pick(cast.get('mc_method'), method_options, None),
-        "pacing": _pick(cast.get('pacing'), SETUP_PACING, "Steady Build"),
-        "transform_onset": f"Chapter {onset_chapter}",
-        "onset_label": onset_label,
-        "protagonists": protagonists,
-        "antagonist": antagonist,
-    }
-
-
-def generate_setup_cast(premise, skeleton, motif_lines, model_key, num_chapters=7,
-                        recast_female=False):
-    """Stage C call. Returns a sanitised setup-config fragment or {"error": ...}."""
-    prompt = build_casting_prompt(
-        premise, skeleton or {}, motif_lines,
-        load_list('genres.txt'), load_list('fetishes.txt'),
-        load_list('body_parts.txt'), load_list('mc_methods.txt'), recast_female,
-        name_pool=session_name_pool(),
-    )
-    res = call_api(prompt, model_key, max_tokens=4000, effort="low")
-    if not res or res.startswith("API ERROR"):
-        return {"error": res or "Empty API response."}
-    parsed = parse_cast_json(res)
-    if parsed is None:
-        return {"error": "The model did not return readable JSON. Check the raw response in Prompt Debug."}
-    cast = sanitize_cast_for_setup(parsed, num_chapters, force_female_lead=recast_female)
-    if not cast["protagonists"]:
-        return {"error": "No usable protagonist came back. Try again, or a stronger model."}
-    return cast
-
-
-# Widgets in the setup screen's protagonist loop carry explicit keys, and a keyed widget prefers
-# whatever is already in session state over the snapshot's value. Streamlit usually clears that
-# state while another page is showing, but "usually" is not a guarantee to hang a silent
-# wrong-cast bug on, so the keys are cleared explicitly on the way in.
-_SETUP_WIDGET_KEY_RE = re.compile(r'^(pname|pgender|pinfo|pchange|pbody|pkinks|pbody_int|pbody_rem|pkink_strength)_')
-
-
-def push_cast_to_setup(premise_text, cast):
-    snapshot = dict(st.session_state.get("setup_snapshot") or st.session_state.get("manual_config") or {})
-    snapshot["main_idea"] = (premise_text or "").strip()
-    for field in ("pov", "genre", "mc_method", "pacing", "transform_onset", "protagonists", "antagonist"):
-        snapshot[field] = cast[field]
-    st.session_state.setup_snapshot = snapshot
-    st.session_state.manual_config = snapshot
-    for key in list(st.session_state.keys()):
-        if _SETUP_WIDGET_KEY_RE.match(str(key)):
-            del st.session_state[key]
-
-
-def build_motif_lines(kink_details, custom_motifs):
-    """One line per motif, carrying its own prominence definition so the model cannot average them."""
-    lines = []
-    for k in normalize_kinks(kink_details):
-        lines.append(f"- {k['name']} [{MOTIF_PROMINENCE[k['strength']]}]")
-    for motif in custom_motifs:
-        lines.append(f"- {motif} [{MOTIF_PROMINENCE[2]}]")
-    return lines
-
-
-def push_premise_to_setup(text):
-    """Write the premise into the setup screen's snapshot. main_idea is an unkeyed text_area, so
-    changing the snapshot is enough - no stale widget state to purge."""
-    snapshot = dict(st.session_state.get("setup_snapshot") or st.session_state.get("manual_config") or {})
-    snapshot["main_idea"] = text.strip()
-    st.session_state.setup_snapshot = snapshot
-    st.session_state.manual_config = snapshot
-
-
-def open_premise_builder(return_step):
-    # Back from the builder lands on the page it was opened from, except the builder itself.
-    if return_step == "premise":
-        return_step = "casting" if st.session_state.get("dossier") else "setup"
-    st.session_state.premise_return_step = return_step
-    st.session_state.step = "premise"
 
 
 # --- BACKGROUND JOBS ---
@@ -3422,9 +2924,11 @@ def _now():
 
 def create_job(kind, title, payload):
     now = _now()
-    return _db("INSERT INTO jobs (kind, status, title, owner, created_at, updated_at, payload_json) "
-               "VALUES (?, 'running', ?, ?, ?, ?, ?)",
-               (kind, title, instance_name(), now, now, json.dumps(payload, default=str)))
+    job_id = _db("INSERT INTO jobs (kind, status, title, owner, created_at, updated_at, payload_json) "
+                 "VALUES (?, 'running', ?, ?, ?, ?, ?)",
+                 (kind, title, instance_name(), now, now, json.dumps(payload, default=str)))
+    refresh_summary()
+    return job_id
 
 
 def _parse_job(row):
@@ -3444,21 +2948,25 @@ def get_job(job_id):
     return _parse_job(_db("SELECT * FROM jobs WHERE id = ?", (job_id,), fetch='one'))
 
 
+# Everything but the payload (the whole dossier) and the checkpoint (the whole draft) - what the job
+# pages poll every few seconds.
+JOB_LIGHT_COLUMNS = ("id, kind, status, title, owner, run_token, created_at, updated_at, progress, "
+                     "phase, stats_json, story_id, error")
+
+
+def get_job_light(job_id):
+    return _parse_job(_db(f"SELECT {JOB_LIGHT_COLUMNS}, log_json FROM jobs WHERE id = ?",
+                          (job_id,), fetch='one'))
+
+
 def list_jobs(limit=25):
-    # The light columns only: payloads carry the whole dossier, checkpoints the whole draft.
-    rows = _db("SELECT id, kind, status, title, owner, run_token, created_at, updated_at, progress, "
-               "phase, stats_json, story_id, error FROM jobs ORDER BY id DESC LIMIT ?",
-               (limit,), fetch='all') or []
+    rows = _db(f"SELECT {JOB_LIGHT_COLUMNS} FROM jobs ORDER BY id DESC LIMIT ?", (limit,), fetch='all') or []
     return [_parse_job(r) for r in rows]
-
-
-def count_active_jobs():
-    row = _db("SELECT COUNT(*) AS n FROM jobs WHERE status IN ('running', 'cancelling')", fetch='one')
-    return row["n"] if row else 0
 
 
 def set_job_status(job_id, status):
     _db("UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?", (status, _now(), job_id))
+    refresh_summary()
 
 
 @st.cache_resource(show_spinner=False)
@@ -3709,12 +3217,12 @@ def run_reedit_job(job, rep):
 JOB_KINDS = {"write": run_write_job, "reedit": run_reedit_job}
 
 
-def _job_main(job_id, keys, token):
+def _job_main(job_id, token):
     job = get_job(job_id)
     if not job:
         return
     rep = JobReporter(job_id, token, job["stats"], job["log"])
-    _worker_ctx.rt = JobRuntime(keys, rep.stats, lambda msg: rep.log(msg, "warning"))
+    _worker_ctx.rt = JobRuntime(rep.stats, lambda msg: rep.log(msg, "warning"))
     try:
         rep.log("Resumed from its checkpoint." if job["state"] else "Started.")
         JOB_KINDS[job["kind"]](job, rep)
@@ -3734,7 +3242,7 @@ def _job_main(job_id, keys, token):
         _worker_ctx.rt = None
 
 
-def start_job(job_id, keys, take_over=False):
+def start_job(job_id, take_over=False):
     """Claim a job for this process and run it on a thread. Returns (started, message)."""
     runner = job_runner()
     me = instance_name()
@@ -3742,7 +3250,7 @@ def start_job(job_id, keys, take_over=False):
         thread = runner["threads"].get(job_id)
         if thread and thread.is_alive():
             return True, "Already running."
-        job = get_job(job_id)
+        job = get_job_light(job_id)
         if not job:
             return False, "That job no longer exists."
         if job["status"] == "done":
@@ -3752,17 +3260,17 @@ def start_job(job_id, keys, take_over=False):
         _db("UPDATE jobs SET status = 'running', owner = ?, run_token = ?, error = '', updated_at = ? "
             "WHERE id = ?", (me, runner["token"], _now(), job_id))
         # Two instances claiming at once: whichever token ended up in the row has it.
-        claimed = get_job(job_id)
+        claimed = get_job_light(job_id)
         if not claimed or claimed["run_token"] != runner["token"]:
             return False, "Another instance claimed this job first."
-        thread = threading.Thread(target=_job_main, args=(job_id, keys, runner["token"]),
+        thread = threading.Thread(target=_job_main, args=(job_id, runner["token"]),
                                   name=f"metadigm-job-{job_id}", daemon=True)
         runner["threads"][job_id] = thread
         thread.start()
     return True, "Started."
 
 
-def resume_interrupted_jobs(keys):
+def resume_interrupted_jobs():
     """After a restart: pick this instance's unfinished jobs back up. Returns the ids resumed."""
     runner = job_runner()
     rows = _db("SELECT id, status, run_token FROM jobs WHERE status IN ('running', 'cancelling') "
@@ -3773,17 +3281,12 @@ def resume_interrupted_jobs(keys):
             continue
         if row["status"] == "cancelling":
             set_job_status(row["id"], "cancelled")
-        elif start_job(row["id"], keys)[0]:
+        elif start_job(row["id"])[0]:
             resumed.append(row["id"])
     return resumed
 
 
 # --- JOB UI ---
-
-def collect_api_keys():
-    """The sidebar's keys, handed to a job when it starts. Keys are never written to the database."""
-    return {vendor: st.session_state.get(field, "") or "" for vendor, field in VENDOR_KEY_FIELDS.items()}
-
 
 def current_editor_settings():
     """The sidebar's editor settings, frozen into a job so it finishes with what it started with."""
@@ -3797,7 +3300,7 @@ def current_editor_settings():
 
 def launch_job(kind, title, payload):
     job_id = create_job(kind, title, payload)
-    started, message = start_job(job_id, collect_api_keys())
+    started, message = start_job(job_id)
     if not started:
         st.session_state.job_notice = message
     st.session_state.active_job_id = job_id
@@ -3879,13 +3382,13 @@ def render_job_actions(job, key):
                                        help="Only take over when the other instance is no longer running, "
                                             "e.g. a Cloud container that restarted under a new name.")
             if cols[2].button("Take over here", key=f"{key}_take", disabled=not confirm, use_container_width=True):
-                ok, message = start_job(job["id"], collect_api_keys(), take_over=True)
+                ok, message = start_job(job["id"], take_over=True)
                 st.session_state.job_notice = message
                 st.rerun()
     else:   # interrupted, failed, cancelled
         if cols[0].button("▶️ Resume", key=f"{key}_resume", type="primary", use_container_width=True,
-                          help="Continues from the last checkpoint with the keys currently in the sidebar."):
-            ok, message = start_job(job["id"], collect_api_keys())
+                          help="Continues from the last checkpoint."):
+            ok, message = start_job(job["id"])
             st.session_state.job_notice = message
             st.rerun()
         if label != "cancelled" and cols[1].button("Discard", key=f"{key}_discard", use_container_width=True):
@@ -3895,14 +3398,6 @@ def render_job_actions(job, key):
 
 # --- SIDEBAR & CONFIG ---
 st.sidebar.header("Settings")
-st.session_state.anthropic_key = st.sidebar.text_input("Anthropic Key", value=get_secret("ANTHROPIC_API_KEY"), type="password")
-st.session_state.google_key = st.sidebar.text_input("Google Key", value=get_secret("GOOGLE_API_KEY"), type="password")
-st.session_state.mistral_key = st.sidebar.text_input("Mistral Key", value=get_secret("MISTRAL_API_KEY"), type="password") 
-st.session_state.xai_key = st.sidebar.text_input("xAI (Grok) Key", value=get_secret("XAI_API_KEY"), type="password")
-st.session_state.kimi_key = st.sidebar.text_input("Kimi Key", value=get_secret("KIMI_API_KEY"), type="password")
-st.session_state.openrouter_key = st.sidebar.text_input("OpenRouter Key", value=get_secret("OPENROUTER_API_KEY"), type="password")
-st.session_state.deepseek_key = st.sidebar.text_input("DeepSeek Key", value=get_secret("DEEPSEEK_API_KEY"), type="password")
-st.session_state.zai_key = st.sidebar.text_input("Z.ai (GLM) Key", value=get_secret("ZAI_API_KEY"), type="password")
 
 DEFAULT_WRITER_MODEL = "Claude 5.5 Opus"
 DEFAULT_EDITOR_MODEL = "DeepSeek V4.1 Flash (direct)"
@@ -4029,29 +3524,23 @@ if reset_col.button("Reset", key="reset_cost_counter", use_container_width=True)
     st.rerun()
 
 st.sidebar.markdown("---")
-try:
-    _hist_runs = history_totals()[0]
-except Exception:
-    _hist_runs = 0
 
-# Once per server process: jobs this instance was running when it last stopped carry on. Done
-# from the first page load, because that is the first moment the sidebar's keys exist.
+# Once per server process: jobs this instance was running when it last stopped carry on. Done from
+# the first page load - Streamlit runs no code of the app before someone opens it.
 _runner = job_runner()
 with _runner["lock"]:
     _resume_now = not _runner["resumed"]
     _runner["resumed"] = True
 if _resume_now:
     try:
-        _resumed = resume_interrupted_jobs(collect_api_keys())
+        _resumed = resume_interrupted_jobs()
         if _resumed:
             st.toast(f"Resumed {len(_resumed)} interrupted job(s): " + ", ".join(f"#{i}" for i in _resumed))
     except Exception as exc:
         st.sidebar.warning(f"Could not resume interrupted jobs: {exc}")
 
-try:
-    _active_jobs = count_active_jobs()
-except Exception:
-    _active_jobs = 0
+_db_label, _db_detail, _db_ok, _summary = history_backend_status()
+_hist_runs, _active_jobs = _summary["runs"], _summary["active_jobs"]
 if st.sidebar.button(f"🎥 Jobs ({_active_jobs} active)" if _active_jobs else "🎥 Jobs",
                      use_container_width=True,
                      help="Stories being written or re-edited in the background. They keep running when "
@@ -4064,7 +3553,6 @@ if st.sidebar.button(f"📚 Story History ({_hist_runs})", use_container_width=T
 
 # Where the history actually lives is worth stating on every screen. The original failure mode was
 # silent - an empty History looks identical to a working one that has nothing in it yet.
-_db_label, _db_detail, _db_ok = history_backend_status()
 if not _db_ok:
     st.sidebar.error(f"History storage: {_db_label}. Runs are NOT being saved. {_db_detail}")
 elif using_remote_db():
@@ -4073,20 +3561,18 @@ else:
     st.sidebar.caption("History: local file. On Streamlit Cloud this is wiped on every restart - "
                        "set TURSO_DATABASE_URL in secrets to keep it.")
 
-if st.sidebar.button("🎭 Premise Builder", use_container_width=True,
-                     help="Optional. Adapt a film/show/book summary into a Main Story Concept with your "
-                          "motifs folded in. Skip it whenever you'd rather write the concept yourself."):
-    open_premise_builder(st.session_state.step)
-    st.rerun()
-
 render_prompt_debug()
 
 if output_dir():
     st.sidebar.caption(f"Finished TTS files are saved to `{output_dir()}`.")
 
-# Sessions from before background jobs could still be parked on the old in-page writing step.
+# Sessions from older versions could still be parked on a step that no longer exists.
 if st.session_state.step in ("writing", "reedit"):
     st.session_state.step = "jobs"
+elif st.session_state.step == "premise":
+    st.session_state.step = "setup"
+if st.session_state.step != "history":
+    st.session_state.pop("history_export", None)   # a prepared export can be tens of MB
 
 if st.session_state.get("job_notice"):
     st.info(st.session_state.pop("job_notice"))
@@ -4238,15 +3724,7 @@ if st.session_state.step == "setup":
 
     st.markdown("---")
     st.subheader("4. Main Story Concept")
-    idea_col, tool_col = st.columns([4, 1])
-    manual_config['main_idea'] = idea_col.text_area("Main Story Idea / High-Level Concept", value=snapshot.get('main_idea', ''), height=100, placeholder="Describe the premise, specific plot hook, or character dynamics...")
-    tool_col.markdown("<br>", unsafe_allow_html=True)
-    if tool_col.button("🎭 Adapt a source", use_container_width=True,
-                       help="Optional: build this concept from a film/show/book summary plus your motifs. "
-                            "Everything you have set up so far is kept."):
-        save_setup_snapshot(manual_config, seed, pov, style_choice)
-        open_premise_builder("setup")
-        st.rerun()
+    manual_config['main_idea'] = st.text_area("Main Story Idea / High-Level Concept", value=snapshot.get('main_idea', ''), height=100, placeholder="Describe the premise, specific plot hook, or character dynamics...")
 
     st.markdown("---")
 
@@ -4348,7 +3826,7 @@ elif st.session_state.step == "casting":
 # Leaving it, closing the tab or the device going to sleep stops nothing.
 elif st.session_state.step == "job":
     job_id = st.session_state.get("active_job_id")
-    job = get_job(job_id) if job_id else None
+    job = get_job_light(job_id) if job_id else None
     if not job:
         st.session_state.step = "jobs"
         st.rerun()
@@ -4360,10 +3838,12 @@ elif st.session_state.step == "job":
 
     @st.fragment(run_every=JOB_POLL_SECONDS if job["status"] in JOB_ACTIVE else None)
     def job_monitor():
-        current = get_job(job_id)
+        current = get_job_light(job_id)
         if not current:
             return
         label = job_state_label(current)
+        if current["status"] != job["status"]:
+            refresh_summary()   # the sidebar's active-job count changed with it
         if label == "done" and open_job_result(current):
             st.rerun()
         if current["status"] != job["status"]:
@@ -4529,303 +4009,11 @@ elif st.session_state.step == "final":
             st.session_state.step = "history"
             st.rerun()
 
-# --- UI STEP (OPTIONAL): PREMISE BUILDER ---
-elif st.session_state.step == "premise":
-    st.title("🎭 Premise Builder")
-    st.caption(
-        "Optional. Turns a summary of an existing film, show or book into a Main Story Concept with your "
-        "motifs built into the plot rather than bolted onto it. Skip it whenever you'd rather write the "
-        "concept yourself — the setup screen is unchanged."
-    )
-
-    nav_col, model_col = st.columns([1, 3])
-    if nav_col.button("⬅️ Back", use_container_width=True):
-        st.session_state.step = st.session_state.get("premise_return_step", "setup")
-        st.rerun()
-    model_keys = list(MODELS.keys())
-    default_model = st.session_state.get("premise_model", st.session_state.writer_model)
-    premise_model = model_col.selectbox(
-        "Model for this step", model_keys,
-        index=model_keys.index(default_model) if default_model in model_keys else 0,
-        help="Independent of the Writer Model. Both calls here are small, so a cheap model is usually fine.",
-    )
-    st.session_state.premise_model = premise_model
-
-    # Streamlit drops the state of any widget that was not rendered on the previous run, so
-    # leaving this page for Setup and coming back would otherwise blank the whole form -
-    # including a long pasted summary. The values are mirrored into premise_form and re-seeded
-    # here, before any of the widgets below are instantiated.
-    form = st.session_state.setdefault("premise_form", {})
-
-    def seed_premise_widget(widget_key, default):
-        if widget_key not in st.session_state:
-            st.session_state[widget_key] = form.get(widget_key, default)
-
-    motif_options = load_list('fetishes.txt') if os.path.exists(CONFIG_DIR) else []
-    method_options = load_list('mc_methods.txt') if os.path.exists(CONFIG_DIR) else []
-
-    for _key, _default in (("prem_source_input", ""), ("prem_notes", ""), ("prem_custom", ""),
-                           ("prem_motifs", []), ("prem_methods", []), ("prem_deviation", "3 · Engine"),
-                           ("prem_ending", "Protagonist loses"), ("prem_recast", False)):
-        seed_premise_widget(_key, _default)
-    # A restored selection can name an option that has since been edited out of the config file,
-    # which a multiselect rejects outright.
-    st.session_state.prem_motifs = [m for m in st.session_state.prem_motifs if m in motif_options]
-    st.session_state.prem_methods = [m for m in st.session_state.prem_methods if m in method_options]
-    if st.session_state.prem_deviation not in DEVIATION_LEVELS:
-        st.session_state.prem_deviation = "3 · Engine"
-    if st.session_state.prem_ending not in ENDING_MODES:
-        st.session_state.prem_ending = "Protagonist loses"
-
-    src_col, opt_col = st.columns([3, 2])
-
-    with src_col:
-        st.subheader("Source")
-        summary = st.text_area(
-            "Summary of the film / show / book",
-            key="prem_source_input", height=280,
-            placeholder="Paste or write a plot summary. The more structure it contains — who wants what, who "
-                        "holds power, how it escalates, how it ends — the more places there are to fold the "
-                        "motifs into. A two-line logline gives the model nothing to work with.",
-        )
-        notes = st.text_area(
-            "Your direction (optional)", key="prem_notes", height=90,
-            placeholder="e.g. keep the heist structure but make the vault the conditioning suite; "
-                        "the sister should be the one who changes, not Ada.",
-            help="Overrides the model's own choices where they conflict.",
-        )
-
-    with opt_col:
-        st.subheader("What to fold in")
-        selected_motifs = st.multiselect(
-            "Motifs / Kinks", motif_options, max_selections=4, key="prem_motifs",
-            help="Each one gets its own prominence below — a garnish and a pillar are very different asks.",
-        )
-        motif_details = []
-        for motif in selected_motifs:
-            seed_premise_widget(f"prem_str_{motif}", "Thread")
-            if st.session_state[f"prem_str_{motif}"] not in PROMINENCE_LABELS:
-                st.session_state[f"prem_str_{motif}"] = "Thread"
-            label = st.select_slider(
-                f"Prominence — {motif.split(' (')[0]}", options=list(PROMINENCE_LABELS),
-                key=f"prem_str_{motif}",
-            )
-            motif_details.append({"name": motif, "strength": PROMINENCE_LABELS[label], "label": label})
-
-        selected_methods = st.multiselect(
-            "Transformation Mechanism", method_options, max_selections=2, key="prem_methods",
-            help="Leave empty to let the model pick whatever the source plot already supports.",
-        )
-        custom_raw = st.text_input(
-            "Custom motifs (comma separated)", key="prem_custom",
-            placeholder="anything not in the lists above",
-        )
-        custom_motifs = [m.strip() for m in custom_raw.split(",") if m.strip()]
-
-        st.markdown("---")
-        deviation = st.select_slider(
-            "Deviation from the source", options=list(DEVIATION_LEVELS.keys()), key="prem_deviation",
-        )
-        st.caption(DEVIATION_LEVELS[deviation]["caption"])
-
-        ending = st.selectbox(
-            "How it ends", list(ENDING_MODES.keys()), key="prem_ending",
-            help="Mainstream sources nearly always resolve upward. This overrides the source's ending "
-                 "without touching the road that leads to it.",
-        )
-        st.caption(ENDING_MODES[ending]["caption"])
-        recast_female = st.checkbox(
-            "Recast the protagonist as female", key="prem_recast",
-            help="Most sources lead with a man. This rewrites the lead as a woman - new name, pronouns and "
-                 "whatever the change forces - without softening her or touching the rest of the cast.",
-        )
-
-        if ending != "Follow the source" and deviation in ("1 · Subtext", "2 · Thread"):
-            st.caption("⚠️ At this deviation level every beat is meant to survive. The ending directive "
-                       "wins for the final beat only — everything before it still holds.")
-
-    form.update({
-        "prem_source_input": summary, "prem_notes": notes, "prem_custom": custom_raw,
-        "prem_motifs": list(selected_motifs), "prem_methods": list(selected_methods),
-        "prem_deviation": deviation, "prem_ending": ending, "prem_recast": recast_female,
-    })
-    for _m in motif_details:
-        form[f"prem_str_{_m['name']}"] = _m['label']
-
-    st.markdown("---")
-
-    skeleton = st.session_state.premise_skeleton
-    summary_hash = hashlib.sha1(summary.strip().encode('utf-8')).hexdigest() if summary.strip() else ""
-    analysis_fresh = bool(skeleton) and summary_hash == st.session_state.premise_skeleton_hash
-
-    b1, b2 = st.columns(2)
-    build = b1.button("⚙️ Build Premise", type="primary", use_container_width=True)
-    fuse_again = b2.button(
-        "🔁 Re-fuse (reuse analysis)", use_container_width=True, disabled=not analysis_fresh,
-        help="Skips the analysis call and only redoes the fusion — the cheap way to try different motifs "
-             "or a different deviation level against the same source.",
-    )
-    if analysis_fresh:
-        st.caption("Source already analysed. Re-fuse costs one call instead of two.")
-
-    if build or fuse_again:
-        if len(summary.strip()) < 120:
-            st.error("That summary is too thin to adapt. Give it at least a paragraph — ideally who wants "
-                     "what, what opposes them, and how it ends.")
-        elif not (motif_details or custom_motifs or selected_methods or notes.strip()):
-            st.error("Nothing to fold in. Pick at least one motif, mechanism, or write some direction.")
-        else:
-            failed = False
-            if build and not analysis_fresh:
-                with st.spinner("Analysing the source structure..."):
-                    skeleton = generate_source_skeleton(summary, premise_model)
-                if "error" in skeleton:
-                    st.error(f"Analysis failed: {skeleton['error']}")
-                    failed = True
-                else:
-                    st.session_state.premise_skeleton = skeleton
-                    st.session_state.premise_skeleton_hash = summary_hash
-                    st.session_state.premise_source = summary
-
-            if not failed:
-                source_text = st.session_state.premise_source or summary
-                with st.spinner("Folding the motifs into the plot..."):
-                    result = generate_fused_premise(
-                        source_text, skeleton, build_motif_lines(motif_details, custom_motifs),
-                        selected_methods, deviation, ending, notes, premise_model, recast_female,
-                    )
-                if "error" in result:
-                    st.error(f"Fusion failed: {result['error']}")
-                else:
-                    result["deviation"] = deviation
-                    result["ending"] = ending
-                    result["recast_female"] = recast_female
-                    st.session_state.premise_result = result
-                    # The cast was derived from the premise that just got replaced.
-                    st.session_state.premise_cast = None
-                    # Safe to assign: the widget below has not been instantiated yet this run.
-                    st.session_state.prem_text = result["premise"]
-
-    result = st.session_state.premise_result
-    if not result:
-        st.info("Nothing built yet. Paste a summary, pick your motifs, and press **Build Premise**.")
-    else:
-        st.markdown("---")
-        st.subheader("Premise")
-        recast_note_ui = " · protagonist recast as female" if result.get("recast_female") else ""
-        st.caption(f"Built at deviation level **{result.get('deviation', '—')}**, "
-                   f"ending: **{result.get('ending', 'Follow the source')}**{recast_note_ui}. "
-                   "Edit freely — what is in this box is what gets sent to Setup.")
-        # Same widget-state cleanup as the form above: a round trip to Setup would empty this box
-        # while premise_result still holds the text.
-        if "prem_text" not in st.session_state:
-            st.session_state.prem_text = result["premise"]
-        st.text_area("Main Story Concept", key="prem_text", height=260, label_visibility="collapsed")
-
-        a1, a2, a3 = st.columns(3)
-        if a1.button("📋 Send premise only", use_container_width=True,
-                     help="Fills the Main Story Concept box and leaves every other setup field as you had it."):
-            push_premise_to_setup(st.session_state.prem_text)
-            st.session_state.step = "setup"
-            st.rerun()
-        a2.download_button(
-            "⬇️ Download (.txt)", st.session_state.get("prem_text", ""),
-            file_name="premise.txt", use_container_width=True,
-        )
-        if a3.button("🗑️ Discard", use_container_width=True,
-                     help="Clears this result. The source analysis is kept, so re-fusing stays cheap."):
-            st.session_state.premise_result = None
-            st.session_state.premise_cast = None
-            st.rerun()
-
-        # --- Setup pre-fill (stage C) ---
-        st.markdown("---")
-        st.subheader("Setup pre-fill")
-        cast = st.session_state.premise_cast
-        st.caption("Optional second step: read the premise above and fill in the cast, genre, mechanism, "
-                   "POV and pacing on the setup screen. Derive it after any edits you make — it reads the "
-                   "box above, not the original generation.")
-
-        if st.button("🎬 Derive cast & settings from this premise", use_container_width=True):
-            snapshot_chapters = _clamp_int(
-                (st.session_state.get("setup_snapshot") or {}).get("num_chapters"), 3, 15, 7)
-            with st.spinner("Casting the premise..."):
-                derived = generate_setup_cast(
-                    st.session_state.prem_text, st.session_state.premise_skeleton,
-                    build_motif_lines(motif_details, custom_motifs), premise_model,
-                    num_chapters=snapshot_chapters, recast_female=recast_female,
-                )
-            if "error" in derived:
-                st.error(f"Casting failed: {derived['error']}")
-            else:
-                derived["source_hash"] = hashlib.sha1(
-                    st.session_state.prem_text.strip().encode('utf-8')).hexdigest()
-                st.session_state.premise_cast = derived
-                cast = derived
-
-        if cast:
-            current_hash = hashlib.sha1(st.session_state.prem_text.strip().encode('utf-8')).hexdigest()
-            if cast.get("source_hash") and cast["source_hash"] != current_hash:
-                st.warning("The premise has been edited since this cast was derived. Derive it again "
-                           "if the edits changed the cast, the setting or the mechanism.")
-            c_left, c_right = st.columns(2)
-            with c_left:
-                st.markdown(
-                    f"- **Genre:** {cast['genre'] or 'Random'}\n"
-                    f"- **Mechanism:** {cast['mc_method'] or 'Random'}\n"
-                    f"- **POV:** {cast['pov']}\n"
-                    f"- **Pacing:** {cast['pacing']}\n"
-                    f"- **Onset:** {cast['transform_onset']} ({cast.get('onset_label', 'Mid')})"
-                )
-                antag = cast['antagonist']
-                if antag.get('include'):
-                    st.markdown(f"- **Antagonist:** {antag['name'] or 'Unnamed'} ({antag['gender']})"
-                                + (f" — {antag['info']}" if antag.get('info') else ""))
-                else:
-                    st.markdown("- **Antagonist:** none (the opposing force is not a person)")
-            with c_right:
-                for p in cast['protagonists']:
-                    st.markdown(f"**{p['name'] or 'Unnamed'}** ({p['gender']}) — changes: {p['change_type']}")
-                    if p.get('info'):
-                        st.caption(p['info'])
-                    if p.get('kinks'):
-                        st.caption(f"Kinks: {format_kink_list(p['kinks'])}")
-                    if p.get('body_details'):
-                        st.caption("Body: " + "; ".join(
-                            f"{b['part']} [{b['intensity']}]" + (f" ({b['remark']})" if b['remark'] else "")
-                            for b in p['body_details']
-                        ))
-
-            st.caption("Anything here can still be changed on the setup screen — this only pre-selects it. "
-                       "Chapter count, word count and style are left alone.")
-            if st.button("🎬 Send premise + setup", type="primary", use_container_width=True):
-                push_cast_to_setup(st.session_state.prem_text, cast)
-                st.session_state.step = "setup"
-                st.rerun()
-
-        if result.get("substitutions"):
-            with st.expander("Substitutions — what became what", expanded=True):
-                st.caption("Each motif should have taken over a job the original plot already needed doing. "
-                           "A motif that shows up here as a brand-new element was added, not integrated.")
-                st.text(result["substitutions"])
-        if result.get("changes"):
-            with st.expander("Changes a reader of the original would notice", expanded=False):
-                st.markdown(result["changes"])
-        # Read from session rather than the local: a failed analysis leaves an error dict here,
-        # which would render as an empty expander.
-        stored_skeleton = st.session_state.premise_skeleton or {}
-        if any(stored_skeleton.get(tag) for tag in PREMISE_SKELETON_TAGS):
-            with st.expander("Source skeleton (from the analysis pass)", expanded=False):
-                for tag in PREMISE_SKELETON_TAGS:
-                    if stored_skeleton.get(tag):
-                        st.markdown(f"**{tag.replace('_', ' ').title()}**")
-                        st.text(stored_skeleton[tag])
-
 # --- UI STEP 5: HISTORY ---
 elif st.session_state.step == "history":
     st.title("📚 Story History")
 
-    runs, total_cost, total_words = history_totals()
+    runs, total_cost, total_words = _summary["runs"], _summary["cost"], _summary["words"]
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Runs saved", f"{runs:,}")
     m2.metric("Words written", f"{total_words:,}")
@@ -4842,14 +4030,25 @@ elif st.session_state.step == "history":
                    "a local file and a hosted database in either direction, so it doubles as the way to "
                    "migrate history onto Turso.")
         bk_l, bk_r = st.columns(2)
-        try:
-            bk_l.download_button(
-                f"⬇️ Export all ({runs:,} runs)", export_history_payload(),
+        # Built on request only. A download button needs its data up front, and handing it the export
+        # directly pulled every manuscript out of the database on every History rerun - over 20 MB
+        # and several seconds per click.
+        export = st.session_state.get("history_export")
+        if export is None:
+            if bk_l.button(f"📦 Prepare export ({runs:,} runs)", use_container_width=True, disabled=not runs):
+                try:
+                    with st.spinner("Collecting every run..."):
+                        st.session_state.history_export = export_history_payload()
+                    st.rerun()
+                except Exception as exc:
+                    bk_l.error(f"Export failed: {exc}")
+        else:
+            if bk_l.download_button(
+                f"⬇️ Download export ({len(export) / 1e6:.1f} MB)", export,
                 file_name=f"metadigm_history_{datetime.date.today().isoformat()}.json",
-                mime="application/json", use_container_width=True, disabled=not runs,
-            )
-        except Exception as exc:
-            bk_l.error(f"Export failed: {exc}")
+                mime="application/json", use_container_width=True,
+            ):
+                st.session_state.pop("history_export", None)
 
         upload = bk_r.file_uploader("Restore from an export", type=["json"], key="history_restore")
         if upload is not None:

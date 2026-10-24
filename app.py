@@ -15,6 +15,10 @@ import difflib
 import sqlite3
 import datetime
 import hashlib
+import socket
+import threading
+import traceback
+import uuid
 import warnings
 
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -147,7 +151,8 @@ def session_name_pool():
 def story_name_pool(d):
     """The dossier's pool; dossiers saved before pools existed get one on first use."""
     if not d.get("name_pool"):
-        d["name_pool"] = session_name_pool()
+        # A job thread has no session to share a pool with; the dossier keeps whatever it draws.
+        d["name_pool"] = draw_name_pool() if in_worker() else session_name_pool()
     return d["name_pool"]
 
 
@@ -266,6 +271,58 @@ def get_secret(key_name):
     except: return ""
 
 
+# --- CALL RUNTIME ---
+# call_api is used from two places: the UI script (dossier, outline, premise builder) and the
+# background job threads that write and edit whole stories. A job thread has no Streamlit session,
+# so everything a call needs from "outside" - API keys, where spend is counted, where debug output
+# and warnings go - comes from a runtime object instead of st.session_state directly.
+
+# Session-state field holding each vendor's key, as the sidebar fills it.
+VENDOR_KEY_FIELDS = {
+    "anthropic": "anthropic_key", "google": "google_key", "mistral": "mistral_key", "xai": "xai_key",
+    "kimi": "kimi_key", "openrouter": "openrouter_key", "deepseek": "deepseek_key", "zai": "zai_key",
+}
+
+_worker_ctx = threading.local()
+
+
+class SessionRuntime:
+    """Calls made by the UI script: keys from the sidebar, spend into the session counter."""
+
+    @property
+    def state(self):
+        return st.session_state
+
+    def key(self, vendor):
+        return st.session_state.get(VENDOR_KEY_FIELDS.get(vendor, ""), "") or ""
+
+    def warn(self, message):
+        st.warning(message)
+
+
+class JobRuntime:
+    """Calls made by a job thread: keys handed over when the job started, spend into the job."""
+
+    def __init__(self, keys, stats, warn):
+        self.state = {"stats": stats}
+        self._keys = keys
+        self._warn = warn
+
+    def key(self, vendor):
+        return self._keys.get(vendor, "") or ""
+
+    def warn(self, message):
+        self._warn(message)
+
+
+def runtime():
+    return getattr(_worker_ctx, "rt", None) or SessionRuntime()
+
+
+def in_worker():
+    return getattr(_worker_ctx, "rt", None) is not None
+
+
 # --- STORY HISTORY (SQLite) ---
 # Every finished run is written to data/history.db so a draft can be reopened, re-edited
 # with a different model, or used as the starting point for a fresh generation.
@@ -306,6 +363,32 @@ CREATE TABLE IF NOT EXISTS stories (
     notes              TEXT DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_stories_created ON stories(created_at DESC);
+"""
+
+# Background writing and editing runs. Kept out of HISTORY_SCHEMA because init_history_db adds
+# missing columns by reading that schema line by line, and every line there is a stories column.
+# state_json is the checkpoint a run resumes from; owner/run_token say which app instance and which
+# process are running it, so two instances sharing one database never run the same job.
+JOBS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS jobs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind          TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    title         TEXT,
+    owner         TEXT,
+    run_token     TEXT,
+    created_at    TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    progress      REAL DEFAULT 0,
+    phase         TEXT DEFAULT '',
+    log_json      TEXT DEFAULT '[]',
+    payload_json  TEXT,
+    state_json    TEXT DEFAULT '{}',
+    stats_json    TEXT DEFAULT '{}',
+    story_id      INTEGER,
+    error         TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 """
 
 LIST_COLUMNS = (
@@ -359,7 +442,7 @@ def _rows_as_dicts(cursor, rows):
 def init_history_db():
     conn = _open_connection()
     try:
-        conn.executescript(HISTORY_SCHEMA)
+        conn.executescript(HISTORY_SCHEMA + JOBS_SCHEMA)
         # Tolerate an older database created before a column was added.
         existing = {row[1] for row in conn.execute("PRAGMA table_info(stories)").fetchall()}
         for line in HISTORY_SCHEMA.splitlines():
@@ -376,7 +459,10 @@ def init_history_db():
 
 
 def _db(sql, params=(), fetch=None):
-    init_history_db()
+    # The UI creates the tables before any job can start, so a job thread skips the cached
+    # init - Streamlit's caches expect to be called from a script run.
+    if not in_worker():
+        init_history_db()
     conn = _open_connection()
     try:
         cur = conn.execute(sql, params)
@@ -500,22 +586,25 @@ def _dossier_for_storage(dossier):
     return slim
 
 
-def persist_current_run(origin="generated", parent_id=None, stats_delta=None):
-    d = st.session_state.get('dossier') or {}
-    cfg = st.session_state.get('setup_snapshot') or st.session_state.get('manual_config') or {}
-    report = st.session_state.get('editor_report') or {}
-    raw = st.session_state.get('original_story', '') or ''
-    final = st.session_state.get('final_story', '') or ''
-    spend = stats_delta or st.session_state.get('stats', {})
+def save_run(*, origin, parent_id, dossier, cfg, report, raw, final, rejected, issues, spend,
+             seed, attempt, writer_model):
+    """Write one finished run to history. Takes everything explicitly - it runs in job threads,
+    which have no session to read from. Returns the new row id."""
+    d = dossier or {}
+    cfg = cfg or {}
+    report = report or {}
+    raw = raw or ''
+    final = final or ''
+    spend = spend or {}
     now = datetime.datetime.now().isoformat(timespec='seconds')
 
     record = {
         "created_at": now, "updated_at": now, "origin": origin, "parent_id": parent_id,
-        "title": d.get('name') or st.session_state.get('seed', '') or "Untitled",
-        "seed": st.session_state.get('seed', ''),
-        "attempt": int(st.session_state.get('attempt', 0) or 0),
+        "title": d.get('name') or seed or "Untitled",
+        "seed": seed or '',
+        "attempt": int(attempt or 0),
         "genre": d.get('genre', ''),
-        "writer_model": st.session_state.get('writer_model', ''),
+        "writer_model": writer_model or '',
         "editor_model": report.get('model', ''),
         "editor_enabled": int(bool(report.get('used'))),
         "editor_mode": report.get('mode', ''),
@@ -531,21 +620,14 @@ def persist_current_run(origin="generated", parent_id=None, stats_delta=None):
         "tokens_out": int(spend.get('output', 0)),
         "cost": float(spend.get('cost', 0.0)),
         "raw_story": raw, "final_story": final,
-        "rejected_edit": st.session_state.get('rejected_edit', '') or '',
+        "rejected_edit": rejected or '',
         "dossier_json": json.dumps(_dossier_for_storage(d), default=str),
         "config_json": json.dumps(cfg, default=str),
         "editor_report_json": json.dumps(report, default=str),
-        "editor_issues_json": json.dumps(st.session_state.get('editor_issues', []), default=str),
+        "editor_issues_json": json.dumps(issues or [], default=str),
         "notes": "",
     }
     return save_story(record)
-
-
-def stats_since(baseline):
-    """Spend accumulated since a snapshot of st.session_state.stats."""
-    now = st.session_state.get('stats', {})
-    base = baseline or {}
-    return {k: now.get(k, 0) - base.get(k, 0) for k in ("input", "output", "cost")}
 
 
 # A restored row may predate a schema or UI change, so every field the setup and casting
@@ -571,8 +653,8 @@ def _clamp_int(value, low, high, fallback):
         return fallback
 
 
-def restore_dossier_into_session(row):
-    """Put a stored run's premise and setup back into session state."""
+def dossier_from_row(row):
+    """A stored run's (dossier, setup config), defaulted and clamped, style example reloaded."""
     dossier = {**DOSSIER_DEFAULTS, **json.loads(row["dossier_json"] or "{}")}
     cfg = json.loads(row["config_json"] or "{}")
 
@@ -591,15 +673,17 @@ def restore_dossier_into_session(row):
         dossier['style_guide'] = load_file_content(
             os.path.join(CONFIG_DIR, cfg.get('style_file', 'style_gritty.txt'))
         ) or "Write normally."
+    return dossier, cfg
 
+
+def restore_dossier_into_session(row):
+    """Put a stored run's premise and setup back into session state."""
+    dossier, cfg = dossier_from_row(row)
     st.session_state.dossier = dossier
     st.session_state.manual_config = cfg
     st.session_state.setup_snapshot = cfg
     st.session_state.seed = row["seed"] or "Paradigm"
     st.session_state.attempt = int(row["attempt"] or 0)
-    for key in ["gen_full_narrative", "gen_raw_story", "gen_state_log",
-                "gen_last_chapter_text", "gen_chapter_index", "gen_stats_start"]:
-        st.session_state.pop(key, None)
 
 
 def restore_run_into_session(row):
@@ -956,9 +1040,11 @@ def track_cost(in_tok, out_tok, model_config, cache_write=0, cache_read=0):
     be added explicitly or the running total silently under-reports."""
     # A finished run leaves its total on screen until the next paid call, whichever screen
     # that comes from (setup, premise builder, rewrite, re-edit) - that call starts a new count.
-    if st.session_state.get("cost_reset_pending"):
+    # A job thread counts into its own stats and never has this flag.
+    state = runtime().state
+    if state.get("cost_reset_pending"):
         reset_cost_counter()
-    stats = st.session_state.stats
+    stats = state["stats"]
     stats['input'] += in_tok + cache_write + cache_read
     stats['output'] += out_tok
     price_in, price_out = current_prices(model_config, in_tok + cache_write + cache_read)
@@ -1784,22 +1870,24 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
         """
         sys_prompt = base_sys_prompt + "\n\n" + style_guide + style_example_block + ("\n\n" + MISTRAL_NSFW_ADDENDUM if vendor == 'mistral' else "")
 
-    st.session_state.last_sys_prompt = sys_prompt
-    st.session_state.last_user_prompt = prompt
-    st.session_state.last_raw_response = ""
-    st.session_state.last_api_payload = ""
-    st.session_state.last_truncated = False
+    rt = runtime()
+    state = rt.state
+    state["last_sys_prompt"] = sys_prompt
+    state["last_user_prompt"] = prompt
+    state["last_raw_response"] = ""
+    state["last_api_payload"] = ""
+    state["last_truncated"] = False
 
     def flag_truncation(was_cut):
         """Record a max_tokens cut-off so the caller can retry instead of shipping half a chapter."""
-        st.session_state.last_truncated = bool(was_cut)
+        state["last_truncated"] = bool(was_cut)
         if was_cut and warn_truncated:
-            st.warning(f"{model_key} hit its {max_tokens:,}-token output limit and was cut off mid-text.")
+            rt.warn(f"{model_key} hit its {max_tokens:,}-token output limit and was cut off mid-text.")
         return was_cut
 
     try:
         if vendor == 'anthropic':
-            client = anthropic.Anthropic(api_key=st.session_state.anthropic_key, timeout=1800.0)
+            client = anthropic.Anthropic(api_key=rt.key('anthropic'), timeout=1800.0)
             # The system block is identical across every call in a run (persona + rules +
             # style reference), so caching it turns ~7 full-price sends into 1 write and 6
             # reads at a tenth of the price. Caching is a PREFIX match: the moment anything
@@ -1831,14 +1919,14 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
             )
             flag_truncation(getattr(resp, "stop_reason", None) == "max_tokens")
             try:
-                st.session_state.last_raw_response = json.dumps(resp.__dict__, default=str, indent=2)
+                state["last_raw_response"] = json.dumps(resp.__dict__, default=str, indent=2)
             except Exception:
-                st.session_state.last_raw_response = str(resp)
-            st.session_state.last_api_payload = json.dumps({"model": m_cfg['id'], "system": sys_prompt, "messages": [{"role": "user", "content": prompt}]}, indent=2)
+                state["last_raw_response"] = str(resp)
+            state["last_api_payload"] = json.dumps({"model": m_cfg['id'], "system": sys_prompt, "messages": [{"role": "user", "content": prompt}]}, indent=2)
             return extract_anthropic_message_text(resp)
 
         elif vendor == 'google':
-            genai.configure(api_key=st.session_state.google_key)
+            genai.configure(api_key=rt.key('google'))
             model = genai.GenerativeModel(model_name=m_cfg['id'], system_instruction=sys_prompt)
             safe = [{"category": c, "threshold": "BLOCK_NONE"} for c in [
                 "HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_SEXUALLY_EXPLICIT",
@@ -1872,8 +1960,8 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
                     raw = json.dumps(resp.to_dict(), default=str, indent=2)
                 except Exception:
                     raw = str(resp)
-            st.session_state.last_raw_response = raw
-            st.session_state.last_api_payload = json.dumps({"model": m_cfg['id'], "system_instruction": sys_prompt, "prompt": prompt, "generation_config": {"temperature": 1.0, "max_output_tokens": max_tokens}}, indent=2)
+            state["last_raw_response"] = raw
+            state["last_api_payload"] = json.dumps({"model": m_cfg['id'], "system_instruction": sys_prompt, "prompt": prompt, "generation_config": {"temperature": 1.0, "max_output_tokens": max_tokens}}, indent=2)
             try:
                 finish = str(getattr(resp.candidates[0], 'finish_reason', '')).upper()
             except Exception:
@@ -1890,15 +1978,7 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
                 'deepseek': "https://api.deepseek.com/chat/completions",
                 'zai': "https://api.z.ai/api/paas/v4/chat/completions"
             }
-            api_keys = {
-                'mistral': st.session_state.mistral_key,
-                'xai': st.session_state.xai_key,
-                'kimi': st.session_state.kimi_key,
-                'openrouter': st.session_state.openrouter_key,
-                'deepseek': st.session_state.deepseek_key,
-                'zai': st.session_state.zai_key
-            }
-            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_keys[vendor]}"}
+            headers = {"Content-Type": "application/json", "Authorization": f"Bearer {rt.key(vendor)}"}
             payload = {
                 "model": m_cfg['id'],
                 "messages": [{"role": "system", "content": sys_prompt}, {"role": "user", "content": prompt}],
@@ -1920,8 +2000,8 @@ def call_api(prompt, model_key, style_guide="", style_example="", is_editor=Fals
                 del payload["max_tokens"]
 
             response = requests.post(endpoints[vendor], headers=headers, json=payload, timeout=600)
-            st.session_state.last_api_payload = json.dumps(payload, indent=2)
-            st.session_state.last_raw_response = response.text
+            state["last_api_payload"] = json.dumps(payload, indent=2)
+            state["last_raw_response"] = response.text
             if response.status_code != 200:
                 return f"API ERROR: HTTP {response.status_code} - {response.text}"
             data = response.json()
@@ -2002,7 +2082,7 @@ def call_api_complete(prompt, model_key, max_tokens, retries=1, status_cb=None, 
             if status_cb:
                 status_cb(f"blocked by the safety filter, retrying ({block_try}/{SAFETY_RETRIES})")
             text = call_api(prompt, model_key, max_tokens=budget, warn_truncated=False, **kwargs)
-        truncated = bool(st.session_state.get("last_truncated"))
+        truncated = bool(runtime().state.get("last_truncated"))
         if not truncated or (text or "").startswith("API ERROR"):
             break
         bigger = min(cap, budget * 2)
@@ -2154,43 +2234,34 @@ def run_editor_block(block_text, label, cfg, model_key, style_example="", two_pa
     return edited, info
 
 
-EDITOR_CHECKPOINT_KEY = "editor_checkpoint"
-REEDIT_CHECKPOINT_KEY = "reedit_checkpoint"   # separate, so a re-edit never clobbers a writing run's
+def _editor_checkpoint(stored, raw_story, model_key, mode):
+    """Continue the stored resume record for a per-chapter editor pass, or start a fresh one.
 
-
-def _editor_checkpoint(key, raw_story, model_key, mode):
-    """Fetch (or start) the resume record for a per-chapter editor pass.
-
-    Streamlit restarts the whole script on any rerun - a widget touch, a websocket
-    reconnect, a source-file save with 'run on save' enabled. The chapter WRITER survives
-    that because it checkpoints after every chapter; without this the editor would start
-    again at chapter 1 and re-spend every token already paid for.
+    A job can be interrupted mid-pass (the app restarting, a failed call). Without this record
+    the editor would start again at chapter 1 and re-spend every token already paid for.
 
     The signature covers the draft, the editor model and the scope: resuming across a
     different manuscript or a Per Chapter / Whole Manuscript switch would splice together
-    incompatible work, so those start fresh. Intensity and effort deliberately are NOT in
-    it - changing them mid-run applies to the chapters still to come and keeps the rest.
+    incompatible work, so those start fresh.
     """
     signature = hashlib.sha256(
         f"{model_key}|{mode}|{raw_story}".encode('utf-8', 'ignore')
     ).hexdigest()
-    stored = st.session_state.get(key)
     if isinstance(stored, dict) and stored.get("signature") == signature:
         return stored
-    fresh = {"signature": signature, "index": 0, "chapters": [], "infos": [],
-             "issue_log": [], "prev_tail": ""}
-    st.session_state[key] = fresh
-    return fresh
+    return {"signature": signature, "index": 0, "chapters": [], "infos": [],
+            "issue_log": [], "prev_tail": ""}
 
 
 def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_pass,
                     style_example="", status_cb=None, progress_cb=None,
                     diagnose_effort=None, rewrite_effort=None, min_ratio=0.5,
-                    keep_raw_when_short=True, checkpoint_key=EDITOR_CHECKPOINT_KEY, targeted=False):
+                    keep_raw_when_short=True, checkpoint=None, save_checkpoint=None, targeted=False):
     """Run a full editor pass over an assembled manuscript.
 
-    Shared by the writing step and the history page's re-edit action, so a stored draft
-    can be re-edited with different settings without regenerating the prose.
+    Shared by writing jobs and re-edit jobs, so a stored draft can be re-edited with different
+    settings without regenerating the prose. With `save_checkpoint`, progress is handed to it
+    after every chapter, and passing that record back as `checkpoint` resumes where it stopped.
     Returns (final_story, report, rejected_text, issue_log).
     """
     def say(msg):
@@ -2216,7 +2287,7 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
         report["message"] = "No chapter headings were found, so the manuscript was edited in one pass. "
 
     if per_chapter:
-        ckpt = _editor_checkpoint(checkpoint_key, raw_story, model_key, mode) if checkpoint_key else None
+        ckpt = _editor_checkpoint(checkpoint, raw_story, model_key, mode) if save_checkpoint else None
         edited_chapters = list(ckpt["chapters"]) if ckpt else []
         chapter_infos = list(ckpt["infos"]) if ckpt else []
         issue_log = list(ckpt["issue_log"]) if ckpt else []
@@ -2263,10 +2334,7 @@ def run_editor_pass(raw_story, original_story, model_key, mode, intensity, two_p
             if ckpt is not None:
                 ckpt.update(index=idx, chapters=edited_chapters, infos=chapter_infos,
                             issue_log=issue_log, prev_tail=prev_tail)
-                st.session_state[checkpoint_key] = ckpt
-
-        if checkpoint_key:
-            st.session_state.pop(checkpoint_key, None)
+                save_checkpoint(ckpt)
 
         assembled = "\n\n".join(edited_chapters)
         if preamble:
@@ -3301,13 +3369,528 @@ def push_premise_to_setup(text):
 
 
 def open_premise_builder(return_step):
-    # "writing" resumes generation the moment it renders, so it must never be a Back target -
-    # the user would press Back and find a run restarting under them. Casting is the step they
-    # can safely re-launch from.
-    if return_step in ("writing", "premise"):
+    # Back from the builder lands on the page it was opened from, except the builder itself.
+    if return_step == "premise":
         return_step = "casting" if st.session_state.get("dossier") else "setup"
     st.session_state.premise_return_step = return_step
     st.session_state.step = "premise"
+
+
+# --- BACKGROUND JOBS ---
+# Writing a story and editing it take long enough that the browser cannot be trusted to stay
+# connected: a phone screen turning off or a laptop going to standby ends the Streamlit session, and
+# anything running inside that session's script run dies with it. So writing and re-editing run as
+# jobs: a row in the jobs table plus a thread in the server process. The thread belongs to the
+# server, not to a browser tab, and saves a checkpoint after every chapter, so:
+# - closing the tab or losing the connection changes nothing; the job keeps going,
+# - when the server process restarts, the job resumes from its last checkpoint the next time the
+#   app is opened, and only the chapter in progress is paid for twice.
+#
+# Several app instances (the desktop and Streamlit Cloud) may share one database. Each job records
+# the instance that runs it (`owner`, from INSTANCE_NAME) and the process (`run_token`); an
+# instance only resumes its own jobs, and every write a job thread makes is conditional on still
+# holding the token, so two processes can never run the same job.
+
+JOB_ACTIVE = ("running", "cancelling")
+JOB_POLL_SECONDS = 3
+EMPTY_STATS = {"input": 0, "output": 0, "cost": 0.0, "cache_read": 0, "cache_saved": 0.0}
+
+
+def instance_name():
+    """Identifies this app instance in the shared jobs table. Set INSTANCE_NAME (e.g. "desktop",
+    "cloud") so it stays the same across restarts; the hostname is the fallback."""
+    return (get_secret("INSTANCE_NAME") or os.environ.get("INSTANCE_NAME")
+            or socket.gethostname() or "local").strip()
+
+
+def output_dir():
+    """Folder that finished TTS files are written to. Unset (e.g. on Streamlit Cloud) = no export."""
+    return (get_secret("OUTPUT_DIR") or os.environ.get("OUTPUT_DIR") or "").strip()
+
+
+class JobCancelled(Exception):
+    """The job was cancelled, or another process took it over."""
+
+
+class JobFailed(Exception):
+    """The job cannot continue; its checkpoint is kept so it can be resumed."""
+
+
+def _now():
+    return datetime.datetime.now().isoformat(timespec='seconds')
+
+
+def create_job(kind, title, payload):
+    now = _now()
+    return _db("INSERT INTO jobs (kind, status, title, owner, created_at, updated_at, payload_json) "
+               "VALUES (?, 'running', ?, ?, ?, ?, ?)",
+               (kind, title, instance_name(), now, now, json.dumps(payload, default=str)))
+
+
+def _parse_job(row):
+    if not row:
+        return None
+    job = dict(row)
+    for field, default in (("payload_json", {}), ("state_json", {}), ("stats_json", {}), ("log_json", [])):
+        try:
+            job[field[:-5]] = json.loads(job.get(field) or "null") or default
+        except json.JSONDecodeError:
+            job[field[:-5]] = default
+    job["stats"] = {**EMPTY_STATS, **job["stats"]}
+    return job
+
+
+def get_job(job_id):
+    return _parse_job(_db("SELECT * FROM jobs WHERE id = ?", (job_id,), fetch='one'))
+
+
+def list_jobs(limit=25):
+    # The light columns only: payloads carry the whole dossier, checkpoints the whole draft.
+    rows = _db("SELECT id, kind, status, title, owner, run_token, created_at, updated_at, progress, "
+               "phase, stats_json, story_id, error FROM jobs ORDER BY id DESC LIMIT ?",
+               (limit,), fetch='all') or []
+    return [_parse_job(r) for r in rows]
+
+
+def count_active_jobs():
+    row = _db("SELECT COUNT(*) AS n FROM jobs WHERE status IN ('running', 'cancelling')", fetch='one')
+    return row["n"] if row else 0
+
+
+def set_job_status(job_id, status):
+    _db("UPDATE jobs SET status = ?, updated_at = ? WHERE id = ?", (status, _now(), job_id))
+
+
+@st.cache_resource(show_spinner=False)
+def job_runner():
+    """One per server process, shared by every session and rerun. Its token marks the jobs this
+    process is running; the threads map is how a process tells its own live jobs apart."""
+    return {"token": uuid.uuid4().hex, "threads": {}, "lock": threading.Lock(), "resumed": False}
+
+
+def job_is_live(job):
+    """Running right now in this process."""
+    runner = job_runner()
+    thread = runner["threads"].get(job["id"])
+    return bool(thread and thread.is_alive() and job.get("run_token") == runner["token"])
+
+
+def job_state_label(job):
+    """What the job is actually doing - status alone cannot tell a live job from one whose
+    process died."""
+    if job["status"] not in JOB_ACTIVE:
+        return job["status"]
+    if job.get("owner") and job["owner"] != instance_name():
+        return f"on {job['owner']}"
+    if job_is_live(job):
+        return job["status"]
+    return "interrupted"
+
+
+class JobReporter:
+    """A job thread's channel to the jobs row: progress, log, checkpoint, cancellation."""
+
+    def __init__(self, job_id, token, stats, log):
+        self.job_id = job_id
+        self.token = token
+        self.stats = stats
+        self.entries = list(log or [])
+
+    def _update(self, **fields):
+        fields["updated_at"] = _now()
+        assignments = ", ".join(f"{k} = ?" for k in fields)
+        _db(f"UPDATE jobs SET {assignments} WHERE id = ? AND run_token = ?",
+            tuple(fields.values()) + (self.job_id, self.token))
+
+    def check(self):
+        row = _db("SELECT status, run_token FROM jobs WHERE id = ?", (self.job_id,), fetch='one')
+        if not row or row["run_token"] != self.token:
+            raise JobCancelled("Another process took this job over.")
+        if row["status"] == "cancelling":
+            raise JobCancelled("Cancelled.")
+
+    def status(self, message):
+        """Called before every API call, which makes it the place a cancel request is noticed."""
+        self.check()
+        self._update(phase=message, stats_json=json.dumps(self.stats))
+
+    def progress(self, fraction):
+        self._update(progress=round(min(1.0, max(0.0, fraction)), 4))
+
+    def log(self, message, level="info"):
+        self.entries = (self.entries + [{"t": _now(), "level": level, "msg": message}])[-200:]
+        self._update(log_json=json.dumps(self.entries))
+
+    def checkpoint(self, state):
+        self._update(state_json=json.dumps(state, default=str), stats_json=json.dumps(self.stats))
+
+    def finish(self, status, story_id=None, error=""):
+        fields = {"status": status, "error": error, "stats_json": json.dumps(self.stats)}
+        if status == "done":
+            fields.update(progress=1.0, story_id=story_id, phase="Finished")
+        self._update(**fields)
+
+
+def parse_arc(d):
+    """The outline as [(chapter heading, beats)], or a plain arc when there is none."""
+    arc, current_title, current_desc = [], None, []
+    for line in (d.get('arc_proposal') or '').split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        if line.upper().startswith("CHAPTER"):
+            if current_title:
+                arc.append((current_title, "\n".join(current_desc)))
+            current_title, current_desc = line, []
+        else:
+            current_desc.append(line)
+    if current_title:
+        arc.append((current_title, "\n".join(current_desc)))
+    return arc or [(f"CHAPTER {i+1}", "Progress the narrative gradually.") for i in range(d.get('num_chapters', 7))]
+
+
+def export_tts(story_id, title, text):
+    """Write the finished story's TTS text into OUTPUT_DIR. Returns the path, or None when no
+    folder is configured."""
+    folder = output_dir()
+    if not folder:
+        return None
+    safe = re.sub(r'[^\w\- ]+', '', title or '').strip().replace(' ', '_')[:60] or "story"
+    folder = os.path.expanduser(folder)
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"{datetime.date.today().isoformat()}_{safe}_run{story_id}_TTS.txt")
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(tts_clean(text))
+    return path
+
+
+def _finish_job(rep, state, save, title, final_text):
+    """Save to history exactly once - a resume after the save must not add a second row - then
+    export and mark the job done."""
+    if not state.get("story_id"):
+        rep.status("Saving to history")
+        state["story_id"] = save()
+        rep.checkpoint(state)
+    try:
+        path = export_tts(state["story_id"], title, final_text)
+        if path:
+            rep.log(f"TTS file saved: {path}")
+    except Exception as exc:
+        rep.log(f"Could not write the TTS file to OUTPUT_DIR: {exc}", "warning")
+    rep.finish("done", story_id=state["story_id"])
+
+
+def _editor_kwargs(ed):
+    return dict(diagnose_effort=ed.get("diagnose_effort"), rewrite_effort=ed.get("rewrite_effort"),
+                min_ratio=ed.get("min_ratio", 0.6), keep_raw_when_short=ed.get("keep_raw_short", True),
+                targeted=ed.get("targeted", False))
+
+
+def run_write_job(job, rep):
+    p = job["payload"]
+    d, ed, writer = p["dossier"], p["editor"], p["writer_model"]
+    state = job["state"] or {}
+    if not state.get("phase"):
+        state = {"phase": "writing", "chapter": 0, "raw_story": f"# {d['name']}: Metamorphosis\n\n",
+                 "state_log": [], "last_chapter_text": ""}
+
+    arc = parse_arc(d)
+    num_chapters = len(arc)
+
+    if state["phase"] == "writing":
+        if state["chapter"]:
+            rep.log(f"Resuming at chapter {state['chapter'] + 1} of {num_chapters}.")
+        for i in range(state["chapter"], num_chapters):
+            phase, instr = arc[i]
+            rep.status(f"Writing chapter {i+1}/{num_chapters}: {phase}")
+            prompt = build_chapter_prompt(
+                d=d, chapter_index=i, total_chapters=num_chapters,
+                arc_phase=phase, arc_instr=instr,
+                full_outline=d.get('arc_proposal', ''),
+                last_chapter_text=state["last_chapter_text"],
+                state_log=state["state_log"],
+                story_so_far=state["raw_story"],
+            )
+            # Size the ceiling from the chapter this call is supposed to produce (~6 chars a word)
+            # rather than a flat constant, so a long chapter is not cut off mid-sentence.
+            target_chars = (d.get('target_words', 10000) // max(num_chapters, 1)) * 6
+            text, truncated, used_budget = call_api_complete(
+                prompt, writer, output_budget(writer, target_chars),
+                status_cb=lambda msg, _i=i: rep.status(f"Writing chapter {_i+1}/{num_chapters}: {msg}"),
+                style_guide=d['style_guide'], style_example=d.get('style_example', ''),
+                effort=p.get('writer_effort'),
+            )
+            if "API ERROR" in text:
+                done_note = f"Chapters 1-{i} are saved. " if i else ""
+                raise JobFailed(f"Chapter {i+1} failed: {text[:1500]}\n\n{done_note}"
+                                f"Resume continues from chapter {i+1}.")
+            if truncated:
+                rep.log(f"Chapter {i+1} was cut off at the {used_budget:,}-token ceiling even after a retry. "
+                        "It is kept as written, but the ending is incomplete.", "warning")
+
+            title = extract_tag(text, "title") or phase
+            clean = clean_artifacts(text)
+            state["state_log"] = state["state_log"] + [{
+                "chapter": i + 1,
+                "title": clean_chapter_label(title, i + 1),
+                "state": extract_tag(text, "state"),
+            }]
+            state["last_chapter_text"] = clean
+            state["raw_story"] += f"\n\n### {title}\n\n{clean}"
+            state["chapter"] = i + 1
+            rep.checkpoint(state)
+            rep.progress((i + 1) / (num_chapters + 1))
+            rep.log(f"Chapter {i+1} written ({len(clean.split()):,} words).")
+        state["phase"] = "editing"
+        rep.checkpoint(state)
+
+    raw_story = state["raw_story"]
+    original = clean_artifacts(raw_story)
+    rejected, issues, report = "", [], {}
+    if state.get("story_id"):
+        # Interrupted after the history save: nothing left to do but export and close the job.
+        saved = get_story(state["story_id"])
+        final = (saved["final_story"] if saved else "") or original
+    elif ed.get("enabled"):
+        edit_base = num_chapters / (num_chapters + 1)
+        final, report, rejected, issues = run_editor_pass(
+            raw_story, original, ed["model"], ed["mode"], ed["intensity"], ed["two_pass"],
+            style_example=d.get('style_example', ''), status_cb=rep.status,
+            progress_cb=lambda f: rep.progress(edit_base + (1 - edit_base) * f),
+            checkpoint=state.get("editor"),
+            save_checkpoint=lambda c: (state.__setitem__("editor", c), rep.checkpoint(state)),
+            **_editor_kwargs(ed),
+        )
+    else:
+        final = original
+        report = {
+            "used": False, "status": "skipped", "message": "", "model": "", "mode": "",
+            "intensity": "", "two_pass": False, "raw_chars": len(original),
+            "edited_chars": 0, "chapters": [], "issues_found": 0,
+        }
+
+    _finish_job(rep, state, lambda: save_run(
+        origin="generated", parent_id=None, dossier=d, cfg=p.get("config"), report=report,
+        raw=original, final=final, rejected=rejected, issues=issues, spend=rep.stats,
+        seed=p.get("seed"), attempt=p.get("attempt"), writer_model=writer,
+    ), d.get('name') or p.get("seed"), final)
+
+
+def run_reedit_job(job, rep):
+    p = job["payload"]
+    ed = p["editor"]
+    row = get_story(p["row_id"])
+    if not row:
+        raise JobFailed(f"Run #{p['row_id']} no longer exists in history.")
+    state = job["state"] or {}
+    source_raw = row["raw_story"] or ""
+    dossier, cfg = dossier_from_row(row)
+
+    rejected, issues, report = "", [], {}
+    if state.get("story_id"):
+        # Interrupted after the history save: nothing left to do but export and close the job.
+        saved = get_story(state["story_id"])
+        final = (saved["final_story"] if saved else "") or source_raw
+    else:
+        final, report, rejected, issues = run_editor_pass(
+            source_raw, source_raw, ed["model"], ed["mode"], ed["intensity"], ed["two_pass"],
+            style_example=dossier.get('style_example', ''), status_cb=rep.status, progress_cb=rep.progress,
+            checkpoint=state.get("editor"),
+            save_checkpoint=lambda c: (state.__setitem__("editor", c), rep.checkpoint(state)),
+            **_editor_kwargs(ed),
+        )
+    _finish_job(rep, state, lambda: save_run(
+        origin="re-edit", parent_id=row["id"], dossier=dossier, cfg=cfg, report=report,
+        raw=source_raw, final=final, rejected=rejected, issues=issues, spend=rep.stats,
+        seed=row["seed"], attempt=row["attempt"], writer_model=row["writer_model"],
+    ), row["title"], final)
+
+
+JOB_KINDS = {"write": run_write_job, "reedit": run_reedit_job}
+
+
+def _job_main(job_id, keys, token):
+    job = get_job(job_id)
+    if not job:
+        return
+    rep = JobReporter(job_id, token, job["stats"], job["log"])
+    _worker_ctx.rt = JobRuntime(keys, rep.stats, lambda msg: rep.log(msg, "warning"))
+    try:
+        rep.log("Resumed from its checkpoint." if job["state"] else "Started.")
+        JOB_KINDS[job["kind"]](job, rep)
+    except JobCancelled as exc:
+        try:
+            rep.finish("cancelled", error=str(exc))
+        except Exception:
+            pass
+    except Exception as exc:
+        detail = str(exc) if isinstance(exc, JobFailed) else f"{exc}\n\n{traceback.format_exc(limit=6)}"
+        try:
+            rep.log(f"Failed: {str(exc)[:300]}", "error")
+            rep.finish("failed", error=detail)
+        except Exception:
+            pass   # the database itself is gone; the row stays "running" and is resumed later
+    finally:
+        _worker_ctx.rt = None
+
+
+def start_job(job_id, keys, take_over=False):
+    """Claim a job for this process and run it on a thread. Returns (started, message)."""
+    runner = job_runner()
+    me = instance_name()
+    with runner["lock"]:
+        thread = runner["threads"].get(job_id)
+        if thread and thread.is_alive():
+            return True, "Already running."
+        job = get_job(job_id)
+        if not job:
+            return False, "That job no longer exists."
+        if job["status"] == "done":
+            return False, "That job has already finished."
+        if job["status"] in JOB_ACTIVE and job.get("owner") not in (None, "", me) and not take_over:
+            return False, f"That job belongs to the instance '{job['owner']}'."
+        _db("UPDATE jobs SET status = 'running', owner = ?, run_token = ?, error = '', updated_at = ? "
+            "WHERE id = ?", (me, runner["token"], _now(), job_id))
+        # Two instances claiming at once: whichever token ended up in the row has it.
+        claimed = get_job(job_id)
+        if not claimed or claimed["run_token"] != runner["token"]:
+            return False, "Another instance claimed this job first."
+        thread = threading.Thread(target=_job_main, args=(job_id, keys, runner["token"]),
+                                  name=f"metadigm-job-{job_id}", daemon=True)
+        runner["threads"][job_id] = thread
+        thread.start()
+    return True, "Started."
+
+
+def resume_interrupted_jobs(keys):
+    """After a restart: pick this instance's unfinished jobs back up. Returns the ids resumed."""
+    runner = job_runner()
+    rows = _db("SELECT id, status, run_token FROM jobs WHERE status IN ('running', 'cancelling') "
+               "AND owner = ?", (instance_name(),), fetch='all') or []
+    resumed = []
+    for row in rows:
+        if row["run_token"] == runner["token"]:
+            continue
+        if row["status"] == "cancelling":
+            set_job_status(row["id"], "cancelled")
+        elif start_job(row["id"], keys)[0]:
+            resumed.append(row["id"])
+    return resumed
+
+
+# --- JOB UI ---
+
+def collect_api_keys():
+    """The sidebar's keys, handed to a job when it starts. Keys are never written to the database."""
+    return {vendor: st.session_state.get(field, "") or "" for vendor, field in VENDOR_KEY_FIELDS.items()}
+
+
+def current_editor_settings():
+    """The sidebar's editor settings, frozen into a job so it finishes with what it started with."""
+    return {
+        "enabled": bool(do_editor), "model": st.session_state.editor_model, "mode": editor_mode,
+        "intensity": editor_intensity, "two_pass": editor_two_pass, "targeted": editor_targeted,
+        "diagnose_effort": diagnose_effort, "rewrite_effort": rewrite_effort,
+        "min_ratio": editor_min_ratio, "keep_raw_short": editor_keep_raw_short,
+    }
+
+
+def launch_job(kind, title, payload):
+    job_id = create_job(kind, title, payload)
+    started, message = start_job(job_id, collect_api_keys())
+    if not started:
+        st.session_state.job_notice = message
+    st.session_state.active_job_id = job_id
+    st.session_state.step = "job"
+    return job_id
+
+
+def submit_write_job(d):
+    # Pin the name pool into the dossier, so the job and a later rewrite use the same names.
+    story_name_pool(d)
+    payload = {
+        "dossier": dict(d),
+        "config": st.session_state.get('setup_snapshot') or st.session_state.get('manual_config') or {},
+        "seed": st.session_state.seed, "attempt": st.session_state.attempt,
+        "writer_model": st.session_state.writer_model,
+        "writer_effort": st.session_state.get('writer_effort'),
+        "editor": current_editor_settings(),
+    }
+    # This story's pool lives on in its dossier; the next story set up in this session draws its own.
+    st.session_state.pop("name_pool", None)
+    return launch_job("write", d.get('name') or "Story", payload)
+
+
+def submit_reedit_job(row):
+    payload = {"row_id": row["id"], "editor": {**current_editor_settings(), "enabled": True}}
+    return launch_job("reedit", f"Re-edit of #{row['id']} · {row['title']}", payload)
+
+
+def open_job_result(job):
+    """Load a finished job's story into Final Cut."""
+    row = get_story(job["story_id"]) if job.get("story_id") else None
+    if not row:
+        st.session_state.job_notice = "The saved story for this job was not found in history."
+        return False
+    restore_run_into_session(row)
+    # The job's spend joins this session's counter once, so "this story" covers the writing too.
+    counted = st.session_state.setdefault("counted_jobs", [])
+    if job["id"] not in counted:
+        counted.append(job["id"])
+        for k in EMPTY_STATS:
+            st.session_state.stats[k] = st.session_state.stats.get(k, 0) + job["stats"].get(k, 0)
+    st.session_state.cost_reset_pending = True
+    st.session_state.step = "final"
+    return True
+
+
+def _ago(iso):
+    try:
+        seconds = (datetime.datetime.now() - datetime.datetime.fromisoformat(iso)).total_seconds()
+    except (TypeError, ValueError):
+        return "—"
+    if seconds < 90:
+        return f"{int(seconds)}s ago"
+    if seconds < 5400:
+        return f"{int(seconds // 60)} min ago"
+    return f"{seconds / 3600:.1f} h ago"
+
+
+JOB_ICONS = {"running": "⏳", "cancelling": "🛑", "done": "✅", "failed": "❌", "cancelled": "✖️",
+             "interrupted": "⏸️"}
+
+
+def render_job_actions(job, key):
+    """Buttons for whatever can be done with the job in its current state."""
+    label = job_state_label(job)
+    cols = st.columns(3)
+    if label == "done":
+        if cols[0].button("👁️ Open in Final Cut", key=f"{key}_open", type="primary", use_container_width=True):
+            if open_job_result(job):
+                st.rerun()
+    elif label in ("running", "cancelling") or label.startswith("on "):
+        if job["status"] == "running" and cols[0].button("✖ Cancel", key=f"{key}_cancel", use_container_width=True,
+                                                         help="Stops after the API call in progress. "
+                                                              "Finished chapters stay in the checkpoint."):
+            set_job_status(job["id"], "cancelling")
+            st.rerun()
+        if label.startswith("on "):
+            confirm = cols[1].checkbox("That instance is gone", key=f"{key}_confirm",
+                                       help="Only take over when the other instance is no longer running, "
+                                            "e.g. a Cloud container that restarted under a new name.")
+            if cols[2].button("Take over here", key=f"{key}_take", disabled=not confirm, use_container_width=True):
+                ok, message = start_job(job["id"], collect_api_keys(), take_over=True)
+                st.session_state.job_notice = message
+                st.rerun()
+    else:   # interrupted, failed, cancelled
+        if cols[0].button("▶️ Resume", key=f"{key}_resume", type="primary", use_container_width=True,
+                          help="Continues from the last checkpoint with the keys currently in the sidebar."):
+            ok, message = start_job(job["id"], collect_api_keys())
+            st.session_state.job_notice = message
+            st.rerun()
+        if label != "cancelled" and cols[1].button("Discard", key=f"{key}_discard", use_container_width=True):
+            set_job_status(job["id"], "cancelled")
+            st.rerun()
 
 
 # --- SIDEBAR & CONFIG ---
@@ -3450,6 +4033,31 @@ try:
     _hist_runs = history_totals()[0]
 except Exception:
     _hist_runs = 0
+
+# Once per server process: jobs this instance was running when it last stopped carry on. Done
+# from the first page load, because that is the first moment the sidebar's keys exist.
+_runner = job_runner()
+with _runner["lock"]:
+    _resume_now = not _runner["resumed"]
+    _runner["resumed"] = True
+if _resume_now:
+    try:
+        _resumed = resume_interrupted_jobs(collect_api_keys())
+        if _resumed:
+            st.toast(f"Resumed {len(_resumed)} interrupted job(s): " + ", ".join(f"#{i}" for i in _resumed))
+    except Exception as exc:
+        st.sidebar.warning(f"Could not resume interrupted jobs: {exc}")
+
+try:
+    _active_jobs = count_active_jobs()
+except Exception:
+    _active_jobs = 0
+if st.sidebar.button(f"🎥 Jobs ({_active_jobs} active)" if _active_jobs else "🎥 Jobs",
+                     use_container_width=True,
+                     help="Stories being written or re-edited in the background. They keep running when "
+                          "you close the tab or your device sleeps."):
+    st.session_state.step = "jobs"
+    st.rerun()
 if st.sidebar.button(f"📚 Story History ({_hist_runs})", use_container_width=True):
     st.session_state.step = "history"
     st.rerun()
@@ -3472,6 +4080,16 @@ if st.sidebar.button("🎭 Premise Builder", use_container_width=True,
     st.rerun()
 
 render_prompt_debug()
+
+if output_dir():
+    st.sidebar.caption(f"Finished TTS files are saved to `{output_dir()}`.")
+
+# Sessions from before background jobs could still be parked on the old in-page writing step.
+if st.session_state.step in ("writing", "reedit"):
+    st.session_state.step = "jobs"
+
+if st.session_state.get("job_notice"):
+    st.info(st.session_state.pop("job_notice"))
 
 # --- UI STEP 1: SETUP ---
 if st.session_state.step == "setup":
@@ -3710,7 +4328,7 @@ elif st.session_state.step == "casting":
     b1, b2, b3 = st.columns(3)
     if b1.button("✅ Action! Begin Writing", use_container_width=True):
         st.session_state.dossier['custom_note'] = note
-        st.session_state.step = "writing"
+        submit_write_job(st.session_state.dossier)
         st.rerun()
     if b2.button("🔄 Reroll Premise", use_container_width=True):
         st.session_state.attempt += 1
@@ -3725,149 +4343,99 @@ elif st.session_state.step == "casting":
         st.session_state.step = "setup"
         st.rerun()
 
-# --- UI STEP 3: WRITING ---
-elif st.session_state.step == "writing":
-    d = st.session_state.dossier
-    st.title(f"🎥 Filming: {d.get('name', 'Story')}")
-    
-    progress_bar = st.progress(0.0)
-    status_text = st.empty()
+# --- UI STEP 3: JOB MONITOR ---
+# The story is written by a background job (see BACKGROUND JOBS); this page only watches it.
+# Leaving it, closing the tab or the device going to sleep stops nothing.
+elif st.session_state.step == "job":
+    job_id = st.session_state.get("active_job_id")
+    job = get_job(job_id) if job_id else None
+    if not job:
+        st.session_state.step = "jobs"
+        st.rerun()
 
-    if "gen_full_narrative" not in st.session_state:
-        st.session_state.gen_full_narrative = ""
-        st.session_state.gen_raw_story = f"# {d['name']}: Metamorphosis\n\n"
-        st.session_state.gen_state_log = []
-        st.session_state.gen_last_chapter_text = ""
-        st.session_state.gen_chapter_index = 0
-        # Snapshot of the running totals so the history row records this run's own spend,
-        # not the whole session's.
-        st.session_state.gen_stats_start = dict(st.session_state.stats)
+    st.title(f"🎥 Filming: {job['title'] or 'Story'}")
+    st.caption("This runs on the server. Close the tab or let your device sleep whenever you like, and "
+               "come back through **🎥 Jobs** in the sidebar."
+               + (f" The TTS file will be saved to `{output_dir()}`." if output_dir() else ""))
 
-    full_narrative = st.session_state.gen_full_narrative
-    raw_story = st.session_state.gen_raw_story
-    state_log = list(st.session_state.get("gen_state_log", []))
-    last_chapter_text = st.session_state.gen_last_chapter_text
-    start_i = st.session_state.gen_chapter_index
+    @st.fragment(run_every=JOB_POLL_SECONDS if job["status"] in JOB_ACTIVE else None)
+    def job_monitor():
+        current = get_job(job_id)
+        if not current:
+            return
+        label = job_state_label(current)
+        if label == "done" and open_job_result(current):
+            st.rerun()
+        if current["status"] != job["status"]:
+            st.rerun()   # a full rerun, so the polling interval follows the new status
+        st.progress(float(current["progress"] or 0.0), text=current["phase"] or label)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Status", f"{JOB_ICONS.get(label, '🛰️')} {label}")
+        m2.metric("Spent so far", f"${current['stats']['cost']:.4f}")
+        m3.metric("Last update", _ago(current["updated_at"]))
+        if label == "interrupted":
+            st.warning("The process running this job stopped (an app restart or a crash). Resume continues "
+                       "from the last finished chapter.")
+        elif label.startswith("on "):
+            st.info(f"This job is running on the instance **{current['owner']}**, not on this one "
+                    f"(**{instance_name()}**). Progress shows here because the database is shared.")
+        if current.get("error") and label in ("failed", "cancelled", "interrupted"):
+            st.error(current["error"])
+        render_job_actions(current, key=f"job{job_id}")
+        if current["log"]:
+            with st.expander("Log", expanded=True):
+                for entry in reversed(current["log"][-40:]):
+                    icon = {"warning": "⚠️", "error": "❌"}.get(entry.get("level"), "·")
+                    st.markdown(f"`{(entry.get('t') or '')[11:]}` {icon} {entry.get('msg', '')}")
 
-    proposal = d.get('arc_proposal', '')
-    arc_lines = [line.strip() for line in proposal.split('\n') if line.strip()]
-    arc = []
-    current_title, current_desc = None, []
-    for line in arc_lines:
-        if line.upper().startswith("CHAPTER"):
-            if current_title: arc.append((current_title, "\n".join(current_desc)))
-            current_title = line
-            current_desc = []
-        else: current_desc.append(line)
-    if current_title: arc.append((current_title, "\n".join(current_desc)))
-    if not arc: arc = [(f"CHAPTER {i+1}", "Progress the narrative gradually.") for i in range(d.get('num_chapters', 7))]
+    job_monitor()
 
-    num_chapters = len(arc)
+    nav1, nav2 = st.columns(2)
+    if nav1.button("🎥 All jobs", use_container_width=True):
+        st.session_state.step = "jobs"
+        st.rerun()
+    if nav2.button("✨ Set up another story", use_container_width=True,
+                   help="This one keeps running in the background."):
+        st.session_state.step = "setup"
+        st.rerun()
 
-    for i in range(start_i, len(arc)):
-        phase, instr = arc[i]
-        status_text.write(f"Writing Chapter {i+1}/{num_chapters}: {phase}...")
+elif st.session_state.step == "jobs":
+    st.title("🎥 Jobs")
+    st.caption(f"Stories being written or re-edited in the background. This instance: **{instance_name()}**"
+               + (" · the database is shared, so jobs from other instances show here too."
+                  if using_remote_db() else ""))
 
-        p = build_chapter_prompt(
-            d=d, chapter_index=i, total_chapters=num_chapters,
-            arc_phase=phase, arc_instr=instr,
-            full_outline=proposal,
-            last_chapter_text=last_chapter_text,
-            state_log=state_log,
-            story_so_far=raw_story
-        )
+    @st.fragment(run_every=JOB_POLL_SECONDS)
+    def jobs_list():
+        jobs = list_jobs()
+        if not jobs:
+            st.info("No jobs yet. Writing starts one from the casting screen; Story History can start a "
+                    "re-edit.")
+            return
+        for job in jobs:
+            label = job_state_label(job)
+            with st.container(border=True):
+                c1, c2, c3 = st.columns([5, 3, 2])
+                kind = "Writing" if job["kind"] == "write" else "Re-edit"
+                c1.markdown(f"**#{job['id']} · {job['title'] or 'Story'}**")
+                c1.caption(f"{kind} · started {(job['created_at'] or '').replace('T', ' ')[:16]} · "
+                           f"on {job.get('owner') or '—'}")
+                c2.markdown(f"{JOB_ICONS.get(label, '🛰️')} **{label}** · {float(job['progress'] or 0):.0%}")
+                c2.caption(f"${job['stats']['cost']:.4f} · updated {_ago(job['updated_at'])}")
+                if c3.button("Open" if label == "done" else "View", key=f"jobs_view_{job['id']}",
+                             use_container_width=True):
+                    if label != "done" or not open_job_result(job):
+                        st.session_state.active_job_id = job["id"]
+                        st.session_state.step = "job"
+                    st.rerun()
+                if job["status"] in JOB_ACTIVE and job.get("phase"):
+                    st.caption(job["phase"])
 
-        # Size the ceiling from the chapter this call is supposed to produce (~6 chars a word)
-        # rather than a flat constant, so a long chapter is not cut off mid-sentence.
-        target_chars = (d.get('target_words', 10000) // max(num_chapters, 1)) * 6
-        chapter_max = output_budget(st.session_state.writer_model, target_chars)
-        text, chapter_truncated, used_budget = call_api_complete(
-            p, st.session_state.writer_model, chapter_max,
-            status_cb=lambda msg, _i=i: status_text.write(f"Writing Chapter {_i+1}: {msg}..."),
-            style_guide=d['style_guide'], style_example=d.get('style_example', ''),
-            effort=st.session_state.get('writer_effort'),
-        )
+    jobs_list()
 
-        if "API ERROR" in text:
-            st.error(text)
-            break
-        if chapter_truncated:
-            st.warning(
-                f"Chapter {i+1} was cut off at the {used_budget:,}-token ceiling even after a retry. "
-                "It is kept as written, but the ending is incomplete - lower the target word count "
-                "per chapter, or re-roll this chapter."
-            )
-
-        title = extract_tag(text, "title") or phase
-        clean = clean_artifacts(text)
-
-        state_log = state_log + [{
-            "chapter": i + 1,
-            "title": clean_chapter_label(title, i + 1),
-            "state": extract_tag(text, "state"),
-        }]
-
-        last_chapter_text = clean
-        full_narrative += f"\n\nCHAPTER {i+1}: {title}\n{clean}"
-        raw_story += f"\n\n### {title}\n\n{clean}"
-
-        st.session_state.gen_full_narrative = full_narrative
-        st.session_state.gen_raw_story = raw_story
-        st.session_state.gen_state_log = state_log
-        st.session_state.gen_last_chapter_text = last_chapter_text
-        st.session_state.gen_chapter_index = i + 1
-
-        progress_bar.progress((i + 1) / (len(arc) + 1))
-
-    st.session_state.original_story = clean_artifacts(raw_story)
-    st.session_state.rejected_edit = ""
-
-    st.session_state.editor_issues = []
-
-    if do_editor:
-        edit_base = num_chapters / (num_chapters + 1)
-        final_story, editor_report, rejected, issue_log = run_editor_pass(
-            raw_story, st.session_state.original_story, st.session_state.editor_model,
-            editor_mode, editor_intensity, editor_two_pass,
-            style_example=d.get('style_example', ''),
-            status_cb=status_text.write,
-            progress_cb=lambda f: progress_bar.progress(min(1.0, edit_base + (1 - edit_base) * f)),
-            diagnose_effort=diagnose_effort, rewrite_effort=rewrite_effort,
-            min_ratio=editor_min_ratio, keep_raw_when_short=editor_keep_raw_short,
-            targeted=editor_targeted,
-        )
-        st.session_state.final_story = final_story
-        st.session_state.rejected_edit = rejected
-        st.session_state.editor_issues = issue_log
-    else:
-        editor_report = {
-            "used": False, "status": "skipped", "message": "", "model": "", "mode": "",
-            "intensity": "", "two_pass": False, "raw_chars": len(st.session_state.original_story),
-            "edited_chars": 0, "chapters": [], "issues_found": 0,
-        }
-        st.session_state.final_story = st.session_state.original_story
-
-    st.session_state.editor_report = editor_report
-
-    status_text.write("Saving to history...")
-    try:
-        st.session_state.loaded_story_id = persist_current_run(
-            "generated", stats_delta=stats_since(st.session_state.get("gen_stats_start")),
-        )
-    except Exception as exc:
-        st.session_state.loaded_story_id = None
-        st.warning(f"This run could not be saved to history: {exc}")
-
-    progress_bar.progress(1.0)
-    for key in ["gen_full_narrative", "gen_raw_story", "gen_state_log", "gen_last_chapter_text",
-                "gen_chapter_index", "gen_stats_start", EDITOR_CHECKPOINT_KEY]:
-        st.session_state.pop(key, None)
-    # This story's pool lives on in its dossier; the next story set up in this session draws its own.
-    st.session_state.pop("name_pool", None)
-
-    st.session_state.cost_reset_pending = True
-    st.session_state.step = "final"
-    st.rerun()
+    if st.button("⬅️ Back", use_container_width=True):
+        st.session_state.step = "final" if st.session_state.get("final_story") else "setup"
+        st.rerun()
 
 # --- UI STEP 4: FINAL CUT ---
 elif st.session_state.step == "final":
@@ -3946,8 +4514,9 @@ elif st.session_state.step == "final":
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("🔄 Rewrite Entire Story (Same Parameters)", use_container_width=True):
-            st.session_state.step = "writing"
+        if st.button("🔄 Rewrite Entire Story (Same Parameters)", use_container_width=True,
+                     disabled=not st.session_state.get("dossier")):
+            submit_write_job(st.session_state.dossier)
             st.rerun()
     with col2:
         if st.button("✨ Start New Story", use_container_width=True):
@@ -4253,64 +4822,6 @@ elif st.session_state.step == "premise":
                         st.text(stored_skeleton[tag])
 
 # --- UI STEP 5: HISTORY ---
-elif st.session_state.step == "reedit":
-    job = st.session_state.get("reedit_job")
-    row = get_story(job["row_id"]) if job else None
-    if not row:
-        st.session_state.pop("reedit_job", None)
-        st.session_state.step = "history"
-        st.rerun()
-
-    st.title(f"🩹 Re-editing run #{row['id']}")
-    st.caption(f"{row['title']} · {job['model']} · {job['mode']} · {job['intensity']}"
-               + (" · flagged passages only" if job["targeted"] else ""))
-    st.info("If the connection drops, this page picks up at the chapter it was on - finished "
-            "chapters are not re-run or paid for twice.")
-    # Checked before the pass starts: clicking it reruns the script, which stops the pass at
-    # its next status update, and this rerun then sees the click.
-    if st.button("✖ Cancel re-edit"):
-        st.session_state.pop("reedit_job", None)
-        st.session_state.pop(REEDIT_CHECKPOINT_KEY, None)
-        st.session_state.step = "history"
-        st.rerun()
-
-    source_raw = row["raw_story"] or ""
-    cfg = json.loads(row["config_json"] or "{}")
-    example_file = cfg.get("style_example_file", "None")
-    style_example = ""
-    if example_file and example_file != "None":
-        style_example = load_file_content(os.path.join(EXAMPLES_DIR, example_file)) or ""
-
-    bar = st.progress(0.0)
-    txt = st.empty()
-    txt.write("Re-editing...")
-    new_final, new_report, new_rejected, new_issues = run_editor_pass(
-        source_raw, source_raw, job["model"], job["mode"], job["intensity"], job["two_pass"],
-        style_example=style_example, status_cb=txt.write, progress_cb=bar.progress,
-        diagnose_effort=job["diagnose_effort"], rewrite_effort=job["rewrite_effort"],
-        min_ratio=job["min_ratio"], keep_raw_when_short=job["keep_raw_short"],
-        checkpoint_key=REEDIT_CHECKPOINT_KEY, targeted=job["targeted"],
-    )
-    bar.progress(1.0)
-
-    restore_dossier_into_session(row)
-    st.session_state.original_story = source_raw
-    st.session_state.final_story = new_final
-    st.session_state.rejected_edit = new_rejected
-    st.session_state.editor_issues = new_issues
-    st.session_state.editor_report = new_report
-    try:
-        st.session_state.loaded_story_id = persist_current_run(
-            "re-edit", parent_id=row["id"], stats_delta=stats_since(job["baseline"]),
-        )
-    except Exception as exc:
-        st.session_state.loaded_story_id = None
-        st.session_state.final_cut_warning = f"The re-edit could not be saved to history: {exc}"
-    st.session_state.pop("reedit_job", None)
-    st.session_state.cost_reset_pending = True
-    st.session_state.step = "final"
-    st.rerun()
-
 elif st.session_state.step == "history":
     st.title("📚 Story History")
 
@@ -4499,19 +5010,7 @@ elif st.session_state.step == "history":
                 if not (row["raw_story"] or "").strip():
                     st.error("This run has no raw draft stored, so there is nothing to re-edit.")
                 else:
-                    # The pass runs in its own step, not under this button: a button is only True
-                    # on the one rerun that follows the click, so a websocket reconnect mid-pass
-                    # (routine on Streamlit Cloud during a long silent API call) would drop it and
-                    # land back here with nothing saved. Settings are frozen into the job so a
-                    # resumed pass finishes with the configuration it started with.
-                    st.session_state.reedit_job = {
-                        "row_id": row["id"], "baseline": dict(st.session_state.stats),
-                        "model": st.session_state.editor_model, "mode": editor_mode,
-                        "intensity": editor_intensity, "two_pass": editor_two_pass,
-                        "targeted": editor_targeted, "diagnose_effort": diagnose_effort,
-                        "rewrite_effort": rewrite_effort, "min_ratio": editor_min_ratio,
-                        "keep_raw_short": editor_keep_raw_short,
-                    }
-                    st.session_state.pop(REEDIT_CHECKPOINT_KEY, None)
-                    st.session_state.step = "reedit"
+                    # A background job, like writing: the editor settings are frozen into it, and it
+                    # survives the tab closing.
+                    submit_reedit_job(row)
                     st.rerun()

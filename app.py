@@ -384,6 +384,36 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 """
 
+# The taste profile (see TASTE PROFILE). concepts are the story ideas it learns from; taste_tags is
+# the vocabulary it catalogues them with, one row per (category, tag); concept_tags links the two.
+TASTE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS concepts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at  TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    text_key    TEXT NOT NULL,
+    source      TEXT DEFAULT 'manual',
+    story_ids   TEXT DEFAULT '',
+    rating      TEXT DEFAULT '',
+    status      TEXT DEFAULT 'pending',
+    error       TEXT DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_concepts_key ON concepts(text_key);
+CREATE TABLE IF NOT EXISTS taste_tags (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    category    TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    state       TEXT DEFAULT 'new',
+    pref        TEXT DEFAULT '',
+    created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS concept_tags (
+    concept_id  INTEGER NOT NULL,
+    tag_id      INTEGER NOT NULL,
+    PRIMARY KEY (concept_id, tag_id)
+);
+"""
+
 LIST_COLUMNS = (
     "id, created_at, origin, parent_id, title, seed, genre, writer_model, editor_model, "
     "editor_enabled, editor_intensity, editor_status, num_chapters, raw_words, final_words, "
@@ -436,7 +466,7 @@ def _rows_as_dicts(cursor, rows):
 def init_history_db():
     conn = _open_connection()
     try:
-        conn.executescript(HISTORY_SCHEMA + JOBS_SCHEMA)
+        conn.executescript(HISTORY_SCHEMA + JOBS_SCHEMA + TASTE_SCHEMA)
         # Tolerate an older database created before a column was added.
         existing = {row[1] for row in conn.execute("PRAGMA table_info(stories)").fetchall()}
         for line in HISTORY_SCHEMA.splitlines():
@@ -2861,6 +2891,7 @@ SETUP_CHANGE_TYPES = ["Physical", "Mental", "Both", "None"]
 SETUP_INTENSITIES = ["Subtle", "Pronounced", "Extreme"]
 SETUP_POV = ["Third Person (She/He)", "First Person (I)", "Second Person (You)", "Antagonist Perspective"]
 SETUP_PACING = ["Fast & Explicit", "Steady Build", "Agonizing Slow Burn"]
+SETUP_ONSETS = ["Early", "Mid", "Late"]   # what a generated cast states; mapped onto a chapter number
 
 
 def _pick(value, options, fallback):
@@ -3330,7 +3361,11 @@ def submit_reedit_job(row):
 
 
 def open_job_result(job):
-    """Load a finished job's story into Final Cut."""
+    """Load a finished job's story into Final Cut - or, for a tagging job, open the profile."""
+    if job.get("kind") == "taste":
+        st.session_state.step = "taste"
+        st.session_state.taste_section = "Profile"
+        return True
     row = get_story(job["story_id"]) if job.get("story_id") else None
     if not row:
         st.session_state.job_notice = "The saved story for this job was not found in history."
@@ -3368,7 +3403,8 @@ def render_job_actions(job, key):
     label = job_state_label(job)
     cols = st.columns(3)
     if label == "done":
-        if cols[0].button("👁️ Open in Final Cut", key=f"{key}_open", type="primary", use_container_width=True):
+        open_label = "🧭 Open Taste Profile" if job.get("kind") == "taste" else "👁️ Open in Final Cut"
+        if cols[0].button(open_label, key=f"{key}_open", type="primary", use_container_width=True):
             if open_job_result(job):
                 st.rerun()
     elif label in ("running", "cancelling") or label.startswith("on "):
@@ -3394,6 +3430,729 @@ def render_job_actions(job, key):
         if label != "cancelled" and cols[1].button("Discard", key=f"{key}_discard", use_container_width=True):
             set_job_status(job["id"], "cancelled")
             st.rerun()
+
+
+# --- TASTE PROFILE ---
+# Learns what the user likes from story concepts (typed in, imported from history, or saved from a
+# generated premise) and draws new premises from that.
+#
+# The split of labour is deliberate. A model TAGS each concept - that is reading, which it is good
+# at. Code does the CHOOSING: handed a list and asked to pick something, a model keeps picking the
+# same few entries (the reason names come from a drawn pool), so a "random" premise written by a
+# model from the whole profile would collapse onto the same three favourites. Code draws a recipe
+# of tags, weighted by how often and how warmly they occur, and the model only writes the premise.
+#
+# Categories with a config list (genre, mechanism, motifs, body focus) only take values from that
+# list, because they go straight into the setup widgets. The others grow a vocabulary: the tagging
+# call is shown the existing tags and must reuse one that fits; a tag it has to invent is marked
+# "new" for the user to accept, rename or merge.
+
+TASTE_CATEGORIES = {
+    "genre": {"label": "Genre", "list": "genres.txt", "max": 1, "draw": (1, 1),
+              "hint": "The story's genre."},
+    "mechanism": {"label": "Transformation mechanism", "list": "mc_methods.txt", "max": 2, "draw": (1, 1),
+                  "hint": "What causes the change."},
+    "motif": {"label": "Motifs / kinks", "list": "fetishes.txt", "max": 4, "draw": (1, 3),
+              "hint": "The kinks and motifs the story is built around."},
+    "body": {"label": "Body focus", "list": "body_parts.txt", "max": 3, "draw": (0, 2),
+             "hint": "Physical changes the concept names or clearly implies. Leave empty for mental-only change."},
+    "setting": {"label": "Setting", "list": None, "max": 2, "draw": (1, 1),
+                "hint": "Where and in what kind of world it happens, e.g. 'Corporate Office', 'Small Town', "
+                        "'Near-Future Lab'."},
+    "dynamic": {"label": "Power dynamic", "list": None, "max": 2, "draw": (1, 1),
+                "hint": "Who holds power over whom, and through what, e.g. 'Boss and Employee', "
+                        "'Rival Turned Captor', 'Trusted Friend Betrays'."},
+    "archetype": {"label": "Character types", "list": None, "max": 3, "draw": (1, 2),
+                  "hint": "The kinds of people involved, e.g. 'Ambitious Careerist', 'Smug Scientist', "
+                          "'Scheming Best Friend'."},
+    "plot": {"label": "Plot shape", "list": None, "max": 2, "draw": (1, 1),
+             "hint": "How the story moves, e.g. 'Slow Seduction', 'The Trap Closes', 'Bet Gone Wrong'."},
+    "ending": {"label": "Ending", "list": None, "max": 1, "draw": (1, 1),
+               "hint": "Where it lands, e.g. 'Total Surrender', 'Ambiguous', 'Escapes but Changed'."},
+    "tone": {"label": "Tone", "list": None, "max": 2, "draw": (1, 1),
+             "hint": "The feel of it, e.g. 'Playful', 'Dark and Clinical', 'Dreamlike'."},
+}
+PINNED_CATEGORIES = [c for c, spec in TASTE_CATEGORIES.items() if spec["list"]]
+OPEN_CATEGORIES = [c for c, spec in TASTE_CATEGORIES.items() if not spec["list"]]
+
+# How much a concept's tags count, by its rating. Unrated is the baseline; "meh" still counts a
+# little, because a concept the user bothered to enter is not one they dislike.
+RATING_WEIGHTS = {"love": 3.0, "like": 1.5, "": 1.0, "meh": 0.3}
+RATING_CHOICES = ["", "love", "like", "meh"]
+RATING_LABELS = {"": "— unrated", "love": "❤️ love", "like": "👍 like", "meh": "😐 meh"}
+FAVOURITE_BOOST = 3.0
+TAG_BATCH = 4            # concepts per tagging call
+RECENT_DRAWS = 3         # recipes whose tags are held back on the next draw
+RECENT_PENALTY = 0.35
+
+TAGGER_SYSTEM = (
+    "You catalogue story concepts for a reader's taste profile. You read each concept closely, tag only "
+    "what it actually says or clearly implies, and reuse the existing vocabulary wherever it fits. You "
+    "never invent plot details and never comment on the concepts."
+)
+
+
+def taste_options(category):
+    spec = TASTE_CATEGORIES[category]
+    return load_list(spec["list"]) if spec["list"] else []
+
+
+def concept_key(text):
+    """Identity of a concept: the same text, give or take case and spacing, is the same concept.
+    Re-runs in history share their Main Story Concept exactly, so this is what groups them."""
+    return hashlib.sha1(" ".join((text or "").lower().split()).encode("utf-8")).hexdigest()
+
+
+def split_concepts(raw):
+    """One concept per paragraph - or, when a line holding only --- appears, per ---‑separated block,
+    so a concept can span several paragraphs."""
+    raw = (raw or "").replace("\r\n", "\n")
+    if re.search(r"(?m)^\s*---\s*$", raw):
+        parts = re.split(r"(?m)^\s*---\s*$", raw)
+    else:
+        parts = re.split(r"\n\s*\n", raw)
+    return [p.strip() for p in parts if len(p.strip()) >= 20]
+
+
+def add_concepts(texts, source="manual", rating="", story_ids=None):
+    """Store new concepts, skipping any already in the profile. Returns (new ids, skipped count)."""
+    known = {r["text_key"] for r in _db("SELECT text_key FROM concepts", fetch='all') or []}
+    added, skipped = [], 0
+    for i, text in enumerate(texts):
+        key = concept_key(text)
+        if key in known:
+            skipped += 1
+            continue
+        known.add(key)
+        ids = (story_ids[i] if story_ids else "") or ""
+        added.append(_db("INSERT INTO concepts (created_at, text, text_key, source, story_ids, rating, status) "
+                         "VALUES (?, ?, ?, ?, ?, ?, 'pending')",
+                         (_now(), text.strip(), key, source, ids, rating if rating in RATING_WEIGHTS else "")))
+    return added, skipped
+
+
+def _tag_index():
+    """{(category, lowercased name): tag id} - one query, so tagging a batch does not cost one
+    round trip per tag."""
+    rows = _db("SELECT id, category, name FROM taste_tags", fetch='all') or []
+    return {(r["category"], r["name"].lower()): r["id"] for r in rows}
+
+
+def _ensure_tag(index, category, name, state):
+    key = (category, name.lower())
+    if key not in index:
+        index[key] = _db("INSERT INTO taste_tags (category, name, state, created_at) VALUES (?, ?, ?, ?)",
+                         (category, name, state, _now()))
+    return index[key]
+
+
+def _link_tags(concept_id, tag_ids):
+    tag_ids = sorted(set(tag_ids))
+    if tag_ids:
+        _db("INSERT OR IGNORE INTO concept_tags (concept_id, tag_id) VALUES "
+            + ", ".join("(?, ?)" for _ in tag_ids),
+            tuple(v for tag_id in tag_ids for v in (concept_id, tag_id)))
+
+
+def clean_tag(category, value):
+    """A tag value as stored: config categories snap onto their list (or are dropped), open ones are
+    tidied and kept short."""
+    if not isinstance(value, str):
+        return None
+    value = " ".join(value.split()).strip(" .,;:'\"")
+    if not value:
+        return None
+    if TASTE_CATEGORIES[category]["list"]:
+        return _pick(value, taste_options(category), None)
+    return value[:40]
+
+
+def tag_concept(index, concept_id, values_by_category, new_state="new"):
+    """Attach {category: [values]} to a concept. Existing tags are matched case-insensitively; config
+    values are always accepted, invented open-category tags start as `new_state`."""
+    tag_ids = []
+    for category, values in (values_by_category or {}).items():
+        if category not in TASTE_CATEGORIES:
+            continue
+        values = values if isinstance(values, list) else [values]
+        for value in values[:TASTE_CATEGORIES[category]["max"]]:
+            name = clean_tag(category, value)
+            if name:
+                state = "ok" if TASTE_CATEGORIES[category]["list"] else new_state
+                tag_ids.append(_ensure_tag(index, category, name, state))
+    _link_tags(concept_id, tag_ids)
+    return len(tag_ids)
+
+
+def taste_vocabulary():
+    """Existing open-category tags, most used first - what the tagging call must reuse."""
+    profile = taste_profile()
+    return {c: [t["name"] for t in profile[c]] for c in OPEN_CATEGORIES}
+
+
+def taste_profile():
+    """{category: [tag dict with uses and weight]}, heaviest first. A tag's weight is the sum of its
+    concepts' rating weights, so one loved concept counts as much as three unrated ones."""
+    tags = _db("SELECT id, category, name, state, pref FROM taste_tags", fetch='all') or []
+    links = _db("SELECT ct.tag_id, c.rating FROM concept_tags ct JOIN concepts c ON c.id = ct.concept_id",
+                fetch='all') or []
+    uses, weight = {}, {}
+    for link in links:
+        uses[link["tag_id"]] = uses.get(link["tag_id"], 0) + 1
+        weight[link["tag_id"]] = weight.get(link["tag_id"], 0.0) + RATING_WEIGHTS.get(link["rating"] or "", 1.0)
+    profile = {c: [] for c in TASTE_CATEGORIES}
+    for tag in tags:
+        if tag["category"] in profile:
+            profile[tag["category"]].append({**tag, "uses": uses.get(tag["id"], 0),
+                                             "weight": round(weight.get(tag["id"], 0.0), 2)})
+    for entries in profile.values():
+        entries.sort(key=lambda t: (-t["weight"], t["name"].lower()))
+    return profile
+
+
+def list_concept_rows():
+    concepts = _db("SELECT id, created_at, text, source, story_ids, rating, status, error FROM concepts "
+                   "ORDER BY id DESC", fetch='all') or []
+    links = _db("SELECT ct.concept_id, t.category, t.name FROM concept_tags ct "
+                "JOIN taste_tags t ON t.id = ct.tag_id", fetch='all') or []
+    tags = {}
+    for link in links:
+        tags.setdefault(link["concept_id"], {}).setdefault(link["category"], []).append(link["name"])
+    for concept in concepts:
+        concept["tags"] = tags.get(concept["id"], {})
+    return concepts
+
+
+# --- Tagging (a background job: dozens of concepts take a while) ---
+
+def build_tagging_prompt(batch, vocabulary):
+    lines = []
+    for category, spec in TASTE_CATEGORIES.items():
+        if spec["list"]:
+            options = "; ".join(taste_options(category)) or "(none)"
+            lines.append(f'- "{category}" (0-{spec["max"]}): {spec["hint"]} ONLY these values, copied exactly: '
+                         f"{options}")
+        else:
+            existing = ", ".join(vocabulary.get(category, [])[:80]) or "(none yet)"
+            lines.append(f'- "{category}" (0-{spec["max"]}): {spec["hint"]} Existing tags: {existing}')
+    concepts = "\n\n".join(f'<concept n="{i}">\n{text.strip()[:3000]}\n</concept>'
+                           for i, (_, text) in enumerate(batch, 1))
+    return f"""TASK: Tag each story concept below for a reader's taste profile.
+
+CATEGORIES
+{chr(10).join(lines)}
+
+RULES
+- Tag only what the concept says or clearly implies. An empty list beats a guess.
+- For categories with existing tags: reuse an existing tag whenever it fits, even loosely. Coin a new
+  tag only when none of them fits.
+- A new tag is a short label of 1-4 words in Title Case, general enough to describe other stories too.
+  Never a plot detail or a character name: "Corporate Office", not "Brenda's Office at Nexacorp".
+- Categories with a fixed list take values from that list only, copied exactly.
+
+CONCEPTS
+{concepts}
+
+OUTPUT FORMAT - a single JSON object inside the tag, nothing else:
+<tags>
+{{"concepts": [{{"n": 1, "genre": [], "mechanism": [], "motif": [], "body": [], "setting": [], "dynamic": [],
+"archetype": [], "plot": [], "ending": [], "tone": []}}]}}
+</tags>
+"""
+
+
+def parse_json_block(text, tag):
+    """The JSON object inside <tag>. Models wrap it in fences or trail commentary often enough that
+    going straight to json.loads on the tag body is not reliable."""
+    body = extract_tag(text, tag) or text or ""
+    body = re.sub(r'```(?:json)?\s*(.*?)\s*```', r'\1', body, flags=re.DOTALL | re.IGNORECASE).strip()
+    start, end = body.find('{'), body.rfind('}')
+    if start == -1 or end <= start:
+        return None
+    try:
+        return json.loads(body[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def run_taste_job(job, rep):
+    p = job["payload"]
+    model = p["model"]
+    wanted = [int(i) for i in p.get("concept_ids", [])]
+    rows = _db("SELECT id, text, status FROM concepts WHERE status != 'tagged'", fetch='all') or []
+    pending = [(r["id"], r["text"]) for r in rows if r["id"] in set(wanted)]
+    preset = {int(k): v for k, v in (p.get("preset") or {}).items()}
+    total = len(pending)
+    if not total:
+        rep.log("Nothing left to tag.")
+        rep.finish("done")
+        return
+
+    tagged = failed = 0
+    for start in range(0, total, TAG_BATCH):
+        batch = pending[start:start + TAG_BATCH]
+        label = f"concepts {start + 1}-{start + len(batch)} of {total}"
+        rep.status(f"Tagging {label}")
+        # Re-read every batch, so tags coined by the previous batch are reused by this one.
+        index = _tag_index()
+        response, _, _ = call_api_complete(
+            build_tagging_prompt(batch, taste_vocabulary()), model,
+            output_budget(model, 1500 * len(batch), floor=8000), retries=1,
+            status_cb=lambda msg, _l=label: rep.status(f"Tagging {_l}: {msg}"),
+            is_editor=True, editor_system=TAGGER_SYSTEM, house_standards=False, effort="medium",
+        )
+        parsed = parse_json_block(response, "tags") if not (response or "").startswith("API ERROR") else None
+        entries = {}
+        for entry in (parsed or {}).get("concepts", []) if isinstance(parsed, dict) else []:
+            if isinstance(entry, dict) and str(entry.get("n", "")).isdigit():
+                entries[int(entry["n"])] = entry
+        for n, (concept_id, _) in enumerate(batch, 1):
+            entry = entries.get(n)
+            if entry is None:
+                why = (response or "").strip()[:300] if (response or "").startswith("API ERROR") else \
+                    "The tagging reply did not cover this concept."
+                _db("UPDATE concepts SET status = 'failed', error = ? WHERE id = ?", (why, concept_id))
+                failed += 1
+                continue
+            # Config choices from imported history runs are what the user actually picked, so they
+            # count alongside whatever the model read out of the text.
+            values = {c: list(entry.get(c) or []) for c in TASTE_CATEGORIES}
+            for category, extra in (preset.get(concept_id) or {}).items():
+                values.setdefault(category, [])
+                values[category] = list(dict.fromkeys(list(extra) + values[category]))
+            tag_concept(index, concept_id, values)
+            _db("UPDATE concepts SET status = 'tagged', error = '' WHERE id = ?", (concept_id,))
+            tagged += 1
+        rep.progress((start + len(batch)) / total)
+    rep.log(f"Tagged {tagged} concept(s)" + (f"; {failed} failed and can be retried from the Concepts tab."
+                                             if failed else "."), "warning" if failed else "info")
+    rep.finish("done")
+
+
+JOB_KINDS["taste"] = run_taste_job
+
+
+def active_taste_job():
+    row = _db("SELECT id FROM jobs WHERE kind = 'taste' AND status IN ('running', 'cancelling') LIMIT 1",
+              fetch='one')
+    return row["id"] if row else None
+
+
+def launch_tagging(concept_ids, model, preset=None):
+    """Tag concepts in the background. One tagging job at a time, so two jobs never coin the same new
+    tag twice."""
+    running = active_taste_job()
+    if running:
+        st.session_state.job_notice = (f"Tagging job #{running} is still running - these concepts are saved "
+                                       "and can be tagged from the Concepts tab once it has finished.")
+        return None
+    return launch_job("taste", f"Tagging {len(concept_ids)} concept(s)",
+                      {"concept_ids": list(concept_ids), "model": model, "preset": preset or {}})
+
+
+# --- History import ---
+
+def history_concept_groups():
+    """Unique Main Story Concepts from history, with the runs that used each. Re-edits are skipped
+    (they never carry a new concept), and re-runs collapse onto their shared concept text - names
+    are no use for this, since the same few names recur across unrelated stories."""
+    rows = _db("SELECT id, origin, config_json, dossier_json FROM stories WHERE origin != 're-edit' "
+               "ORDER BY id", fetch='all') or []
+    imported = {r["text_key"] for r in _db("SELECT text_key FROM concepts", fetch='all') or []}
+    groups = {}
+    for row in rows:
+        try:
+            cfg = json.loads(row["config_json"] or "{}")
+            dossier = json.loads(row["dossier_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        text = (cfg.get("main_idea") or dossier.get("main_idea") or "").strip()
+        if len(text) < 20:
+            continue
+        group = groups.setdefault(concept_key(text), {"key": concept_key(text), "text": text, "story_ids": [],
+                                                      "preset": {c: [] for c in PINNED_CATEGORIES}})
+        group["story_ids"].append(row["id"])
+        # Only what the user set themselves - "Random" picks say nothing about taste.
+        picks = group["preset"]
+        if cfg.get("genre"):
+            picks["genre"].append(cfg["genre"])
+        if cfg.get("mc_method"):
+            picks["mechanism"].append(cfg["mc_method"])
+        for p in cfg.get("protagonists") or []:
+            picks["motif"] += [k.get("name") for k in normalize_kinks(p.get("kinks") or [])]
+            picks["body"] += [b.get("part") for b in p.get("body_details") or [] if b.get("part")]
+    result = []
+    for group in groups.values():
+        group["preset"] = {c: list(dict.fromkeys(v))[:TASTE_CATEGORIES[c]["max"]]
+                           for c, v in group["preset"].items() if v}
+        group["imported"] = group["key"] in imported
+        result.append(group)
+    # Texts that differ only by small edits are probably one concept tweaked between runs: flag them
+    # for the user rather than merging silently.
+    normalised = [" ".join(g["text"].lower().split()) for g in result]
+    for i, group in enumerate(result):
+        group["similar_to"] = next(
+            (j + 1 for j in range(i) if difflib.SequenceMatcher(None, normalised[j], normalised[i]).ratio() >= 0.85),
+            None)
+    return result
+
+
+def import_history_groups(groups, rating=""):
+    """Store the chosen groups as concepts. Returns (new ids, preset tags by concept id)."""
+    ids, _ = add_concepts([g["text"] for g in groups], source="history", rating=rating,
+                          story_ids=[",".join(str(i) for i in g["story_ids"]) for g in groups])
+    keys = {concept_key(g["text"]): g for g in groups}
+    rows = _db("SELECT id, text_key FROM concepts WHERE source = 'history'", fetch='all') or []
+    preset = {r["id"]: keys[r["text_key"]]["preset"] for r in rows if r["id"] in set(ids) and r["text_key"] in keys}
+    return ids, preset
+
+
+# --- Editing the catalogue ---
+
+def merge_tags(category, source_ids, target_name):
+    """Fold tags into one, which is created if it does not exist. Concepts keep every link."""
+    index = _tag_index()
+    target_name = clean_tag(category, target_name)
+    if not target_name:
+        return
+    target = _ensure_tag(index, category, target_name, "ok")
+    # An existing target matched case-insensitively takes the spelling the user just chose.
+    _db("UPDATE taste_tags SET name = ?, state = 'ok' WHERE id = ?", (target_name, target))
+    for source in source_ids:
+        if source == target:
+            continue
+        _db("INSERT OR IGNORE INTO concept_tags (concept_id, tag_id) "
+            "SELECT concept_id, ? FROM concept_tags WHERE tag_id = ?", (target, source))
+        _db("DELETE FROM concept_tags WHERE tag_id = ?", (source,))
+        _db("DELETE FROM taste_tags WHERE id = ?", (source,))
+
+
+def delete_tag(tag_id):
+    _db("DELETE FROM concept_tags WHERE tag_id = ?", (tag_id,))
+    _db("DELETE FROM taste_tags WHERE id = ?", (tag_id,))
+
+
+def delete_concepts(ids):
+    for concept_id in ids:
+        _db("DELETE FROM concept_tags WHERE concept_id = ?", (concept_id,))
+        _db("DELETE FROM concepts WHERE id = ?", (concept_id,))
+
+
+def build_merge_prompt(profile):
+    blocks = []
+    for category in OPEN_CATEGORIES:
+        tags = profile[category]
+        if len(tags) > 1:
+            blocks.append(f'"{category}": ' + "; ".join(f"{t['name']} ({t['uses']})" for t in tags))
+    return f"""TASK: Tidy a taste-profile vocabulary. Within each category below, find tags that mean the same
+thing, or where one is just a narrower wording of another, and propose merging them. Usage counts are
+in brackets.
+
+{chr(10).join(blocks)}
+
+RULES
+- Only merge tags a reader would call the same thing. Related but distinct ideas stay apart.
+- "into" is the clearest, most general name of the group - usually the most used one, or a better
+  wording in 1-4 words, Title Case.
+- Never merge across categories. Leave out every tag that has no duplicate.
+
+OUTPUT FORMAT - a single JSON object inside the tag, nothing else:
+<merges>
+{{"merges": [{{"category": "setting", "from": ["Tech Startup", "Office Job"], "into": "Corporate Office"}}]}}
+</merges>
+"""
+
+
+def suggest_tag_merges(model):
+    """[{category, from: [names], into}] - only names that exist, only groups that change something."""
+    profile = taste_profile()
+    if not any(len(profile[c]) > 1 for c in OPEN_CATEGORIES):
+        return []
+    response = call_api(build_merge_prompt(profile), model, max_tokens=6000, is_editor=True,
+                        editor_system=TAGGER_SYSTEM, house_standards=False, effort="low")
+    parsed = parse_json_block(response, "merges")
+    if not isinstance(parsed, dict):
+        return None
+    suggestions = []
+    for entry in parsed.get("merges") or []:
+        if not isinstance(entry, dict) or entry.get("category") not in OPEN_CATEGORIES:
+            continue
+        names = {t["name"].lower(): t for t in profile[entry["category"]]}
+        sources = [names[n.lower()] for n in entry.get("from") or [] if isinstance(n, str) and n.lower() in names]
+        into = clean_tag(entry["category"], entry.get("into"))
+        if into and (len(sources) > 1 or (sources and sources[0]["name"].lower() != into.lower())):
+            suggestions.append({"category": entry["category"], "from": sources, "into": into})
+    return suggestions
+
+
+# --- Drawing a recipe and writing a premise from it ---
+
+def draw_recipe(profile, explore=0.3, locks=None, recent=(), rng=random):
+    """Pick ingredients per category, weighted by the profile.
+
+    `explore` (0-1) flattens the weights: at 0 the strongest tags dominate (weights squared), at 1
+    every known tag is equally likely, and config-list options the profile has never seen join in.
+    Tags from the last few draws are held back so consecutive premises do not share a core. Banned
+    tags are never drawn; favourites count triple."""
+    locks = locks or {}
+    recent = set(recent)
+    exponent = 2.0 * (1.0 - explore)
+    recipe = {}
+    for category, spec in TASTE_CATEGORIES.items():
+        fixed = [v for v in locks.get(category) or [] if v]
+        low, high = spec["draw"]
+        if category in ("genre", "mechanism") and fixed:
+            recipe[category] = fixed[:1]
+            continue
+        pool = {}
+        for tag in profile.get(category, []):
+            if tag["pref"] == "banned" or tag["weight"] <= 0:
+                continue
+            weight = tag["weight"] ** exponent
+            if tag["pref"] == "favourite":
+                weight *= FAVOURITE_BOOST
+            if (category, tag["name"]) in recent:
+                weight *= RECENT_PENALTY
+            pool[tag["name"]] = weight
+        if spec["list"] and explore > 0:
+            banned = {t["name"] for t in profile.get(category, []) if t["pref"] == "banned"}
+            floor = min(pool.values(), default=1.0) * explore * 0.5
+            for option in taste_options(category):
+                if option not in pool and option not in banned:
+                    pool[option] = floor
+        for value in fixed:
+            pool.pop(value, None)
+        want = max(rng.randint(low, high), len(fixed))
+        chosen = list(fixed)
+        while len(chosen) < want and pool:
+            names = list(pool)
+            pick = rng.choices(names, weights=[pool[n] for n in names], k=1)[0]
+            chosen.append(pick)
+            pool.pop(pick)
+        if chosen:
+            recipe[category] = chosen
+    return recipe
+
+
+def recipe_tags(recipe):
+    return {(category, name) for category, names in recipe.items() for name in names}
+
+
+def taste_examples(recipe, k=3, rng=random):
+    """A few of the user's own concepts that share the most with the recipe, loved ones first - shown
+    to the model for the kind of hook and level of detail, not for content."""
+    wanted = recipe_tags(recipe)
+    scored = []
+    for concept in list_concept_rows():
+        overlap = sum((c, n) in wanted for c, names in concept["tags"].items() for n in names)
+        scored.append((overlap * RATING_WEIGHTS.get(concept["rating"] or "", 1.0) + rng.random() * 0.5, concept))
+    scored.sort(key=lambda s: -s[0])
+    return [c["text"][:700] for _, c in scored[:k]]
+
+
+def build_taste_premise_prompt(recipe, examples, pool_block):
+    ingredients = "\n".join(f"- {TASTE_CATEGORIES[c]['label']}: {', '.join(names)}"
+                            for c, names in recipe.items() if names)
+    example_block = "\n\n".join(f'"""\n{e}\n"""' for e in examples) or "(none yet)"
+    return f"""TASK: Write the premise for a new erotic transformation story built from the ingredients below.
+It becomes the top-level concept another model writes the whole story from, so it must read as one
+coherent story.
+
+INGREDIENTS - each one must carry weight in the story, not be mentioned in passing:
+{ingredients}
+
+CONCEPTS THIS READER HAS LIKED - for the kind of hook and the level of detail only. Do not reuse their
+plots, characters, names or settings:
+{example_block}
+
+# HARD CONSTRAINTS
+- One story, not a tour of the ingredients. Where two ingredients pull against each other, find the
+  version of the story in which both are true instead of dropping one.
+- Write it as a publisher's concept note in the present tense: who the protagonist is, what happens to
+  them, how it escalates, where it ends. 150-250 words of continuous prose, no headings or bullets.
+- Do not narrate scenes. Do not open with "In a world where". Do not use the words "explores", "delves",
+  "journey", "unravels" or "little did they know".
+- The transformation is something that HAPPENS TO the protagonist across the story, not a state they
+  start in.
+
+{pool_block}
+
+OUTPUT FORMAT (STRICT XML - NO OTHER TEXT):
+<premise>the premise</premise>
+"""
+
+
+def build_taste_cast_prompt(premise, recipe, pool_block):
+    def as_list(options):
+        return "\n".join(f"  - {o}" for o in options) or "  (none available)"
+
+    motifs = recipe.get("motif") or []
+    body = recipe.get("body") or []
+    return f"""TASK: Fill in a production sheet for the story premise below. You are not writing prose here -
+you are choosing values, and most of them must be copied verbatim from the lists provided.
+
+PREMISE (the authority - if it contradicts anything else here, it wins):
+\"\"\"
+{premise.strip()}
+\"\"\"
+
+KINKS TO ASSIGN (copy exactly; give each to the protagonist(s) it belongs to, strength 1-3):
+{as_list(motifs)}
+BODY FOCUS TO ASSIGN (copy exactly; only to protagonists whose change is Physical or Both):
+{as_list(body)}
+
+# FIXED CHOICES
+gender: {" | ".join(SETUP_GENDERS)}
+change_type: {" | ".join(SETUP_CHANGE_TYPES)}
+intensity: {" | ".join(SETUP_INTENSITIES)}
+pov: {" | ".join(SETUP_POV)}
+pacing: {" | ".join(SETUP_PACING)}
+transform_onset: {" | ".join(SETUP_ONSETS)}   (how early the change starts biting)
+
+# RULES
+- Protagonists are the people the premise puts through the change. Use the names the premise uses.
+  One is normal; add a second only if the premise genuinely carries two. Never more than four.
+- "info" is one short line - age, job, and the personality note that makes them a person. No prose.
+- The antagonist is whoever holds the leverage in the premise. Set include to false when the opposing
+  force is a system or a condition rather than a person who can appear on the page.
+- Anyone the sheet needs who has no name in the premise gets one from the NAME POOL below.
+- Give body_details only when change_type is Physical or Both, and keep "remark" to a few words.
+
+{pool_block}
+
+OUTPUT FORMAT - a single JSON object inside the tag, and nothing else:
+<cast>
+{{
+  "pov": "...",
+  "pacing": "...",
+  "transform_onset": "Early | Mid | Late",
+  "antagonist": {{"include": true, "name": "...", "gender": "...", "info": "..."}},
+  "protagonists": [
+    {{"name": "...", "gender": "...", "info": "...", "change_type": "...",
+      "kinks": [{{"name": "...", "strength": 2}}],
+      "body_details": [{{"part": "...", "intensity": "...", "remark": "..."}}]}}
+  ]
+}}
+</cast>
+"""
+
+
+def sanitize_cast_for_setup(cast, num_chapters=7):
+    """Coerce model output onto values the setup widgets actually accept. Not belt-and-braces: the
+    body-focus intensity slider RAISES on an unknown value and would strand the user on a broken setup
+    screen, and the selectboxes silently fall back to their first option."""
+    cast = cast if isinstance(cast, dict) else {}
+    kink_options = load_list('fetishes.txt')
+    body_options = load_list('body_parts.txt')
+
+    onset_label = _pick(cast.get('transform_onset'), SETUP_ONSETS, "Mid")
+    total = max(1, int(num_chapters or 7))
+    onset_chapter = {"Early": min(total, 2), "Mid": max(1, min(total, (total + 1) // 2)),
+                     "Late": max(1, total - 1)}[onset_label]
+
+    protagonists = []
+    for entry in (cast.get('protagonists') or []):
+        if len(protagonists) >= 4:
+            break
+        if not isinstance(entry, dict):
+            continue
+        change_type = _pick(entry.get('change_type'), SETUP_CHANGE_TYPES, "Both")
+        kinks = []
+        for k in (entry.get('kinks') or []):
+            if len(kinks) >= 4:
+                break
+            name = _pick(k.get('name') if isinstance(k, dict) else k, kink_options, None)
+            if not name or any(existing['name'] == name for existing in kinks):
+                continue
+            strength = k.get('strength', 2) if isinstance(k, dict) else 2
+            kinks.append({"name": name, "strength": _clamp_int(strength, 1, 3, 2)})
+        body_details = []
+        if change_type in ("Physical", "Both"):
+            for b in (entry.get('body_details') or []):
+                if len(body_details) >= 3:
+                    break
+                if not isinstance(b, dict):
+                    continue
+                part = _pick(b.get('part'), body_options, None)
+                if not part or any(existing['part'] == part for existing in body_details):
+                    continue
+                body_details.append({"part": part,
+                                     "intensity": _pick(b.get('intensity'), SETUP_INTENSITIES, "Pronounced"),
+                                     "remark": str(b.get('remark') or '').strip()[:80]})
+        protagonists.append({
+            "name": str(entry.get('name') or '').strip()[:60],
+            "gender": _pick(entry.get('gender'), SETUP_GENDERS, "Female"),
+            "info": str(entry.get('info') or '').strip()[:200],
+            "change_type": change_type, "kinks": kinks, "body_details": body_details,
+        })
+
+    antag_raw = cast.get('antagonist') if isinstance(cast.get('antagonist'), dict) else {}
+    if antag_raw.get('include', True):
+        antagonist = {"include": True, "name": str(antag_raw.get('name') or '').strip()[:60],
+                      "gender": _pick(antag_raw.get('gender'), SETUP_GENDERS, "Female"),
+                      "info": str(antag_raw.get('info') or '').strip()[:200]}
+    else:
+        antagonist = {"include": False}
+
+    return {
+        "pov": _pick(cast.get('pov'), SETUP_POV, SETUP_POV[0]),
+        "pacing": _pick(cast.get('pacing'), SETUP_PACING, "Steady Build"),
+        "transform_onset": f"Chapter {onset_chapter}", "onset_label": onset_label,
+        "protagonists": protagonists, "antagonist": antagonist,
+    }
+
+
+def generate_taste_premise(recipe, model_key, num_chapters=7):
+    """Two calls: the premise as prose, then the setup fields read off it - one call doing both does
+    each worse. Genre and mechanism come from the recipe directly. Returns a result dict or {"error"}."""
+    pool = session_name_pool()
+    examples = taste_examples(recipe)
+    premise_res = call_api(build_taste_premise_prompt(recipe, examples, name_pool_block(pool)),
+                           model_key, max_tokens=6000, effort="medium")
+    if not premise_res or premise_res.startswith("API ERROR"):
+        return {"error": premise_res or "Empty API response."}
+    premise = extract_tag(premise_res, "premise")
+    if not premise:
+        return {"error": "The model returned no <premise> block. Check the raw response in Prompt Debug."}
+
+    cast_res = call_api(build_taste_cast_prompt(premise, recipe, name_pool_block(pool, taken_names([], premise))),
+                        model_key, max_tokens=4000, effort="low")
+    if not cast_res or cast_res.startswith("API ERROR"):
+        return {"error": cast_res or "Empty API response."}
+    cast = sanitize_cast_for_setup(parse_json_block(cast_res, "cast"), num_chapters)
+    if not cast["protagonists"]:
+        return {"error": "No usable protagonist came back. Try again, or a stronger model."}
+    cast["genre"] = _pick((recipe.get("genre") or [None])[0], load_list('genres.txt'), None)
+    cast["mc_method"] = _pick((recipe.get("mechanism") or [None])[0], load_list('mc_methods.txt'), None)
+    return {"premise": premise, "cast": cast, "recipe": recipe}
+
+
+# Widgets in the setup screen's protagonist loop carry explicit keys, and a keyed widget prefers
+# whatever is already in session state over the snapshot's value - so those are cleared on the way in.
+_SETUP_WIDGET_KEY_RE = re.compile(r'^(pname|pgender|pinfo|pchange|pbody|pkinks|pbody_int|pbody_rem|pkink_strength)_')
+
+
+def push_cast_to_setup(premise_text, cast):
+    snapshot = dict(st.session_state.get("setup_snapshot") or st.session_state.get("manual_config") or {})
+    snapshot["main_idea"] = (premise_text or "").strip()
+    for field in ("pov", "genre", "mc_method", "pacing", "transform_onset", "protagonists", "antagonist"):
+        snapshot[field] = cast[field]
+    st.session_state.setup_snapshot = snapshot
+    st.session_state.manual_config = snapshot
+    for key in list(st.session_state.keys()):
+        if _SETUP_WIDGET_KEY_RE.match(str(key)):
+            del st.session_state[key]
+
+
+def save_generated_concept(result, premise_text, rating):
+    """Keep a generated premise as a concept. Its tags are the recipe it was drawn from - no tagging call
+    needed - so rating it feeds straight back into the weights."""
+    ids, skipped = add_concepts([premise_text], source="generated", rating=rating)
+    if not ids:
+        return None
+    tag_concept(_tag_index(), ids[0], result["recipe"], new_state="ok")
+    _db("UPDATE concepts SET status = 'tagged' WHERE id = ?", (ids[0],))
+    return ids[0]
 
 
 # --- SIDEBAR & CONFIG ---
@@ -3549,6 +4308,10 @@ if st.sidebar.button(f"🎥 Jobs ({_active_jobs} active)" if _active_jobs else "
     st.rerun()
 if st.sidebar.button(f"📚 Story History ({_hist_runs})", use_container_width=True):
     st.session_state.step = "history"
+    st.rerun()
+if st.sidebar.button("🧭 Taste Profile", use_container_width=True,
+                     help="Catalogue what you like from your story concepts, and draw new premises from it."):
+    st.session_state.step = "taste"
     st.rerun()
 
 # Where the history actually lives is worth stating on every screen. The original failure mode was
@@ -3724,7 +4487,16 @@ if st.session_state.step == "setup":
 
     st.markdown("---")
     st.subheader("4. Main Story Concept")
-    manual_config['main_idea'] = st.text_area("Main Story Idea / High-Level Concept", value=snapshot.get('main_idea', ''), height=100, placeholder="Describe the premise, specific plot hook, or character dynamics...")
+    idea_col, taste_col = st.columns([4, 1])
+    manual_config['main_idea'] = idea_col.text_area("Main Story Idea / High-Level Concept", value=snapshot.get('main_idea', ''), height=100, placeholder="Describe the premise, specific plot hook, or character dynamics...")
+    taste_col.markdown("<br>", unsafe_allow_html=True)
+    if taste_col.button("🎲 Random premise from my taste", use_container_width=True,
+                        help="Draws a premise from your Taste Profile and fills in this whole screen. Chapter "
+                             "count, word count and style stay as you set them here."):
+        save_setup_snapshot(manual_config, seed, pov, style_choice)
+        st.session_state.step = "taste"
+        st.session_state.taste_section = "Generate"
+        st.rerun()
 
     st.markdown("---")
 
@@ -3831,10 +4603,11 @@ elif st.session_state.step == "job":
         st.session_state.step = "jobs"
         st.rerun()
 
-    st.title(f"🎥 Filming: {job['title'] or 'Story'}")
+    is_story_job = job["kind"] != "taste"
+    st.title(f"🎥 Filming: {job['title'] or 'Story'}" if is_story_job else f"🧭 {job['title']}")
     st.caption("This runs on the server. Close the tab or let your device sleep whenever you like, and "
                "come back through **🎥 Jobs** in the sidebar."
-               + (f" The TTS file will be saved to `{output_dir()}`." if output_dir() else ""))
+               + (f" The TTS file will be saved to `{output_dir()}`." if output_dir() and is_story_job else ""))
 
     @st.fragment(run_every=JOB_POLL_SECONDS if job["status"] in JOB_ACTIVE else None)
     def job_monitor():
@@ -3896,7 +4669,7 @@ elif st.session_state.step == "jobs":
             label = job_state_label(job)
             with st.container(border=True):
                 c1, c2, c3 = st.columns([5, 3, 2])
-                kind = "Writing" if job["kind"] == "write" else "Re-edit"
+                kind = {"write": "Writing", "reedit": "Re-edit", "taste": "Tagging"}.get(job["kind"], job["kind"])
                 c1.markdown(f"**#{job['id']} · {job['title'] or 'Story'}**")
                 c1.caption(f"{kind} · started {(job['created_at'] or '').replace('T', ' ')[:16]} · "
                            f"on {job.get('owner') or '—'}")
@@ -4008,6 +4781,358 @@ elif st.session_state.step == "final":
         if st.button("📚 Story History", use_container_width=True):
             st.session_state.step = "history"
             st.rerun()
+
+# --- UI STEP: TASTE PROFILE ---
+elif st.session_state.step == "taste":
+    import pandas as pd
+
+    st.title("🧭 Taste Profile")
+    st.caption("What you like, learned from your story concepts - and new premises drawn from it.")
+    if "taste_model" not in st.session_state:
+        st.session_state.taste_model = DEFAULT_EDITOR_MODEL if DEFAULT_EDITOR_MODEL in MODELS else _model_names[0]
+    sec_col, model_col = st.columns([3, 2])
+    section = sec_col.radio("Section", ["Profile", "Concepts", "Import history", "Generate"], horizontal=True,
+                            key="taste_section", label_visibility="collapsed")
+    taste_model = model_col.selectbox(
+        "Model for tagging", _model_names, key="taste_model",
+        help="Reads and tags concepts, and suggests merges. A cheap model is fine here. Premises are "
+             "written by the Writer Model in the sidebar.")
+
+    def tag_untagged_button(widget, key):
+        """Offer to (re)tag every concept that is not tagged yet. Returns True when it was pressed."""
+        rows = _db("SELECT id FROM concepts WHERE status != 'tagged'", fetch='all') or []
+        if rows and widget.button(f"🏷️ Tag {len(rows)} untagged concept(s)", key=key, use_container_width=True):
+            launch_tagging([r["id"] for r in rows], taste_model)
+            return True
+        return False
+
+    if section == "Profile":
+        profile = taste_profile()
+        counts = {r["status"]: r["n"] for r in
+                  _db("SELECT status, COUNT(*) AS n FROM concepts GROUP BY status", fetch='all') or []}
+        new_tags = [t for c in OPEN_CATEGORIES for t in profile[c] if t["state"] == "new"]
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Concepts", sum(counts.values()))
+        m2.metric("Tagged", counts.get("tagged", 0))
+        m3.metric("Waiting / failed", counts.get("pending", 0) + counts.get("failed", 0))
+        m4.metric("New tags to review", len(new_tags))
+
+        if not counts:
+            st.info("No concepts yet. Add some under **Concepts**, or bring in your story history under "
+                    "**Import history**.")
+        else:
+            a1, a2, a3 = st.columns(3)
+            if tag_untagged_button(a1, "taste_tag_profile"):
+                st.rerun()
+            if new_tags and a2.button(f"✅ Accept all {len(new_tags)} new tags", use_container_width=True,
+                                      help="Mark every tag the tagging call invented as reviewed."):
+                _db("UPDATE taste_tags SET state = 'ok' WHERE state = 'new'")
+                st.rerun()
+            if a3.button("🧹 Suggest merges", use_container_width=True,
+                         help="Asks the tagging model which tags mean the same thing. Nothing changes until "
+                              "you apply a suggestion."):
+                with st.spinner("Looking for duplicate tags..."):
+                    suggestions = suggest_tag_merges(taste_model)
+                if suggestions is None:
+                    st.error("The model's reply could not be read. Check Prompt Debug, or try another model.")
+                else:
+                    st.session_state.taste_merges = suggestions
+
+            merges = st.session_state.get("taste_merges")
+            if merges is not None:
+                with st.container(border=True):
+                    if not merges:
+                        st.success("No duplicate tags found.")
+                    else:
+                        st.markdown("**Suggested merges** - untick any you disagree with.")
+                    chosen = [m for i, m in enumerate(merges) if st.checkbox(
+                        f"{TASTE_CATEGORIES[m['category']]['label']}: "
+                        f"{', '.join(t['name'] for t in m['from'])} → **{m['into']}**", value=True,
+                        key=f"taste_merge_{i}")]
+                    b1, b2 = st.columns(2)
+                    if merges and b1.button(f"Apply {len(chosen)} merge(s)", type="primary",
+                                            disabled=not chosen, use_container_width=True):
+                        for m in chosen:
+                            merge_tags(m["category"], [t["id"] for t in m["from"]], m["into"])
+                        st.session_state.pop("taste_merges", None)
+                        st.rerun()
+                    if b2.button("Dismiss", use_container_width=True):
+                        st.session_state.pop("taste_merges", None)
+                        st.rerun()
+
+            st.caption("**Weight** is how strongly a tag counts: each concept adds 1, a loved one 3, a liked one "
+                       "1.5, a meh one 0.3. **Favourite** triples a tag's chances in a draw; **banned** "
+                       "never gets drawn. Untick **New** to accept a tag.")
+            for category, spec in TASTE_CATEGORIES.items():
+                tags = profile[category]
+                fresh = sum(t["state"] == "new" for t in tags)
+                title = f"{spec['label']} · {len(tags)} tag(s)" + (f" · {fresh} new" if fresh else "")
+                with st.expander(title, expanded=bool(fresh)):
+                    if not tags:
+                        st.caption("Nothing yet.")
+                        continue
+                    before = pd.DataFrame([{
+                        "id": t["id"], "Tag": t["name"], "Uses": t["uses"], "Weight": t["weight"],
+                        "New": t["state"] == "new", "Preference": t["pref"] or "—", "Delete": False,
+                    } for t in tags])
+                    after = st.data_editor(
+                        before, key=f"taste_tags_{category}", hide_index=True, use_container_width=True,
+                        disabled=["id", "Uses", "Weight"] + (["Tag", "New"] if spec["list"] else []),
+                        column_config={
+                            "id": None,
+                            "Preference": st.column_config.SelectboxColumn(
+                                options=["—", "favourite", "banned"], required=True),
+                            "Weight": st.column_config.NumberColumn(format="%.1f"),
+                        })
+                    if st.button("💾 Save changes", key=f"taste_save_{category}"):
+                        # int(): pandas may hand ids back as numpy integers, which the database driver
+                        # refuses as parameters.
+                        old = {int(r["id"]): r for r in before.to_dict("records")}
+                        for row in after.to_dict("records"):
+                            tag_id = int(row["id"])
+                            was = old.get(tag_id)
+                            if was is None:
+                                continue
+                            if row["Delete"]:
+                                delete_tag(tag_id)
+                                continue
+                            if row["Preference"] != was["Preference"]:
+                                pref = "" if row["Preference"] == "—" else row["Preference"]
+                                _db("UPDATE taste_tags SET pref = ? WHERE id = ?", (pref, tag_id))
+                            new_name = clean_tag(category, row["Tag"] or "")
+                            if new_name and new_name != was["Tag"]:
+                                # Renaming onto another tag's name is a merge, not a duplicate.
+                                merge_tags(category, [tag_id], new_name)
+                            elif was["New"] and not row["New"]:
+                                _db("UPDATE taste_tags SET state = 'ok' WHERE id = ?", (tag_id,))
+                        st.rerun()
+                    if not spec["list"] and len(tags) > 1:
+                        g1, g2, g3 = st.columns([3, 2, 1])
+                        sources = g1.multiselect("Merge these", [t["name"] for t in tags],
+                                                 key=f"taste_msrc_{category}")
+                        target = g2.text_input("into", key=f"taste_mdst_{category}",
+                                               placeholder=sources[0] if sources else "tag name")
+                        g3.markdown("<br>", unsafe_allow_html=True)
+                        if g3.button("Merge", key=f"taste_mgo_{category}", disabled=len(sources) < 1,
+                                     use_container_width=True):
+                            by_name = {t["name"]: t["id"] for t in tags}
+                            merge_tags(category, [by_name[n] for n in sources], target.strip() or sources[0])
+                            st.rerun()
+
+    elif section == "Concepts":
+        rows = list_concept_rows()
+
+        def _add_concepts_cb():
+            texts = split_concepts(st.session_state.get("taste_new_concepts", ""))
+            ids, skipped = add_concepts(texts, "manual", st.session_state.get("taste_new_rating", ""))
+            st.session_state.taste_new_concepts = ""
+            notice = f"Added {len(ids)} concept(s)." + (f" {skipped} were already in the profile." if skipped else "")
+            if ids:
+                launch_tagging(ids, st.session_state.taste_model)
+            st.session_state.job_notice = (st.session_state.get("job_notice") or notice)
+
+        with st.expander("➕ Add concepts", expanded=not rows):
+            raw = st.text_area("Concepts", key="taste_new_concepts", height=200,
+                               placeholder="One concept per paragraph. If a concept runs over several paragraphs, "
+                                           "put a line with only --- between concepts instead.")
+            found = split_concepts(raw)
+            r1, r2 = st.columns([2, 3])
+            r1.selectbox("Rating for these", RATING_CHOICES, format_func=RATING_LABELS.get, key="taste_new_rating")
+            r2.markdown("<br>", unsafe_allow_html=True)
+            r2.button(f"Add & tag {len(found)} concept(s)", type="primary", disabled=not found,
+                      on_click=_add_concepts_cb, use_container_width=True)
+
+        if not rows:
+            st.info("No concepts yet.")
+        else:
+            search = st.text_input("Filter", placeholder="Search concept text or tags...", key="taste_filter")
+            shown = [r for r in rows if not search or search.lower() in (
+                r["text"] + " " + " ".join(n for names in r["tags"].values() for n in names)).lower()]
+            before = pd.DataFrame([{
+                "id": r["id"], "Concept": r["text"],
+                "Rating": r["rating"] or "—",
+                "Source": r["source"] + (f" · {len(r['story_ids'].split(','))} run(s)" if r["story_ids"] else ""),
+                "Status": r["status"] + (f": {r['error'][:80]}" if r["status"] == "failed" and r["error"] else ""),
+                "Tags": " · ".join(n for names in r["tags"].values() for n in names),
+                "Delete": False,
+            } for r in shown])
+            after = st.data_editor(
+                before, key=f"taste_concepts_{hashlib.sha1(search.encode()).hexdigest()[:8]}", hide_index=True,
+                use_container_width=True, disabled=["id", "Concept", "Source", "Status", "Tags"],
+                column_config={
+                    "id": None,
+                    "Concept": st.column_config.TextColumn(width="large"),
+                    "Rating": st.column_config.SelectboxColumn(options=["—", "love", "like", "meh"], required=True),
+                    "Tags": st.column_config.TextColumn(width="medium"),
+                })
+            c1, c2 = st.columns(2)
+            if c1.button("💾 Save ratings & deletions", type="primary", use_container_width=True):
+                old = {int(r["id"]): r for r in before.to_dict("records")}
+                deleted = [int(row["id"]) for row in after.to_dict("records") if row["Delete"]]
+                for row in after.to_dict("records"):
+                    concept_id = int(row["id"])
+                    if not row["Delete"] and row["Rating"] != old[concept_id]["Rating"]:
+                        rating = "" if row["Rating"] == "—" else row["Rating"]
+                        _db("UPDATE concepts SET rating = ? WHERE id = ?", (rating, concept_id))
+                delete_concepts(deleted)
+                st.rerun()
+            if tag_untagged_button(c2, "taste_tag_concepts"):
+                st.rerun()
+
+    elif section == "Import history":
+        st.caption("Collects the Main Story Concept of every run in Story History. Re-edits are skipped and "
+                   "re-runs of the same concept collapse into one. The genre, mechanism, kinks and body focus "
+                   "you picked for those runs are added as tags; the rest is read from the concept text.")
+        if st.button("🔍 Scan history"):
+            with st.spinner("Reading history..."):
+                st.session_state.taste_import = history_concept_groups()
+        groups = st.session_state.get("taste_import")
+        if groups is not None:
+            fresh = [g for g in groups if not g["imported"]]
+            st.markdown(f"**{len(groups)} unique concepts** across {sum(len(g['story_ids']) for g in groups)} "
+                        f"runs · {len(groups) - len(fresh)} already imported.")
+            if not fresh:
+                st.success("Everything in your history is already in the profile.")
+            else:
+                st.caption("Concepts that look like a slightly edited version of an earlier one are unticked - "
+                           "tick them if they are really different stories.")
+                before = pd.DataFrame([{
+                    "#": i + 1, "Import": not g["imported"] and not g["similar_to"],
+                    "Concept": g["text"], "Runs": len(g["story_ids"]),
+                    "Similar to": f"#{g['similar_to']}" if g["similar_to"] else "",
+                    "Imported": g["imported"],
+                } for i, g in enumerate(groups)])
+                after = st.data_editor(
+                    before, key="taste_import_editor", hide_index=True, use_container_width=True,
+                    disabled=["#", "Concept", "Runs", "Similar to", "Imported"],
+                    column_config={"Concept": st.column_config.TextColumn(width="large")})
+                selected = [groups[row["#"] - 1] for row in after.to_dict("records")
+                            if row["Import"] and not row["Imported"]]
+                i1, i2 = st.columns([2, 3])
+                rating = i1.selectbox("Rating for these", RATING_CHOICES, format_func=RATING_LABELS.get,
+                                      key="taste_import_rating")
+                i2.markdown("<br>", unsafe_allow_html=True)
+                if i2.button(f"📥 Import & tag {len(selected)} concept(s)", type="primary",
+                             disabled=not selected, use_container_width=True):
+                    with st.spinner("Importing..."):
+                        ids, preset = import_history_groups(selected, rating)
+                    st.session_state.pop("taste_import", None)
+                    if ids:
+                        launch_tagging(ids, taste_model, preset)
+                    st.rerun()
+
+    elif section == "Generate":
+        profile = taste_profile()
+        if not any(t["weight"] > 0 for tags in profile.values() for t in tags):
+            st.info("Nothing to draw from yet - add or import some concepts and let them be tagged first.")
+        else:
+            st.caption("Draws ingredients from your profile - code does the random choosing, weighted by your "
+                       "taste - then the Writer Model writes a premise around them and fills in the setup.")
+            c1, c2, c3 = st.columns(3)
+            explore = c1.slider("Comfort ↔ Explore", 0, 100, 30, key="taste_explore",
+                                help="Left: mostly your strongest tags. Right: every tag about equally likely, and "
+                                     "options from your lists you have never used start turning up.") / 100
+            lock_genre = c2.selectbox("Genre", ["From my taste"] + load_list('genres.txt'), key="taste_lock_genre")
+            lock_mech = c3.selectbox("Mechanism", ["From my taste"] + load_list('mc_methods.txt'),
+                                     key="taste_lock_mech")
+            must = st.multiselect("Must include motifs", load_list('fetishes.txt'), max_selections=3,
+                                  key="taste_lock_motifs")
+
+            if st.button("🎲 Draw ingredients", type="primary"):
+                locks = {"genre": [lock_genre] if lock_genre != "From my taste" else [],
+                         "mechanism": [lock_mech] if lock_mech != "From my taste" else [],
+                         "motif": must}
+                recent = [tuple(t) for draw in st.session_state.get("taste_recent", []) for t in draw]
+                recipe = draw_recipe(profile, explore, locks, recent)
+                st.session_state.taste_recipe = recipe
+                st.session_state.taste_draw = st.session_state.get("taste_draw", 0) + 1
+                st.session_state.taste_recent = ([sorted(recipe_tags(recipe))]
+                                                 + st.session_state.get("taste_recent", []))[:RECENT_DRAWS]
+                st.session_state.pop("taste_result", None)
+
+            recipe = st.session_state.get("taste_recipe")
+            draw = st.session_state.get("taste_draw", 0)
+
+            def _current_recipe():
+                return {c: list(st.session_state.get(f"taste_rcp_{draw}_{c}", [])) for c in TASTE_CATEGORIES
+                        if st.session_state.get(f"taste_rcp_{draw}_{c}")}
+
+            def _write_premise_cb():
+                current = _current_recipe()
+                chapters = _clamp_int((st.session_state.get("setup_snapshot") or {}).get("num_chapters"), 3, 15, 7)
+                result = generate_taste_premise(current, st.session_state.writer_model, chapters)
+                if "error" in result:
+                    st.session_state.taste_error = result["error"]
+                else:
+                    st.session_state.taste_result = result
+                    st.session_state.taste_premise_text = result["premise"]
+                    st.session_state.pop("taste_error", None)
+
+            if recipe:
+                st.markdown("**Ingredients** - change anything before writing.")
+                cols = st.columns(2)
+                for i, (category, spec) in enumerate(TASTE_CATEGORIES.items()):
+                    options = list(dict.fromkeys(
+                        [t["name"] for t in profile[category] if t["pref"] != "banned"]
+                        + taste_options(category) + recipe.get(category, [])))
+                    cols[i % 2].multiselect(spec["label"], options, default=recipe.get(category, []),
+                                            max_selections=spec["max"], key=f"taste_rcp_{draw}_{category}")
+                st.button("✍️ Write premise", type="primary", disabled=not _current_recipe(),
+                          on_click=_write_premise_cb,
+                          help=f"Two calls to the Writer Model ({st.session_state.writer_model}): the premise, "
+                               "then the setup fields read off it.")
+
+            if st.session_state.get("taste_error"):
+                st.error(st.session_state.pop("taste_error"))
+
+            result = st.session_state.get("taste_result")
+            if result:
+                st.markdown("---")
+                st.subheader("Premise")
+                st.text_area("Premise", key="taste_premise_text", height=240, label_visibility="collapsed")
+                cast = result["cast"]
+                left, right = st.columns(2)
+                with left:
+                    st.markdown(
+                        f"- **Genre:** {cast['genre'] or 'Random'}\n"
+                        f"- **Mechanism:** {cast['mc_method'] or 'Random'}\n"
+                        f"- **POV:** {cast['pov']}\n"
+                        f"- **Pacing:** {cast['pacing']}\n"
+                        f"- **Onset:** {cast['transform_onset']} ({cast.get('onset_label', 'Mid')})")
+                    antag = cast['antagonist']
+                    st.markdown(f"- **Antagonist:** {antag['name'] or 'Unnamed'} ({antag['gender']})"
+                                + (f" — {antag['info']}" if antag.get('info') else "")
+                                if antag.get('include') else "- **Antagonist:** none")
+                with right:
+                    for p in cast['protagonists']:
+                        st.markdown(f"**{p['name'] or 'Unnamed'}** ({p['gender']}) — changes: {p['change_type']}")
+                        if p.get('info'):
+                            st.caption(p['info'])
+                        if p.get('kinks'):
+                            st.caption(f"Kinks: {format_kink_list(p['kinks'])}")
+                        if p.get('body_details'):
+                            st.caption("Body: " + "; ".join(f"{b['part']} [{b['intensity']}]" for b in p['body_details']))
+
+                g1, g2 = st.columns(2)
+                if g1.button("🎬 Send to Setup", type="primary", use_container_width=True,
+                             help="Fills the whole setup screen. Chapter count, word count and style stay as they are."):
+                    push_cast_to_setup(st.session_state.taste_premise_text, cast)
+                    st.session_state.step = "setup"
+                    st.rerun()
+                g2.button("🔁 Rewrite with these ingredients", use_container_width=True,
+                          on_click=_write_premise_cb, disabled=not _current_recipe())
+
+                s1, s2 = st.columns([2, 3])
+                save_rating = s1.selectbox("Rate it", RATING_CHOICES, format_func=RATING_LABELS.get,
+                                           key="taste_save_rating")
+                s2.markdown("<br>", unsafe_allow_html=True)
+                if s2.button("💾 Save to my concepts", use_container_width=True,
+                             help="Adds this premise to your concepts, tagged with its ingredients, so its rating "
+                                  "feeds back into future draws."):
+                    if save_generated_concept(result, st.session_state.taste_premise_text, save_rating):
+                        st.success("Saved to your concepts.")
+                    else:
+                        st.info("This premise is already in your concepts.")
 
 # --- UI STEP 5: HISTORY ---
 elif st.session_state.step == "history":

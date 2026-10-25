@@ -410,9 +410,12 @@ CREATE TABLE IF NOT EXISTS taste_tags (
 CREATE TABLE IF NOT EXISTS concept_tags (
     concept_id  INTEGER NOT NULL,
     tag_id      INTEGER NOT NULL,
+    origin      TEXT DEFAULT 'model',
     PRIMARY KEY (concept_id, tag_id)
 );
 """
+# concept_tags.origin: 'model' (read off the text), 'config' (picked on the setup screen of an imported
+# run) or 'manual' (added by the user). Re-tagging replaces only 'model' links.
 
 LIST_COLUMNS = (
     "id, created_at, origin, parent_id, title, seed, genre, writer_model, editor_model, "
@@ -476,6 +479,9 @@ def init_history_db():
             name = line.split()[0]
             if name.isidentifier() and name not in existing and name != 'id':
                 conn.execute(f"ALTER TABLE stories ADD COLUMN {line}")
+        link_columns = {row[1] for row in conn.execute("PRAGMA table_info(concept_tags)").fetchall()}
+        if "origin" not in link_columns:
+            conn.execute("ALTER TABLE concept_tags ADD COLUMN origin TEXT DEFAULT 'model'")
         conn.commit()
     finally:
         conn.close()
@@ -3452,8 +3458,13 @@ TASTE_CATEGORIES = {
               "hint": "The story's genre."},
     "mechanism": {"label": "Transformation mechanism", "list": "mc_methods.txt", "max": 2, "draw": (1, 1),
                   "hint": "What causes the change."},
-    "motif": {"label": "Motifs / kinks", "list": "fetishes.txt", "max": 4, "draw": (1, 3),
-              "hint": "The kinks and motifs the story is built around."},
+    "motif": {"label": "Motifs / kinks", "list": "fetishes.txt", "max": 5, "draw": (1, 3),
+              "hint": "Every listed motif the concept features, main or secondary. A close variant counts as the "
+                      "listed motif (e.g. vaping for a smoking motif)."},
+    "theme": {"label": "Themes & recurring elements", "list": None, "max": 4, "draw": (0, 2),
+              "hint": "Recurring elements, kinks or character types that no list above covers and a reader would "
+                      "seek out again, e.g. 'Vaping', 'MILF / Cougar', 'Age Gap', 'Tattoos'. Include secondary "
+                      "elements, not just the main premise."},
     "body": {"label": "Body focus", "list": "body_parts.txt", "max": 3, "draw": (0, 2),
              "hint": "Physical changes the concept names or clearly implies. Leave empty for mental-only change."},
     "setting": {"label": "Setting", "list": None, "max": 2, "draw": (1, 1),
@@ -3546,12 +3557,15 @@ def _ensure_tag(index, category, name, state):
     return index[key]
 
 
-def _link_tags(concept_id, tag_ids):
+def _link_tags(concept_id, tag_ids, origin="model"):
+    """Link tags to a concept. A manual link replaces whatever was there, so it survives re-tagging;
+    other origins never overwrite an existing link."""
     tag_ids = sorted(set(tag_ids))
     if tag_ids:
-        _db("INSERT OR IGNORE INTO concept_tags (concept_id, tag_id) VALUES "
-            + ", ".join("(?, ?)" for _ in tag_ids),
-            tuple(v for tag_id in tag_ids for v in (concept_id, tag_id)))
+        verb = "INSERT OR REPLACE" if origin == "manual" else "INSERT OR IGNORE"
+        _db(f"{verb} INTO concept_tags (concept_id, tag_id, origin) VALUES "
+            + ", ".join("(?, ?, ?)" for _ in tag_ids),
+            tuple(v for tag_id in tag_ids for v in (concept_id, tag_id, origin)))
 
 
 def clean_tag(category, value):
@@ -3567,20 +3581,23 @@ def clean_tag(category, value):
     return value[:40]
 
 
-def tag_concept(index, concept_id, values_by_category, new_state="new"):
+def tag_concept(index, concept_id, values_by_category, new_state="new", origin="model", capped=True):
     """Attach {category: [values]} to a concept. Existing tags are matched case-insensitively; config
-    values are always accepted, invented open-category tags start as `new_state`."""
+    values are always accepted, invented open-category tags start as `new_state`. Only the model's own
+    output is capped per category - the user's picks must never crowd out what it read in the text."""
     tag_ids = []
     for category, values in (values_by_category or {}).items():
         if category not in TASTE_CATEGORIES:
             continue
         values = values if isinstance(values, list) else [values]
-        for value in values[:TASTE_CATEGORIES[category]["max"]]:
+        if capped:
+            values = values[:TASTE_CATEGORIES[category]["max"]]
+        for value in values:
             name = clean_tag(category, value)
             if name:
                 state = "ok" if TASTE_CATEGORIES[category]["list"] else new_state
                 tag_ids.append(_ensure_tag(index, category, name, state))
-    _link_tags(concept_id, tag_ids)
+    _link_tags(concept_id, tag_ids, origin)
     return len(tag_ids)
 
 
@@ -3613,13 +3630,16 @@ def taste_profile():
 def list_concept_rows():
     concepts = _db("SELECT id, created_at, text, source, story_ids, rating, status, error FROM concepts "
                    "ORDER BY id DESC", fetch='all') or []
-    links = _db("SELECT ct.concept_id, t.category, t.name FROM concept_tags ct "
+    links = _db("SELECT ct.concept_id, ct.origin, t.category, t.name FROM concept_tags ct "
                 "JOIN taste_tags t ON t.id = ct.tag_id", fetch='all') or []
-    tags = {}
+    tags, manual = {}, {}
     for link in links:
         tags.setdefault(link["concept_id"], {}).setdefault(link["category"], []).append(link["name"])
+        if link["origin"] == "manual":
+            manual.setdefault(link["concept_id"], set()).add((link["category"], link["name"]))
     for concept in concepts:
         concept["tags"] = tags.get(concept["id"], {})
+        concept["manual"] = manual.get(concept["id"], set())
     return concepts
 
 
@@ -3643,20 +3663,24 @@ CATEGORIES
 {chr(10).join(lines)}
 
 RULES
-- Tag only what the concept says or clearly implies. An empty list beats a guess.
-- For categories with existing tags: reuse an existing tag whenever it fits, even loosely. Coin a new
-  tag only when none of them fits.
+- Read every concept to the end. Secondary elements matter as much as the main premise: a habit, a
+  character type or a kink that recurs across a reader's concepts is exactly what this profile is for.
+  If the concept features something, tag it - even when it is not the point of the story.
+- Do not invent what is not there. Something the concept merely could involve is not a tag.
+- For categories with existing tags: reuse an existing tag when it means the same thing. When the
+  concept has something none of them captures, coin a new tag - a missing tag hides a taste, while a
+  near-duplicate is easy to merge later.
 - A new tag is a short label of 1-4 words in Title Case, general enough to describe other stories too.
   Never a plot detail or a character name: "Corporate Office", not "Brenda's Office at Nexacorp".
-- Categories with a fixed list take values from that list only, copied exactly.
+- Categories with a fixed list take values from that list only, copied exactly. Anything those lists
+  cannot express goes into "theme" instead of being dropped.
 
 CONCEPTS
 {concepts}
 
 OUTPUT FORMAT - a single JSON object inside the tag, nothing else:
 <tags>
-{{"concepts": [{{"n": 1, "genre": [], "mechanism": [], "motif": [], "body": [], "setting": [], "dynamic": [],
-"archetype": [], "plot": [], "ending": [], "tone": []}}]}}
+{{"concepts": [{{"n": 1, {", ".join(f'"{c}": []' for c in TASTE_CATEGORIES)}}}]}}
 </tags>
 """
 
@@ -3676,12 +3700,23 @@ def parse_json_block(text, tag):
 
 
 def run_taste_job(job, rep):
+    """Tag concepts. With "retag", already-tagged concepts are read again and their model tags replaced;
+    manual and config links stay. Finished concepts are checkpointed, so a resumed job skips them."""
     p = job["payload"]
     model = p["model"]
-    wanted = [int(i) for i in p.get("concept_ids", [])]
-    rows = _db("SELECT id, text, status FROM concepts WHERE status != 'tagged'", fetch='all') or []
-    pending = [(r["id"], r["text"]) for r in rows if r["id"] in set(wanted)]
+    retag = bool(p.get("retag"))
+    state = job["state"] or {}
+    done = set(state.get("done", []))
+    wanted = {int(i) for i in p.get("concept_ids", [])}
+    rows = _db("SELECT id, text, status, story_ids FROM concepts", fetch='all') or []
+    pending = [(r["id"], r["text"]) for r in rows
+               if r["id"] in wanted and r["id"] not in done and (retag or r["status"] != "tagged")]
     preset = {int(k): v for k, v in (p.get("preset") or {}).items()}
+    # History concepts get their setup picks back from the runs they came from, so a re-tag (or a
+    # retry of a failed import) keeps them without the payload having to carry them.
+    for r in rows:
+        if r["id"] in wanted and r["id"] not in preset and r["story_ids"]:
+            preset[r["id"]] = presets_for_story_ids(r["story_ids"])
     total = len(pending)
     if not total:
         rep.log("Nothing left to tag.")
@@ -3714,15 +3749,17 @@ def run_taste_job(job, rep):
                 _db("UPDATE concepts SET status = 'failed', error = ? WHERE id = ?", (why, concept_id))
                 failed += 1
                 continue
-            # Config choices from imported history runs are what the user actually picked, so they
-            # count alongside whatever the model read out of the text.
-            values = {c: list(entry.get(c) or []) for c in TASTE_CATEGORIES}
-            for category, extra in (preset.get(concept_id) or {}).items():
-                values.setdefault(category, [])
-                values[category] = list(dict.fromkeys(list(extra) + values[category]))
-            tag_concept(index, concept_id, values)
+            if retag:
+                _db("DELETE FROM concept_tags WHERE concept_id = ? AND origin = 'model'", (concept_id,))
+            tag_concept(index, concept_id, {c: list(entry.get(c) or []) for c in TASTE_CATEGORIES})
+            # Config choices from imported history runs are what the user actually picked. They are
+            # linked separately and uncapped, so they never take the slots of what the model read.
+            if preset.get(concept_id):
+                tag_concept(index, concept_id, preset[concept_id], origin="config", capped=False)
             _db("UPDATE concepts SET status = 'tagged', error = '' WHERE id = ?", (concept_id,))
+            done.add(concept_id)
             tagged += 1
+        rep.checkpoint({"done": sorted(done)})
         rep.progress((start + len(batch)) / total)
     rep.log(f"Tagged {tagged} concept(s)" + (f"; {failed} failed and can be retried from the Concepts tab."
                                              if failed else "."), "warning" if failed else "info")
@@ -3738,7 +3775,7 @@ def active_taste_job():
     return row["id"] if row else None
 
 
-def launch_tagging(concept_ids, model, preset=None):
+def launch_tagging(concept_ids, model, preset=None, retag=False):
     """Tag concepts in the background. One tagging job at a time, so two jobs never coin the same new
     tag twice."""
     running = active_taste_job()
@@ -3746,11 +3783,44 @@ def launch_tagging(concept_ids, model, preset=None):
         st.session_state.job_notice = (f"Tagging job #{running} is still running - these concepts are saved "
                                        "and can be tagged from the Concepts tab once it has finished.")
         return None
-    return launch_job("taste", f"Tagging {len(concept_ids)} concept(s)",
-                      {"concept_ids": list(concept_ids), "model": model, "preset": preset or {}})
+    title = f"{'Re-tagging' if retag else 'Tagging'} {len(concept_ids)} concept(s)"
+    return launch_job("taste", title, {"concept_ids": list(concept_ids), "model": model,
+                                       "preset": preset or {}, "retag": retag})
 
 
 # --- History import ---
+
+def _config_picks(cfg):
+    """{category: [values]} the user set on a run's setup screen. Only what they chose themselves -
+    "Random" picks say nothing about taste."""
+    picks = {"genre": [], "mechanism": [], "motif": [], "body": []}
+    if cfg.get("genre"):
+        picks["genre"].append(cfg["genre"])
+    if cfg.get("mc_method"):
+        picks["mechanism"].append(cfg["mc_method"])
+    for p in cfg.get("protagonists") or []:
+        picks["motif"] += [k.get("name") for k in normalize_kinks(p.get("kinks") or [])]
+        picks["body"] += [b.get("part") for b in p.get("body_details") or [] if b.get("part")]
+    return {c: v for c, v in picks.items() if v}
+
+
+def presets_for_story_ids(story_ids):
+    """The combined setup picks of the history runs a concept came from ("12,15,30")."""
+    ids = [int(i) for i in str(story_ids or "").split(",") if i.strip().isdigit()]
+    if not ids:
+        return {}
+    rows = _db(f"SELECT config_json FROM stories WHERE id IN ({', '.join('?' for _ in ids)})",
+               tuple(ids), fetch='all') or []
+    combined = {}
+    for row in rows:
+        try:
+            cfg = json.loads(row["config_json"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        for category, values in _config_picks(cfg).items():
+            combined.setdefault(category, []).extend(values)
+    return {c: list(dict.fromkeys(v)) for c, v in combined.items()}
+
 
 def history_concept_groups():
     """Unique Main Story Concepts from history, with the runs that used each. Re-edits are skipped
@@ -3770,21 +3840,13 @@ def history_concept_groups():
         if len(text) < 20:
             continue
         group = groups.setdefault(concept_key(text), {"key": concept_key(text), "text": text, "story_ids": [],
-                                                      "preset": {c: [] for c in PINNED_CATEGORIES}})
+                                                      "preset": {}})
         group["story_ids"].append(row["id"])
-        # Only what the user set themselves - "Random" picks say nothing about taste.
-        picks = group["preset"]
-        if cfg.get("genre"):
-            picks["genre"].append(cfg["genre"])
-        if cfg.get("mc_method"):
-            picks["mechanism"].append(cfg["mc_method"])
-        for p in cfg.get("protagonists") or []:
-            picks["motif"] += [k.get("name") for k in normalize_kinks(p.get("kinks") or [])]
-            picks["body"] += [b.get("part") for b in p.get("body_details") or [] if b.get("part")]
+        for category, values in _config_picks(cfg).items():
+            group["preset"].setdefault(category, []).extend(values)
     result = []
     for group in groups.values():
-        group["preset"] = {c: list(dict.fromkeys(v))[:TASTE_CATEGORIES[c]["max"]]
-                           for c, v in group["preset"].items() if v}
+        group["preset"] = {c: list(dict.fromkeys(v)) for c, v in group["preset"].items() if v}
         group["imported"] = group["key"] in imported
         result.append(group)
     # Texts that differ only by small edits are probably one concept tweaked between runs: flag them
@@ -3809,6 +3871,45 @@ def import_history_groups(groups, rating=""):
 
 # --- Editing the catalogue ---
 
+def set_concept_tags(concept_id, chosen):
+    """Make one concept's tags exactly {category: [names]}, as edited by hand. Added tags become manual
+    links, which re-tagging leaves alone; tags the user removed are unlinked (a re-tag may read a removed
+    one back out of the text)."""
+    index = _tag_index()
+    current = {r["tag_id"] for r in _db("SELECT tag_id FROM concept_tags WHERE concept_id = ?",
+                                        (concept_id,), fetch='all') or []}
+    keep = set()
+    for category, names in chosen.items():
+        for name in names:
+            name = clean_tag(category, name)
+            if name:
+                keep.add(_ensure_tag(index, category, name, "ok"))
+    for tag_id in current - keep:
+        _db("DELETE FROM concept_tags WHERE concept_id = ? AND tag_id = ?", (concept_id, tag_id))
+    _link_tags(concept_id, keep - current, "manual")
+    _db("UPDATE concepts SET status = 'tagged', error = '' WHERE id = ?", (concept_id,))
+
+
+def concepts_matching(keywords):
+    """Concepts whose text contains any of the keywords (comma-separated). A keyword matches at the
+    start of a word, so "vap" finds vape, vaping and vaped but not evaporate."""
+    words = [w.strip() for w in (keywords or "").split(",") if len(w.strip()) >= 2]
+    if not words:
+        return []
+    pattern = re.compile(r"\b(?:" + "|".join(re.escape(w) for w in words) + r")", re.IGNORECASE)
+    return [c for c in list_concept_rows() if pattern.search(c["text"])]
+
+
+def tag_concepts_manually(concept_ids, category, name):
+    """Add one tag to several concepts as a manual link. Returns how many were tagged."""
+    name = clean_tag(category, name)
+    if not name or not concept_ids:
+        return 0
+    tag_id = _ensure_tag(_tag_index(), category, name, "ok")
+    for concept_id in concept_ids:
+        _link_tags(concept_id, [tag_id], "manual")
+    return len(concept_ids)
+
 def merge_tags(category, source_ids, target_name):
     """Fold tags into one, which is created if it does not exist. Concepts keep every link."""
     index = _tag_index()
@@ -3821,8 +3922,8 @@ def merge_tags(category, source_ids, target_name):
     for source in source_ids:
         if source == target:
             continue
-        _db("INSERT OR IGNORE INTO concept_tags (concept_id, tag_id) "
-            "SELECT concept_id, ? FROM concept_tags WHERE tag_id = ?", (target, source))
+        _db("INSERT OR IGNORE INTO concept_tags (concept_id, tag_id, origin) "
+            "SELECT concept_id, ?, origin FROM concept_tags WHERE tag_id = ?", (target, source))
         _db("DELETE FROM concept_tags WHERE tag_id = ?", (source,))
         _db("DELETE FROM taste_tags WHERE id = ?", (source,))
 
@@ -4821,9 +4922,16 @@ elif st.session_state.step == "taste":
             st.info("No concepts yet. Add some under **Concepts**, or bring in your story history under "
                     "**Import history**.")
         else:
-            a1, a2, a3 = st.columns(3)
+            a1, a2, a3, a4 = st.columns(4)
             if tag_untagged_button(a1, "taste_tag_profile"):
                 st.rerun()
+            if a4.button("🔁 Re-tag all concepts", use_container_width=True,
+                         help="Reads every concept again with the current tagging prompt and model and replaces "
+                              "the tags the model gave it. Tags you added by hand, and the setup picks of imported "
+                              "runs, are kept."):
+                all_ids = [r["id"] for r in _db("SELECT id FROM concepts", fetch='all') or []]
+                if launch_tagging(all_ids, taste_model, retag=True):
+                    st.rerun()
             if new_tags and a2.button(f"✅ Accept all {len(new_tags)} new tags", use_container_width=True,
                                       help="Mark every tag the tagging call invented as reviewed."):
                 _db("UPDATE taste_tags SET state = 'ok' WHERE state = 'new'")
@@ -4953,7 +5061,8 @@ elif st.session_state.step == "taste":
                 "Rating": r["rating"] or "—",
                 "Source": r["source"] + (f" · {len(r['story_ids'].split(','))} run(s)" if r["story_ids"] else ""),
                 "Status": r["status"] + (f": {r['error'][:80]}" if r["status"] == "failed" and r["error"] else ""),
-                "Tags": " · ".join(n for names in r["tags"].values() for n in names),
+                "Tags": " · ".join(("✋" if (c, n) in r["manual"] else "") + n
+                                   for c, names in r["tags"].items() for n in names),
                 "Delete": False,
             } for r in shown])
             after = st.data_editor(
@@ -4978,6 +5087,55 @@ elif st.session_state.step == "taste":
                 st.rerun()
             if tag_untagged_button(c2, "taste_tag_concepts"):
                 st.rerun()
+            st.caption("✋ = added by hand. Re-tagging never removes those.")
+
+            vocabulary = taste_profile()
+
+            def tag_options(category, current=()):
+                return list(dict.fromkeys([t["name"] for t in vocabulary[category]] + taste_options(category)
+                                          + list(current)))
+
+            with st.expander("🔎 Tag by keyword - add a tag to every concept that mentions something"):
+                k1, k2, k3 = st.columns([3, 2, 3])
+                keywords = k1.text_input("Keywords (comma separated)", key="taste_kw_words",
+                                         placeholder="vap, smok, cigarette",
+                                         help="Each keyword matches the start of a word: 'vap' finds vape, vaping "
+                                              "and vaped.")
+                kw_category = k2.selectbox("Category", list(TASTE_CATEGORIES), key="taste_kw_cat",
+                                           format_func=lambda c: TASTE_CATEGORIES[c]["label"])
+                pinned = bool(TASTE_CATEGORIES[kw_category]["list"])
+                kw_tag = k3.selectbox("Tag", tag_options(kw_category), index=None, key=f"taste_kw_tag_{kw_category}",
+                                      accept_new_options=not pinned,
+                                      placeholder="Pick from the list" if pinned else "Pick or type a new tag")
+                matches = concepts_matching(keywords)
+                if keywords.strip():
+                    st.caption(f"{len(matches)} concept(s) match.")
+                    for c in matches[:8]:
+                        st.caption(f"#{c['id']} · {c['text'][:140]}…")
+                if st.button(f"🏷️ Add tag to {len(matches)} concept(s)", disabled=not (matches and kw_tag),
+                             key="taste_kw_go"):
+                    added = tag_concepts_manually([c["id"] for c in matches], kw_category, kw_tag)
+                    st.session_state.job_notice = f"Tagged {added} concept(s) with “{kw_tag}”."
+                    st.rerun()
+
+            with st.expander("✏️ Edit one concept's tags"):
+                by_id = {r["id"]: r for r in rows}
+                edit_id = st.selectbox("Concept", list(by_id), key="taste_edit_concept",
+                                       format_func=lambda i: f"#{i} · {by_id[i]['text'][:100]}")
+                if edit_id:
+                    concept = by_id[edit_id]
+                    st.caption(concept["text"])
+                    chosen = {}
+                    cols = st.columns(2)
+                    for i, (category, spec) in enumerate(TASTE_CATEGORIES.items()):
+                        current = concept["tags"].get(category, [])
+                        chosen[category] = cols[i % 2].multiselect(
+                            spec["label"], tag_options(category, current), default=current,
+                            key=f"taste_edit_{edit_id}_{category}", accept_new_options=not spec["list"])
+                    if st.button("💾 Save tags", type="primary", key=f"taste_edit_save_{edit_id}"):
+                        set_concept_tags(edit_id, chosen)
+                        st.session_state.job_notice = f"Saved the tags of concept #{edit_id}."
+                        st.rerun()
 
     elif section == "Import history":
         st.caption("Collects the Main Story Concept of every run in Story History. Re-edits are skipped and "
